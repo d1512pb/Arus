@@ -1,0 +1,33 @@
+# Configuración de despliegue del motor Arus en Fly.io.
+#
+# Si el nombre "arus-engine" ya está tomado globalmente, cámbialo aquí (y usa el
+# nuevo nombre en la URL de Vercel). La región "qro" = Querétaro, México: baja
+# latencia hacia Bitso. Cámbiala si prefieres otra (ej. "mia", "iad").
+
+app = "arus-engine"
+primary_region = "qro"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Servicio HTTP público. Fly termina el TLS y expone https:// y wss:// en el
+# dominio *.fly.dev automáticamente — no hay que configurar certificados.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Mantener el motor SIEMPRE encendido: es un servidor WebSocket de larga vida y
+  # el jurado puede entrar en cualquier momento. (Consume algo del allowance.)
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+# Volumen persistente para el Trade Ledger (SQLite). El motor escribe en ./data
+# relativo a /app, así que montamos el volumen exactamente en /app/data.
+# Crea el volumen antes del primer deploy:  flyctl volumes create arus_data --size 1
+[mounts]
+  source = "arus_data"
+  destination = "/app/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

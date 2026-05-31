@@ -1,0 +1,7 @@
+# No metemos en el contexto de build cosas que no se necesitan / no deben ir.
+data/
+*.exe
+arus-engine
+engine
+tmp
+.git
