@@ -15,7 +15,7 @@
 
 **Autor:** Daniel Peredo Borgonio · **Reto:** CODING_CHALLENGE_MEXICO
 
-🔗 **Demo en vivo:** _(pendiente de despliegue — ver [Despliegue](#-despliegue))_
+🔗 **Demo en vivo:** **[arus-snowy.vercel.app](https://arus-snowy.vercel.app)**  ·  ⚙️ Motor (API): [arus-engine.fly.dev/api/ledger](https://arus-engine.fly.dev/api/ledger)
 
 </div>
 
