@@ -1,11 +1,11 @@
 # Configuración de despliegue del motor Arus en Fly.io.
 #
 # Si el nombre "arus-engine" ya está tomado globalmente, cámbialo aquí (y usa el
-# nuevo nombre en la URL de Vercel). La región "qro" = Querétaro, México: baja
-# latencia hacia Bitso. Cámbiala si prefieres otra (ej. "mia", "iad").
+# nuevo nombre en la URL de Vercel). La región "dfw" = Dallas, EE. UU.: la región
+# mainstream más cercana a México. Cámbiala si prefieres otra (ej. "mia", "iad").
 
 app = "arus-engine"
-primary_region = "qro"
+primary_region = "dfw"
 
 [build]
   dockerfile = "Dockerfile"
