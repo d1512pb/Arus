@@ -830,6 +830,13 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 	sendLog(session, fmt.Sprintf("🧪 [DEMO] INYECCIÓN ACTIVA: %s Spread: +$%.2f | Liquidez: %.4f BTC", exchange, absSpread, liquidity))
 
 	avg := e.Tracker.Average()
+	if avg <= 0 {
+		// Sin histórico de spread (p. ej. un exchange sin feed en la nube): usamos un
+		// baseline conservador. Un spread cross-exchange real es una fracción mínima
+		// del precio, así el Spike Filter sigue bloqueando precios falsos aunque el
+		// tracker esté vacío.
+		avg = getBTCPrice() * 0.0005
+	}
 	factor := 0.0
 	if avg > 0 {
 		factor = absSpread / avg
