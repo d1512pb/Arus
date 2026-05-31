@@ -320,24 +320,40 @@ cd apps/engine && go test -bench=Detection -benchmem -run=^$
 
 ## ☁️ Despliegue
 
-Arquitectura de dos servicios. Stack gratuito recomendado:
+Arquitectura de dos servicios, ambos en tiers gratuitos:
 
 | Componente | Plataforma | Por qué |
 |---|---|---|
 | **Frontend** (Next.js) | **Vercel** | Soporte nativo de Next.js, CI/CD desde Git, HTTPS automático, free tier amplio. |
-| **Motor** (Go + SQLite) | **Railway** | Proceso de larga vida con WebSocket, dominio con TLS (habilita `wss://`) y **volumen persistente** para conservar `ledger.db`. *(Fly.io es alternativa equivalente.)* |
+| **Motor** (Go + SQLite) | **Fly.io** | Proceso de larga vida ideal para WebSocket, dominio `*.fly.dev` con TLS (habilita `wss://` y `https://`) y **volumen persistente** para conservar `ledger.db`. |
 
-> ⚠️ Para que SQLite persista entre reinicios en la nube, monta un **volumen** en la ruta `data/` del motor. Render (free) y Cloud Run no ofrecen disco persistente gratuito, por lo que no se recomiendan para el ledger.
+> ⚠️ Para que SQLite persista entre reinicios en la nube hay que montar un **volumen** en la ruta `data/` del motor. Por eso se usa Fly.io (con volumen) y no Render free / Cloud Run, que no ofrecen disco persistente gratuito.
 
-**Pasos resumidos:**
+El motor se despliega con contenedor: un `Dockerfile` multi-etapa compila un binario **estático** (`CGO_ENABLED=0`, gracias al SQLite en Go puro) y lo coloca sobre una imagen `distroless/static` de ~5 MB. La configuración vive en [`apps/engine/fly.toml`](apps/engine/fly.toml) (puerto interno, `force_https`, máquina siempre encendida y el volumen montado en `/app/data`).
 
-1. **Motor en Railway:** desplegar `apps/engine` (build `go build`, start `./arus-engine`); Railway inyecta `PORT` (ya soportado). Montar volumen en `data/`. Anotar el dominio público (p. ej. `arus-engine.up.railway.app`).
-2. **Frontend en Vercel:** importar `apps/web` y definir las variables de entorno (ver `apps/web/.env.example`):
+### 1) Motor en Fly.io
+
+```bash
+# Instalar la CLI (Windows PowerShell):  iwr https://fly.io/install.ps1 -useb | iex
+flyctl auth login
+cd apps/engine
+flyctl apps create arus-engine                              # nombre único global
+flyctl volumes create arus_data --size 1 --region dfw --yes # volumen del ledger
+flyctl deploy                                               # build Docker + arranque
+```
+
+Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`.
+
+### 2) Frontend en Vercel
+
+1. *Add New → Project* → importar el repo de GitHub.
+2. **Root Directory → `apps/web`** (paso crítico por ser monorepo).
+3. *Environment Variables* (ver [`apps/web/.env.example`](apps/web/.env.example)), apuntando al dominio del motor:
    ```
-   NEXT_PUBLIC_ENGINE_WS_URL=wss://arus-engine.up.railway.app/ws
-   NEXT_PUBLIC_ENGINE_HTTP_URL=https://arus-engine.up.railway.app
+   NEXT_PUBLIC_ENGINE_WS_URL=wss://arus-engine.fly.dev/ws
+   NEXT_PUBLIC_ENGINE_HTTP_URL=https://arus-engine.fly.dev
    ```
-3. Abrir la URL de Vercel — el dashboard se conecta al motor por `wss://` y lee el ledger por `https://`.
+4. **Deploy**. Al abrir la URL de Vercel, el dashboard se conecta al motor por `wss://` y lee el ledger por `https://`.
 
 ---
 
