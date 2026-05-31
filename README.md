@@ -36,6 +36,7 @@
 11. [Despliegue](#-despliegue)
 12. [Roadmap](#-roadmap)
 13. [Capturas de pantalla](#-capturas-de-pantalla)
+14. [Licencia](#-licencia)
 
 ---
 
@@ -391,6 +392,12 @@ Cuando un exchange se queda sin saldo y el préstamo automático está apagado, 
 <td width="58%" valign="top"><img src="assets/Modo_de_pruebas_del_bot.png" alt="Modo de pruebas / simulador"><br><sub>Simulador: inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver al Spike Filter y a la lógica de crédito en acción.</sub></td>
 </tr>
 </table>
+
+---
+
+## 📄 Licencia
+
+Este proyecto se distribuye bajo la **licencia MIT** — eres libre de usar, copiar, modificar y distribuir el código, citando la autoría. El texto completo está en el archivo [`LICENSE`](LICENSE).
 
 ---
 
