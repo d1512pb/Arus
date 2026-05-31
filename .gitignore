@@ -1,0 +1,35 @@
+# Go — binarios compilados
+apps/engine/*.exe
+apps/engine/arus-engine
+apps/engine/engine
+apps/engine/tmp
+
+# Persistencia local (SQLite) — no versionar la base de datos
+apps/engine/data/
+
+# Node / Next.js
+node_modules/
+apps/web/.next/
+apps/web/out/
+apps/web/.vercel/
+apps/web/next-env.d.ts
+apps/web/tsconfig.tsbuildinfo
+
+# Variables de entorno (secretos / config local)
+# Nota: .env.example SÍ se versiona (es documentación, no contiene secretos).
+.env
+.env.local
+.env*.local
+
+# Herramientas de IA / asistentes (no relevante para el jurado)
+.claude/
+
+# Editores / IDEs
+.vscode/
+.idea/
+*.swp
+
+# Logs y sistema
+*.log
+.DS_Store
+Thumbs.db

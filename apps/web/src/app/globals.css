@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark, .dark *));
+
+@keyframes fade-in-up {
+  0% { opacity: 0; transform: translateY(20px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  opacity: 0;
+  animation: fade-in-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes modal-scale {
+  0% { opacity: 0; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.animate-modal-scale {
+  opacity: 0;
+  animation: modal-scale 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes new-trade {
+  0% { background-color: rgba(16, 185, 129, 0.15); transform: translateX(-15px); opacity: 0; }
+  100% { background-color: transparent; transform: translateX(0); opacity: 1; }
+}
+.animate-new-trade {
+  animation: new-trade 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes pulse-border {
+  0% { border-color: rgba(16, 185, 129, 0.1); }
+  50% { border-color: rgba(16, 185, 129, 0.5); }
+  100% { border-color: rgba(16, 185, 129, 0.1); }
+}
+.animate-pulse-border {
+  animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
