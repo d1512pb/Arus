@@ -62,6 +62,14 @@ type ClientSession struct {
 	ReplenishExpiresAt       time.Time
 	InsufficientFundsPending bool
 	LastTradeTime            time.Time
+
+	// IsExecuting serializa la ejecución por sesión: se fija bajo el mismo lock que valida
+	// el cooldown, de modo que solo una goroutine puede operar a la vez por sesión (cierra
+	// el race de sobre-trading donde dos ticks ejecutaban dos trades simultáneos).
+	IsExecuting bool
+	// PausedUntil bloquea la operativa de la sesión hasta este instante; lo fija el circuit
+	// breaker cuando una orden Fill-or-Kill falla, para no reintentar contra un libro roto.
+	PausedUntil time.Time
 }
 
 func (s *ClientSession) IsInitialized() bool {

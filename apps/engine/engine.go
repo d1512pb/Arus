@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -20,7 +21,24 @@ const (
 	// top-of-book: consume varios niveles, empeorando el precio promedio de ejecución.
 	// Lo estimamos como un % (puntos base) sobre el notional ejecutado en CADA exchange.
 	SlippageRate = 0.0005 // 5 bps por pierna
+
+	// OrderFailureProbability modela una "Falla de Orden Parcial" (Fill-or-Kill): con esta
+	// probabilidad, la orden de mercado en el exchange remoto NO se llena. Es un escenario
+	// adverso deliberado para ejercitar el circuit breaker: al fallar, abortamos el trade
+	// ANTES de tocar ninguna wallet (atómico, cero exposición direccional) y pausamos.
+	OrderFailureProbability = 0.05 // 5 % de Fill-or-Kill por orden
+
+	// OrderFailurePause es cuánto se pausa la sesión tras un Fill-or-Kill fallido, para no
+	// reintentar a ciegas contra un libro que está rechazando liquidez en ese instante.
+	OrderFailurePause = 2 * time.Second
 )
+
+// orderFails simula una Falla de Orden Parcial (Fill-or-Kill): devuelve true con
+// OrderFailureProbability. Se evalúa JUSTO antes de mover wallets, de modo que un
+// fallo aborta la operación sin dejar estado a medias (sin exposición direccional).
+func orderFails() bool {
+	return rand.Float64() < OrderFailureProbability
+}
 
 // estimateSlippage devuelve el costo estimado de slippage para una operación que
 // compra `volume` BTC a buyPrice y vende `volume` BTC a sellPrice. Se descuenta del
@@ -66,6 +84,7 @@ func getLevel(msg string) string {
 	if strings.Contains(msg, "[ARBITRAJE]") { return "arb" }
 	if strings.Contains(msg, "SPIKE ALERTA") { return "spike_warn" }
 	if strings.Contains(msg, "SPIKE BLOQUEADO") { return "spike_block" }
+	if strings.Contains(msg, "CIRCUIT BREAKER") { return "spike_block" }
 	if strings.Contains(msg, "[EN ESPERA]") { return "waiting" }
 	return "info"
 }
@@ -340,12 +359,34 @@ func (e *HFTEngine) executeForSession(session *ClientSession, binAsk, binBid, bi
 		session.Mu.Unlock()
 		return
 	}
+	// Serialización por sesión: el flag IsExecuting se evalúa y se fija bajo el MISMO
+	// lock que valida el cooldown. Esto cierra la ventana TOCTOU que permitía a dos
+	// goroutines del mismo tick pasar ambas el cooldown y ejecutar dos trades: mientras
+	// una ejecución está en curso, los ticks siguientes de esta sesión se descartan.
+	if session.IsExecuting {
+		session.Mu.Unlock()
+		return
+	}
+	// Pausa activa tras un circuit breaker (Fill-or-Kill fallido): no operar hasta vencer.
+	if time.Now().Before(session.PausedUntil) {
+		session.Mu.Unlock()
+		return
+	}
 	if time.Since(session.LastTradeTime) < 3*time.Second {
 		session.Mu.Unlock()
 		return
 	}
-
+	session.IsExecuting = true
 	session.Mu.Unlock()
+
+	// Liberamos el "candado lógico" pase lo que pase (trade ejecutado, fondos
+	// insuficientes, circuit breaker o early-return): garantiza que un fallo no deje
+	// la sesión bloqueada para siempre.
+	defer func() {
+		session.Mu.Lock()
+		session.IsExecuting = false
+		session.Mu.Unlock()
+	}()
 
 	binanceTakerFee := 0.001
 	bitsoTakerFee := 0.0065
@@ -403,6 +444,18 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 	if !e.sessionHasFundsForTrade(session, buyEx, sellEx, volume, buyPrice) {
 		sendLog(session, fmt.Sprintf("🛑 [BLOQUEADO] Fondos insuficientes en %s/%s — operación rechazada (sin saldos negativos).", buyEx, sellEx))
 		e.handleLiquidityShortfall(session, netProfit)
+		return
+	}
+
+	// Circuit breaker (Fill-or-Kill): con OrderFailureProbability la orden remota no se
+	// llena. Como todavía NO hemos tocado ninguna wallet, abortar aquí es atómico (cero
+	// exposición direccional: nunca quedamos comprados en una pierna sin vender la otra).
+	// Pausamos la sesión para no martillar un libro que está rechazando liquidez.
+	if orderFails() {
+		session.Mu.Lock()
+		session.PausedUntil = time.Now().Add(OrderFailurePause)
+		session.Mu.Unlock()
+		sendLog(session, "🔌 [CIRCUIT BREAKER] Fallo de liquidez en exchange remoto, abortando para evitar exposición direccional")
 		return
 	}
 
@@ -897,6 +950,17 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 
 		if netProfit <= 0 {
 			sendLog(session, fmt.Sprintf("⚠️ [DEMO] Spread insuficiente para chunk de %.4f BTC. Abortando.", chunkSize))
+			break
+		}
+
+		// Mismo circuit breaker que en el camino real: 5 % de Fill-or-Kill por chunk.
+		// Aún no se ha movido ninguna wallet, así que abortar es atómico; pausamos la
+		// sesión y cortamos la inyección para no exponernos en una sola pierna.
+		if orderFails() {
+			session.Mu.Lock()
+			session.PausedUntil = time.Now().Add(OrderFailurePause)
+			session.Mu.Unlock()
+			sendLog(session, "🔌 [CIRCUIT BREAKER] Fallo de liquidez en exchange remoto, abortando para evitar exposición direccional")
 			break
 		}
 

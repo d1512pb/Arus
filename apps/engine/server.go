@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -164,6 +165,10 @@ func ledgerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// generateUUID devuelve un identificador de sesión único. Antes usaba
+// time.Now().UnixNano(), que colisiona si dos clientes conectan en el mismo
+// nanosegundo (una sesión pisaría a la otra en el Hub). uuid.NewString() (UUID v4,
+// aleatorio) elimina ese riesgo de colisión bajo conexiones simultáneas.
 func generateUUID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uuid.NewString()
 }
