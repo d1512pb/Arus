@@ -333,6 +333,10 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 	states := make(map[string]*venueTickState)
 	lastLogTime := time.Now()
 	lastStaleLog := time.Time{}
+	// Fees de referencia del registro, resueltos UNA vez fuera del hot loop
+	// (defaultTakerFees construye un mapa nuevo por llamada — no per-tick).
+	refFees := defaultTakerFees()
+	refBinanceFee, refBitsoFee := refFees["Binance"], refFees["Bitso"]
 
 	for tick := range priceChan {
 		st, ok := states[tick.Exchange]
@@ -398,9 +402,9 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 		baseVolume := DefaultMaxOrderSizeBTC
 		var grossOp, fees, slippageOp, netOp float64
 		if grossSpread1 > grossSpread2 {
-			grossOp, fees, slippageOp, netOp = computeNetProfit(bin.book.Ask, bit.book.Bid, baseVolume, defaultTakerFees()["Binance"], defaultTakerFees()["Bitso"], DefaultSlippageRate)
+			grossOp, fees, slippageOp, netOp = computeNetProfit(bin.book.Ask, bit.book.Bid, baseVolume, refBinanceFee, refBitsoFee, DefaultSlippageRate)
 		} else {
-			grossOp, fees, slippageOp, netOp = computeNetProfit(bit.book.Ask, bin.book.Bid, baseVolume, defaultTakerFees()["Bitso"], defaultTakerFees()["Binance"], DefaultSlippageRate)
+			grossOp, fees, slippageOp, netOp = computeNetProfit(bit.book.Ask, bin.book.Bid, baseVolume, refBitsoFee, refBinanceFee, DefaultSlippageRate)
 		}
 
 		isSpiked := false
@@ -612,6 +616,13 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	session.Mu.Lock()
 
+	// Guarda defensiva: una acción (wait_rebalance) que llegue antes de init_session
+	// no debe operar sobre wallets inexistentes.
+	if session.Wallets == nil {
+		session.Mu.Unlock()
+		return
+	}
+
 	if session.Credit.Active && session.Credit.BorrowedUSD != nil {
 		for ex, amt := range session.Credit.BorrowedUSD {
 			session.Wallets[ex].USD -= amt
@@ -795,6 +806,12 @@ func calculateCreditCost(usdBorrowed float64) float64 {
 func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	s.Mu.Lock()
 	if s.Credit.Active {
+		s.Mu.Unlock()
+		return
+	}
+	// Guarda defensiva: request_credit antes de init_session no debe tocar wallets
+	// inexistentes (el frontend legítimo nunca lo envía, pero el backend no confía).
+	if s.Wallets == nil {
 		s.Mu.Unlock()
 		return
 	}

@@ -67,7 +67,7 @@ const (
 	MaxTakerFee             = 0.05 // 5 %: por encima de esto es un error, no una comisión
 	MinNetProfitFloor       = 0.0
 	MaxNetProfitCeil        = 1e6
-	MinOrderSizeBTC         = 0.0001 // dust mínimo operable
+	MinOrderSizeBTC         = 0.0005 // = MinExecutableVolumeBTC: un tope menor jamás ejecutaría
 	MaxOrderSizeCapBTC      = 10.0   // mismo tope que el simulador
 	MinSlippageRate         = 0.0
 	MaxSlippageRate         = 0.01 // 100 bps por pierna: más que eso no es slippage, es un mercado roto

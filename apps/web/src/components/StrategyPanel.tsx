@@ -127,7 +127,7 @@ export function StrategyPanel({ params, onApply }: Props) {
             </div>
             <div>
               <label className={labelCls}>Orden máxima (BTC)</label>
-              <input type="number" step="0.001" min="0.0001" max="10" value={form.maxOrder}
+              <input type="number" step="0.001" min="0.0005" max="10" value={form.maxOrder}
                 onChange={e => edit({ maxOrder: e.target.value })} className={`${inputCls} mt-1`} />
               <p className={hintCls}>Tope por operación. El bot además se ajusta a la liquidez real disponible en cada casa de cambio.</p>
             </div>
