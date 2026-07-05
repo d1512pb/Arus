@@ -32,6 +32,56 @@ const (
 	RebalanceDurationMinutes = 1.0 // demo: en producción el traslado entre exchanges tarda ~30+ min
 )
 
+// Parámetros de trading por defecto. Son la ÚNICA fuente de verdad de los números del
+// motor: TradingParameters se inicializa a partir de ellos en cada sesión, y el bucle de
+// detección compartido (Start) los usa directamente (corre pre-fan-out, sin una sesión a
+// la cual atribuir parámetros). Antes estaban como literales sueltos repetidos ~15 veces.
+const (
+	DefaultBinanceTakerFee    = 0.001   // taker fee de Binance (0.10 %)
+	DefaultBitsoTakerFee      = 0.0065  // taker fee de Bitso (0.65 %)
+	DefaultMinNetProfitUSD    = 0.10    // umbral de viabilidad: solo ejecuta si el neto supera esto
+	DefaultBaseOrderSize      = 0.005   // tamaño base de orden por evaluación (BTC)
+	DefaultSpikeTickDeviation = 0.05    // variación máx. tick-a-tick antes de descartar por Spike Filter
+	DefaultMaxDivergenceRatio = 1.20    // compuerta de cordura: rechaza si un precio supera al otro en >20 %
+	DefaultBTCPriceFallback   = 60000.0 // precio BTC de respaldo cuando aún no hay feed de Binance
+)
+
+// Límites de validación de entradas del cliente (defensa del backend: el frontend ya
+// valida, pero el servidor NUNCA debe confiar en el cliente).
+const (
+	MaxInitialUSD    = 1e12 // tope sano de capital inicial en USD
+	MaxInitialBTC    = 1e6  // tope sano de capital inicial en BTC
+	MaxDemoLiquidity = 10.0 // BTC: igual al máximo del frontend; evita bucles de chunks gigantes que cuelguen al motor
+	MaxDemoSpreadUSD = 1e7  // tope de |spread| inyectable en el simulador
+)
+
+// TradingParameters agrupa los parámetros de negocio que gobiernan una sesión. Vive
+// dentro de ClientSession para habilitar tuning POR SESIÓN: un próximo sprint expondrá
+// estos campos a la UI. Se fija UNA sola vez al crear la sesión (wsHandler) con
+// DefaultTradingParameters() y es INMUTABLE durante su vida — por eso el hot path lo lee
+// sin lock. Cuando la UI permita editarlo, esas escrituras (y sus lecturas) deberán
+// sincronizarse con session.Mu.
+type TradingParameters struct {
+	BinanceTakerFee    float64 `json:"binance_taker_fee"`
+	BitsoTakerFee      float64 `json:"bitso_taker_fee"`
+	MinNetProfitUSD    float64 `json:"min_net_profit_usd"`
+	BaseOrderSize      float64 `json:"base_order_size"`
+	SpikeTickDeviation float64 `json:"spike_tick_deviation"`
+	MaxDivergenceRatio float64 `json:"max_divergence_ratio"`
+}
+
+// DefaultTradingParameters devuelve los parámetros por defecto del concurso.
+func DefaultTradingParameters() TradingParameters {
+	return TradingParameters{
+		BinanceTakerFee:    DefaultBinanceTakerFee,
+		BitsoTakerFee:      DefaultBitsoTakerFee,
+		MinNetProfitUSD:    DefaultMinNetProfitUSD,
+		BaseOrderSize:      DefaultBaseOrderSize,
+		SpikeTickDeviation: DefaultSpikeTickDeviation,
+		MaxDivergenceRatio: DefaultMaxDivergenceRatio,
+	}
+}
+
 type CreditState struct {
 	Active          bool
 	AutoMode        bool
@@ -58,6 +108,11 @@ type ClientSession struct {
 	InitialUSD     float64
 	InitialBTC     float64
 	InitialWealth  float64 // base en USD para el PnL; escalar estable (no se revalúa con el precio)
+	// Params son los parámetros de trading de ESTA sesión (fees, umbrales, tamaño de
+	// orden…). Se fijan UNA vez al crear la sesión (wsHandler) con DefaultTradingParameters()
+	// y la lógica de ejecución los lee en vez de números mágicos. Inmutables durante la vida
+	// de la sesión (reset_session NO los reescribe) → lectura sin lock segura en el hot path.
+	Params         TradingParameters
 	IsReplenishing           bool
 	ReplenishExpiresAt       time.Time
 	InsufficientFundsPending bool

@@ -114,8 +114,13 @@ func insertTradeRecord(rec TradeRecord) error {
 	return err
 }
 
-// getRecentTrades devuelve los últimos `limit` registros, del más reciente al más antiguo.
-func getRecentTrades(limit int) ([]TradeRecord, error) {
+// getTradesForSession devuelve los últimos `limit` registros de UNA sesión, del más
+// reciente al más antiguo. El filtro WHERE session_id = ? usa un placeholder
+// parametrizado de database/sql (no concatenación de strings): inmune a inyección SQL.
+//
+// Sustituye al antiguo getRecentTrades (que devolvía TODAS las sesiones): así no queda
+// ningún camino de código capaz de filtrar trades entre sesiones (Hallazgo #1).
+func getTradesForSession(sessionID string, limit int) ([]TradeRecord, error) {
 	if ledgerDB == nil {
 		return []TradeRecord{}, nil
 	}
@@ -127,8 +132,9 @@ func getRecentTrades(limit int) ([]TradeRecord, error) {
 		`SELECT id, session_id, timestamp, buy_exchange, sell_exchange,
 		        volume_btc, spread_usd, net_profit_usd, is_credit_injection
 		 FROM trade_records
+		 WHERE session_id = ?
 		 ORDER BY id DESC
-		 LIMIT ?`, limit,
+		 LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
 		return nil, err

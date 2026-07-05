@@ -18,9 +18,11 @@ func BenchmarkOpportunityDetection(b *testing.B) {
 	// Precios representativos de BTC/USD con una pequeña divergencia entre exchanges.
 	binAsk, binBid := 73_810.50, 73_805.20
 	bitAsk, bitBid := 73_790.10, 73_784.80
-	const baseVolume = 0.005
-	const binanceTakerFee = 0.001
-	const bitsoTakerFee = 0.0065
+	// Mismas constantes que usa el motor (single source of truth): el bench mide el hot
+	// path real, no una copia con números a mano.
+	const baseVolume = DefaultBaseOrderSize
+	const binanceTakerFee = DefaultBinanceTakerFee
+	const bitsoTakerFee = DefaultBitsoTakerFee
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -55,7 +57,7 @@ func BenchmarkOpportunityDetection(b *testing.B) {
 
 		// 4) Neto y decisión de viabilidad (incluye corte por spike).
 		netOp := grossSpread*baseVolume - fees - slippage
-		viable := netOp > 0.10 && factor <= SpikeBlockMultiplier
+		viable := netOp > DefaultMinNetProfitUSD && factor <= SpikeBlockMultiplier
 
 		if viable {
 			sink += netOp
