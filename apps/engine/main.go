@@ -37,7 +37,9 @@ func main() {
 
 	go engine.Start(priceChan, hub)
 
-	go StartRealMarketWS(priceChan)
+	// Ingesta desacoplada: cada venue registrado (venues.go) arranca su FeedAdapter
+	// (feed.go) y publica ticks normalizados en el mismo canal.
+	StartFeeds(priceChan)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Error crítico al levantar servidor: %v", err)

@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -15,12 +16,6 @@ import (
 const (
 	SpikeWarnMultiplier  = 15.0
 	SpikeBlockMultiplier = 50.0
-
-	// SlippageRate modela el deslizamiento de precio (slippage) estimado por pierna.
-	// En un libro de órdenes real, una orden de mercado no se llena por completo en el
-	// top-of-book: consume varios niveles, empeorando el precio promedio de ejecución.
-	// Lo estimamos como un % (puntos base) sobre el notional ejecutado en CADA exchange.
-	SlippageRate = 0.0005 // 5 bps por pierna
 
 	// OrderFailureProbability modela una "Falla de Orden Parcial" (Fill-or-Kill): con esta
 	// probabilidad, la orden de mercado en el exchange remoto NO se llena. Es un escenario
@@ -40,15 +35,45 @@ func orderFails() bool {
 	return rand.Float64() < OrderFailureProbability
 }
 
-// estimateSlippage devuelve el costo estimado de slippage para una operación que
-// compra `volume` BTC a buyPrice y vende `volume` BTC a sellPrice. Se descuenta del
-// neto ANTES de decidir, para no ejecutar oportunidades que son rentables en bruto
-// pero que el deslizamiento vuelve negativas.
-func estimateSlippage(buyPrice, sellPrice, volume float64) float64 {
-	return (buyPrice + sellPrice) * volume * SlippageRate
+// computeNetProfit es LA fórmula institucional de rentabilidad — la única fuente de
+// verdad del motor. Toda decisión de ejecutar (bucle de referencia, ejecución por
+// sesión, simulador y benchmark) pasa por aquí:
+//
+//	Neto = (P_venta × V × (1 − fee_venta)) − (P_compra × V × (1 + fee_compra)) − Slippage
+//
+// que equivale a: bruto − fees − slippage, con el fee de compra ENCARECIENDO el
+// costo y el de venta REDUCIENDO el ingreso, tal como cobra cada exchange.
+// Devuelve el desglose completo para que cada evaluación sea auditable en la UI.
+func computeNetProfit(buyPrice, sellPrice, volume, feeBuy, feeSell, slippageRate float64) (gross, fees, slippage, net float64) {
+	gross = (sellPrice - buyPrice) * volume
+	fees = (buyPrice*feeBuy + sellPrice*feeSell) * volume
+	slippage = estimateSlippage(buyPrice, sellPrice, volume, slippageRate)
+	net = gross - fees - slippage
+	return gross, fees, slippage, net
 }
 
+// estimateSlippage devuelve el costo estimado de deslizamiento para una operación
+// que compra y vende `volume` BTC. En un libro real, una orden de mercado no se
+// llena íntegra en el top-of-book: consume varios niveles y empeora el precio
+// promedio. Lo modelamos como slippageRate (fracción por pierna, configurable por
+// el usuario desde el panel de estrategia) sobre el notional de CADA pierna, y se
+// descuenta ANTES de decidir.
+func estimateSlippage(buyPrice, sellPrice, volume, slippageRate float64) float64 {
+	return (buyPrice + sellPrice) * volume * slippageRate
+}
+
+// creditWorthIt es la inecuación de dominancia del crédito: endeudarse solo si la
+// ganancia proyectada supera el costo del préstamo multiplicado por el apetito de
+// riesgo del usuario (1 = punto de equilibrio; 5 = exigir cubrir 5× el costo).
+func creditWorthIt(projectedProfit, creditCost, riskMultiplier float64) bool {
+	return projectedProfit > creditCost*riskMultiplier
+}
+
+// SpreadTracker mantiene la media móvil del spread para el Spike Filter.
+// Protegido con mutex: lo escribe el bucle de detección y lo leen las goroutines
+// del simulador (runDemoInjection) concurrentemente.
 type SpreadTracker struct {
+	mu         sync.Mutex
 	recent     []float64
 	maxSamples int
 }
@@ -58,13 +83,17 @@ func NewSpreadTracker() *SpreadTracker {
 }
 
 func (s *SpreadTracker) Add(spread float64) {
+	s.mu.Lock()
 	s.recent = append(s.recent, spread)
 	if len(s.recent) > s.maxSamples {
 		s.recent = s.recent[1:]
 	}
+	s.mu.Unlock()
 }
 
 func (s *SpreadTracker) Average() float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.recent) == 0 {
 		return 0
 	}
@@ -80,12 +109,27 @@ type HFTEngine struct {
 }
 
 func getLevel(msg string) string {
-	if strings.Contains(msg, "[OPORTUNIDAD]") { return "opportunity" }
-	if strings.Contains(msg, "[ARBITRAJE]") { return "arb" }
-	if strings.Contains(msg, "SPIKE ALERTA") { return "spike_warn" }
-	if strings.Contains(msg, "SPIKE BLOQUEADO") { return "spike_block" }
-	if strings.Contains(msg, "CIRCUIT BREAKER") { return "spike_block" }
-	if strings.Contains(msg, "[EN ESPERA]") { return "waiting" }
+	if strings.Contains(msg, "[OPORTUNIDAD]") {
+		return "opportunity"
+	}
+	if strings.Contains(msg, "[ARBITRAJE]") {
+		return "arb"
+	}
+	if strings.Contains(msg, "SPIKE ALERTA") {
+		return "spike_warn"
+	}
+	if strings.Contains(msg, "FEED CONGELADO") {
+		return "spike_warn"
+	}
+	if strings.Contains(msg, "SPIKE BLOQUEADO") {
+		return "spike_block"
+	}
+	if strings.Contains(msg, "CIRCUIT BREAKER") {
+		return "spike_block"
+	}
+	if strings.Contains(msg, "[EN ESPERA]") {
+		return "waiting"
+	}
 	return "info"
 }
 
@@ -125,13 +169,10 @@ func isValidTick(newPrice, lastPrice, maxDeviation float64) bool {
 }
 
 func getBTCPrice() float64 {
-	btcPrice := DefaultBTCPriceFallback
-	currentMarket.mu.Lock()
-	if currentMarket.BinanceAsk > 0 {
-		btcPrice = currentMarket.BinanceAsk
+	if book, ok := currentMarket.Get("Binance"); ok && book.Ask > 0 {
+		return book.Ask
 	}
-	currentMarket.mu.Unlock()
-	return btcPrice
+	return DefaultBTCPriceFallback
 }
 
 func clampWallet(w *Wallet) {
@@ -144,15 +185,8 @@ func clampWallet(w *Wallet) {
 }
 
 func (e *HFTEngine) sessionHasFundsForTrade(session *ClientSession, buyEx, sellEx string, volume, buyPrice float64) bool {
-	binanceTakerFee := session.Params.BinanceTakerFee
-	bitsoTakerFee := session.Params.BitsoTakerFee
-
-	var requiredUSD float64
-	if buyEx == "Binance" {
-		requiredUSD = buyPrice * volume * (1 + binanceTakerFee)
-	} else {
-		requiredUSD = buyPrice * volume * (1 + bitsoTakerFee)
-	}
+	p := session.Params()
+	requiredUSD := buyPrice * volume * (1 + p.takerFee(buyEx))
 
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
@@ -249,115 +283,192 @@ func sendWalletUpdate(s *ClientSession) {
 	sendEvent(s, ev)
 }
 
+// sendArbExecuted emite el evento arbitrage_executed con el estado de wallets al
+// momento (única definición del payload: la usan el camino real y el simulador).
+func sendArbExecuted(session *ClientSession, buyEx, sellEx string, volume, netProfit float64) {
+	payload := map[string]interface{}{
+		"event":          "arbitrage_executed",
+		"exchange_buy":   buyEx,
+		"exchange_sell":  sellEx,
+		"buy_exchange":   buyEx,
+		"sell_exchange":  sellEx,
+		"volume":         volume,
+		"net_profit_usd": netProfit,
+		"net_profit":     netProfit,
+		"timestamp":      time.Now().Format("15:04:05.000"),
+	}
+	session.Mu.Lock()
+	payload["new_total_usd"] = session.TotalWealth
+	payload["credit_active"] = session.Credit.Active
+	payload["binance_usd"] = session.Wallets["Binance"].USD
+	payload["binance_btc"] = session.Wallets["Binance"].BTC
+	payload["bitso_usd"] = session.Wallets["Bitso"].USD
+	payload["bitso_btc"] = session.Wallets["Bitso"].BTC
+	session.Mu.Unlock()
+
+	b, _ := json.Marshal(payload)
+	session.WriteMessage(websocket.TextMessage, b)
+	sendWalletUpdate(session)
+}
+
+// pairView es la instantánea del par de libros (precios + liquidez top-of-book) que
+// recibe cada ejecución por sesión. Sigue siendo explícitamente de DOS venues: es el
+// núcleo pre-grafo. La Fase 2 lo sustituye por ciclos sobre el grafo de liquidez
+// (ver graph.go y docs/FASE2-GRAFO.md) sin tocar la capa de ingesta ni los params.
+type pairView struct {
+	BinAsk, BinBid, BitAsk, BitBid             float64
+	BinAskQty, BinBidQty, BitAskQty, BitBidQty float64
+}
+
+// venueTickState acumula el último estado aceptado de UN venue en el bucle de
+// detección: precios previos (para el Spike Filter tick-a-tick) y el top-of-book
+// vigente con su hora (para el control de staleness).
+type venueTickState struct {
+	lastAsk, lastBid float64
+	book             TopOfBook
+	hasData          bool
+}
+
 func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
-	var lastBinanceAsk, lastBinanceBid float64
-	var lastBitsoAsk, lastBitsoBid float64
+	states := make(map[string]*venueTickState)
 	lastLogTime := time.Now()
+	lastStaleLog := time.Time{}
 
 	for tick := range priceChan {
-		var currentLastAsk, currentLastBid float64
-		if tick.Exchange == "Binance" {
-			currentLastAsk = lastBinanceAsk
-			currentLastBid = lastBinanceBid
-		} else {
-			currentLastAsk = lastBitsoAsk
-			currentLastBid = lastBitsoBid
+		st, ok := states[tick.Exchange]
+		if !ok {
+			st = &venueTickState{}
+			states[tick.Exchange] = st
 		}
 
-		if !isValidTick(tick.Ask, currentLastAsk, DefaultSpikeTickDeviation) || !isValidTick(tick.Bid, currentLastBid, DefaultSpikeTickDeviation) {
+		if !isValidTick(tick.Ask, st.lastAsk, DefaultSpikeTickDeviation) || !isValidTick(tick.Bid, st.lastBid, DefaultSpikeTickDeviation) {
 			broadcastLog(hub, "[DESCARTADO] 🚨 Spike Filter Activado: Variación anómala detectada. Ignorando tick para proteger capital.", 0, 0)
 			continue
 		}
 
-		if tick.Exchange == "Binance" {
-			lastBinanceAsk = tick.Ask
-			lastBinanceBid = tick.Bid
-		} else if tick.Exchange == "Bitso" {
-			lastBitsoAsk = tick.Ask
-			lastBitsoBid = tick.Bid
+		st.lastAsk = tick.Ask
+		st.lastBid = tick.Bid
+		when := tick.Time
+		if when.IsZero() {
+			when = time.Now()
+		}
+		st.book = TopOfBook{Ask: tick.Ask, Bid: tick.Bid, AskQty: tick.AskQty, BidQty: tick.BidQty, UpdatedAt: when}
+		st.hasData = true
+
+		bin, bit := states["Binance"], states["Bitso"]
+		if bin == nil || bit == nil || !bin.hasData || !bit.hasData {
+			continue
 		}
 
-		effectiveBinanceAsk := lastBinanceAsk
-		effectiveBinanceBid := lastBinanceBid
-		effectiveBitsoAsk := lastBitsoAsk
-		effectiveBitsoBid := lastBitsoBid
-
-		if effectiveBinanceAsk > 0 && lastBitsoAsk > 0 {
-			binanceMid := (effectiveBinanceAsk + effectiveBinanceBid) / 2
-			bitsoMid := (effectiveBitsoAsk + effectiveBitsoBid) / 2
-			
-			grossSpread1 := effectiveBitsoBid - effectiveBinanceAsk
-			grossSpread2 := effectiveBinanceBid - effectiveBitsoAsk
-			grossSpread := math.Max(grossSpread1, grossSpread2)
-			spread := math.Abs(binanceMid - bitsoMid)
-			
-			e.Tracker.Add(spread)
-			
-			avg := e.Tracker.Average()
-			factor := 0.0
-			if avg > 0 {
-				factor = spread / avg
+		// Control de staleness: si el feed de un venue lleva demasiado sin publicar,
+		// su último precio es un dato muerto — compararlo contra el precio fresco del
+		// otro produciría spreads fantasma. Preferimos no evaluar a evaluar mal.
+		now := time.Now()
+		if now.Sub(bin.book.UpdatedAt) > MaxBookStaleness || now.Sub(bit.book.UpdatedAt) > MaxBookStaleness {
+			if now.Sub(lastStaleLog) >= 5*time.Second {
+				lastStaleLog = now
+				staleVenue := "Binance"
+				if now.Sub(bit.book.UpdatedAt) > MaxBookStaleness {
+					staleVenue = "Bitso"
+				}
+				broadcastLog(hub, fmt.Sprintf("🧊 [FEED CONGELADO] El feed de %s lleva >%s sin datos — evaluación pausada para no operar contra precios muertos.", staleVenue, MaxBookStaleness), 0, 0)
 			}
+			continue
+		}
 
-			baseVolume := DefaultBaseOrderSize
-			var fees float64
-			if grossSpread1 > grossSpread2 {
-				fees = (effectiveBinanceAsk*DefaultBinanceTakerFee + effectiveBitsoBid*DefaultBitsoTakerFee) * baseVolume
+		binanceMid := (bin.book.Ask + bin.book.Bid) / 2
+		bitsoMid := (bit.book.Ask + bit.book.Bid) / 2
+
+		grossSpread1 := bit.book.Bid - bin.book.Ask // comprar Binance → vender Bitso
+		grossSpread2 := bin.book.Bid - bit.book.Ask // comprar Bitso → vender Binance
+		grossSpread := math.Max(grossSpread1, grossSpread2)
+		spread := math.Abs(binanceMid - bitsoMid)
+
+		e.Tracker.Add(spread)
+
+		avg := e.Tracker.Average()
+		factor := 0.0
+		if avg > 0 {
+			factor = spread / avg
+		}
+
+		// Vista de mercado de REFERENCIA: se evalúa con los parámetros por defecto
+		// (el bucle corre pre-fan-out, sin sesión). La decisión personalizada de
+		// cada usuario ocurre en executeForSession con SUS parámetros.
+		baseVolume := DefaultMaxOrderSizeBTC
+		var grossOp, fees, slippageOp, netOp float64
+		if grossSpread1 > grossSpread2 {
+			grossOp, fees, slippageOp, netOp = computeNetProfit(bin.book.Ask, bit.book.Bid, baseVolume, defaultTakerFees()["Binance"], defaultTakerFees()["Bitso"], DefaultSlippageRate)
+		} else {
+			grossOp, fees, slippageOp, netOp = computeNetProfit(bit.book.Ask, bin.book.Bid, baseVolume, defaultTakerFees()["Bitso"], defaultTakerFees()["Binance"], DefaultSlippageRate)
+		}
+
+		isSpiked := false
+		switch {
+		case factor > SpikeBlockMultiplier:
+			broadcastLog(hub, fmt.Sprintf("⚠️  [SPIKE BLOQUEADO] Spread: $%.2f | Promedio: $%.2f | Factor: %.1fx — posible error de API", spread, avg, factor), spread, 0)
+			isSpiked = true
+		case factor > SpikeWarnMultiplier:
+			broadcastLog(hub, fmt.Sprintf("⚡ [SPIKE ALERTA] Spread: $%.2f | Factor: %.1fx — evento extremo, ejecutando", spread, factor), spread, 0)
+		default:
+			if netOp > DefaultMinNetProfitUSD {
+				broadcastLog(hub, fmt.Sprintf("✅ [OPORTUNIDAD] Spread (1 BTC): $%.2f | Vol: %.3f BTC | Bruto: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: +$%.2f", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
 			} else {
-				fees = (effectiveBitsoAsk*DefaultBitsoTakerFee + effectiveBinanceBid*DefaultBinanceTakerFee) * baseVolume
+				broadcastLog(hub, fmt.Sprintf("⏳ [EN ESPERA] Spread (1 BTC): $%.2f | Volumen: %.3f BTC | Bruto Op: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: $%.2f (Inviable)", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
 			}
-			grossOp := grossSpread * baseVolume
-			slippageOp := estimateSlippage(binanceMid, bitsoMid, baseVolume)
-			netOp := grossOp - fees - slippageOp
+		}
 
-			isSpiked := false
-			switch {
-			case factor > SpikeBlockMultiplier:
-				broadcastLog(hub, fmt.Sprintf("⚠️  [SPIKE BLOQUEADO] Spread: $%.2f | Promedio: $%.2f | Factor: %.1fx — posible error de API", spread, avg, factor), spread, 0)
-				isSpiked = true
-			case factor > SpikeWarnMultiplier:
-				broadcastLog(hub, fmt.Sprintf("⚡ [SPIKE ALERTA] Spread: $%.2f | Factor: %.1fx — evento extremo, ejecutando", spread, factor), spread, 0)
-			default:
-				if netOp > DefaultMinNetProfitUSD {
-					broadcastLog(hub, fmt.Sprintf("✅ [OPORTUNIDAD] Spread (1 BTC): $%.2f | Vol: %.3f BTC | Bruto: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: +$%.2f", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
-				} else {
-					broadcastLog(hub, fmt.Sprintf("⏳ [EN ESPERA] Spread (1 BTC): $%.2f | Volumen: %.3f BTC | Bruto Op: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: $%.2f (Inviable)", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
-				}
+		if isSpiked {
+			continue
+		}
+
+		if time.Since(lastLogTime) >= time.Second {
+			lastLogTime = time.Now()
+			for _, s := range hub.Snapshot() {
+				sendEvent(s, ServerEvent{
+					Type:         "market_update",
+					BinancePrice: binanceMid,
+					BitsoPrice:   bitsoMid,
+					Spread:       spread,
+				})
 			}
+		}
 
-			if isSpiked {
-				continue
-			}
-
-			if time.Since(lastLogTime) >= time.Second {
-				lastLogTime = time.Now()
-				for _, s := range hub.Snapshot() {
-					sendEvent(s, ServerEvent{
-						Type:         "market_update",
-						BinancePrice: binanceMid,
-						BitsoPrice:   bitsoMid,
-						Spread:       spread,
-					})
-				}
-			}
-
-			for _, session := range hub.Snapshot() {
-				if session.IsInitialized() {
-					go e.executeForSession(session, effectiveBinanceAsk, effectiveBinanceBid, effectiveBitsoAsk, effectiveBitsoBid)
-				}
+		mkt := pairView{
+			BinAsk: bin.book.Ask, BinBid: bin.book.Bid,
+			BitAsk: bit.book.Ask, BitBid: bit.book.Bid,
+			BinAskQty: bin.book.AskQty, BinBidQty: bin.book.BidQty,
+			BitAskQty: bit.book.AskQty, BitBidQty: bit.book.BidQty,
+		}
+		for _, session := range hub.Snapshot() {
+			if session.IsInitialized() {
+				go e.executeForSession(session, mkt)
 			}
 		}
 	}
 }
 
-func (e *HFTEngine) executeForSession(session *ClientSession, binAsk, binBid, bitAsk, bitBid float64) {
-	// Copia local de los parámetros de ESTA sesión. Params se fija una vez al crear la
-	// sesión y es inmutable, así que leerlo sin lock es seguro (happens-before vía hub.Add);
-	// la copia da además una vista consistente para toda la función.
-	p := session.Params
-	orderSize := p.BaseOrderSize
+// sizeOrder devuelve el volumen ejecutable de una dirección: el TOPE del usuario
+// acotado por la liquidez visible en ambas piernas (qty=0 significa "sin dato" y
+// no acota). Aquí nace la personalización real: con la misma ineficiencia de
+// 0.05 BTC, el usuario con tope 0.01 entra y el que exige bloques de 1.0 la ignora.
+func sizeOrder(maxOrder, buySideQty, sellSideQty float64) float64 {
+	vol := maxOrder
+	if buySideQty > 0 && buySideQty < vol {
+		vol = buySideQty
+	}
+	if sellSideQty > 0 && sellSideQty < vol {
+		vol = sellSideQty
+	}
+	return vol
+}
 
-	if bitAsk > binAsk*p.MaxDivergenceRatio || binAsk > bitAsk*p.MaxDivergenceRatio {
+func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
+	// Snapshot de los parámetros de ESTA sesión: vista consistente para toda la
+	// función aunque el usuario los edite a mitad de la evaluación (set_params).
+	p := session.Params()
+
+	if mkt.BitAsk > mkt.BinAsk*p.MaxDivergenceRatio || mkt.BinAsk > mkt.BitAsk*p.MaxDivergenceRatio {
 		return
 	}
 
@@ -395,56 +506,47 @@ func (e *HFTEngine) executeForSession(session *ClientSession, binAsk, binBid, bi
 		session.Mu.Unlock()
 	}()
 
-	binanceTakerFee := p.BinanceTakerFee
-	bitsoTakerFee := p.BitsoTakerFee
+	binanceFee := p.takerFee("Binance")
+	bitsoFee := p.takerFee("Bitso")
 
-	grossSpread1 := bitBid - binAsk
-	feeEstimate1 := (binAsk*binanceTakerFee + bitBid*bitsoTakerFee) * orderSize
-	slippage1 := estimateSlippage(binAsk, bitBid, orderSize)
-	netProfit1 := (grossSpread1 * orderSize) - feeEstimate1 - slippage1
+	// Dirección 1: comprar en Binance (ask) → vender en Bitso (bid).
+	// El volumen se dimensiona contra la liquidez REAL visible en ambas piernas.
+	vol1 := sizeOrder(p.MaxOrderSizeBTC, mkt.BinAskQty, mkt.BitBidQty)
+	gross1, fees1, _, netProfit1 := computeNetProfit(mkt.BinAsk, mkt.BitBid, vol1, binanceFee, bitsoFee, p.SlippageRate)
 
-	grossSpread2 := binBid - bitAsk
-	feeEstimate2 := (bitAsk*bitsoTakerFee + binBid*binanceTakerFee) * orderSize
-	slippage2 := estimateSlippage(bitAsk, binBid, orderSize)
-	netProfit2 := (grossSpread2 * orderSize) - feeEstimate2 - slippage2
+	// Dirección 2: comprar en Bitso (ask) → vender en Binance (bid).
+	vol2 := sizeOrder(p.MaxOrderSizeBTC, mkt.BitAskQty, mkt.BinBidQty)
+	gross2, fees2, _, netProfit2 := computeNetProfit(mkt.BitAsk, mkt.BinBid, vol2, bitsoFee, binanceFee, p.SlippageRate)
 
-	var bestProfit float64
-	var needBinanceUSD, needBitsoBTC, needBitsoUSD, needBinanceBTC bool
-	
-	if grossSpread1 > grossSpread2 && netProfit1 > p.MinNetProfitUSD {
-		bestProfit = netProfit1
-		needBinanceUSD = true
-		needBitsoBTC = true
-	} else if grossSpread2 > grossSpread1 && netProfit2 > p.MinNetProfitUSD {
-		bestProfit = netProfit2
-		needBitsoUSD = true
-		needBinanceBTC = true
-	} else {
+	viable1 := vol1 >= MinExecutableVolumeBTC && netProfit1 > p.MinNetProfitUSD
+	viable2 := vol2 >= MinExecutableVolumeBTC && netProfit2 > p.MinNetProfitUSD
+
+	// Se ejecuta la dirección de mayor NETO (no la de mayor bruto ni la primera).
+	var buyEx, sellEx string
+	var buyPrice, sellPrice, volume, gross, fees, net float64
+	switch {
+	case viable1 && (!viable2 || netProfit1 >= netProfit2):
+		buyEx, sellEx = "Binance", "Bitso"
+		buyPrice, sellPrice, volume, gross, fees, net = mkt.BinAsk, mkt.BitBid, vol1, gross1, fees1, netProfit1
+	case viable2:
+		buyEx, sellEx = "Bitso", "Binance"
+		buyPrice, sellPrice, volume, gross, fees, net = mkt.BitAsk, mkt.BinBid, vol2, gross2, fees2, netProfit2
+	default:
 		return
 	}
 
 	session.Mu.Lock()
-	hasFunds := true
-	if needBinanceUSD && session.Wallets["Binance"].USD < (orderSize * binAsk * (1 + binanceTakerFee)) { hasFunds = false }
-	if needBitsoBTC && session.Wallets["Bitso"].BTC < orderSize { hasFunds = false }
-	if needBitsoUSD && session.Wallets["Bitso"].USD < (orderSize * bitAsk * (1 + bitsoTakerFee)) { hasFunds = false }
-	if needBinanceBTC && session.Wallets["Binance"].BTC < orderSize { hasFunds = false }
-	
+	hasFunds := session.Wallets[buyEx].USD >= (volume*buyPrice*(1+p.takerFee(buyEx))) &&
+		session.Wallets[sellEx].BTC >= volume
+	session.Mu.Unlock()
+
 	if !hasFunds {
-		session.Mu.Unlock()
-		e.handleLiquidityShortfall(session, bestProfit)
+		e.handleLiquidityShortfall(session, net)
 		return
 	}
 
-	if needBinanceUSD {
-		sendLog(session, fmt.Sprintf("✅ [OPORTUNIDAD] Bruto Op: $%.2f | Fees Combinados: $%.2f | Ganancia Neta Limpia: +$%.2f | Ejecutando %.3f BTC...", grossSpread1*orderSize, feeEstimate1, netProfit1, orderSize))
-		session.Mu.Unlock()
-		e.executeTradeForSession(session, "Binance", "Bitso", binAsk, bitBid, orderSize, netProfit1)
-	} else {
-		sendLog(session, fmt.Sprintf("✅ [OPORTUNIDAD] Bruto Op: $%.2f | Fees Combinados: $%.2f | Ganancia Neta Limpia: +$%.2f | Ejecutando %.3f BTC...", grossSpread2*orderSize, feeEstimate2, netProfit2, orderSize))
-		session.Mu.Unlock()
-		e.executeTradeForSession(session, "Bitso", "Binance", bitAsk, binBid, orderSize, netProfit2)
-	}
+	sendLog(session, fmt.Sprintf("✅ [OPORTUNIDAD] Bruto Op: $%.2f | Fees Combinados: $%.2f | Ganancia Neta Limpia: +$%.2f | Ejecutando %.4f BTC...", gross, fees, net, volume))
+	e.executeTradeForSession(session, buyEx, sellEx, buyPrice, sellPrice, volume, net)
 }
 
 func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx string, buyPrice, sellPrice, volume, netProfit float64) {
@@ -466,27 +568,22 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 		return
 	}
 
+	p := session.Params()
+
 	session.Mu.Lock()
 
 	session.LastTradeTime = time.Now()
 
-	binanceTakerFee := session.Params.BinanceTakerFee
-	bitsoTakerFee := session.Params.BitsoTakerFee
+	// Movimiento de wallets genérico por venue: la pierna de compra paga
+	// precio × (1 + fee) y la de venta ingresa precio × (1 − fee).
+	session.Wallets[buyEx].USD -= (buyPrice * volume) * (1 + p.takerFee(buyEx))
+	session.Wallets[buyEx].BTC += volume
+	session.Wallets[sellEx].BTC -= volume
+	session.Wallets[sellEx].USD += (sellPrice * volume) * (1 - p.takerFee(sellEx))
 
-	if buyEx == "Binance" {
-		session.Wallets["Binance"].USD -= (buyPrice * volume) * (1 + binanceTakerFee)
-		session.Wallets["Binance"].BTC += volume
-		session.Wallets["Bitso"].BTC -= volume
-		session.Wallets["Bitso"].USD += (sellPrice * volume) * (1 - bitsoTakerFee)
-	} else {
-		session.Wallets["Bitso"].USD -= (buyPrice * volume) * (1 + bitsoTakerFee)
-		session.Wallets["Bitso"].BTC += volume
-		session.Wallets["Binance"].BTC -= volume
-		session.Wallets["Binance"].USD += (sellPrice * volume) * (1 - binanceTakerFee)
+	for _, w := range session.Wallets {
+		clampWallet(w)
 	}
-
-	clampWallet(session.Wallets["Binance"])
-	clampWallet(session.Wallets["Bitso"])
 
 	session.TotalWealth += netProfit
 	session.TotalNetProfit += netProfit
@@ -495,31 +592,11 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 	if session.Credit.Active {
 		creditStatus = "ACTIVE"
 	}
-
-	sendLog(session, fmt.Sprintf("⚡ [ARBITRAJE] Executed %.3f BTC | Net Profit: +$%.2f USD | Total: $%.2f | Credit: %s", volume, netProfit, session.TotalWealth, creditStatus))
-
-	payload := map[string]interface{}{
-		"event":          "arbitrage_executed",
-		"exchange_buy":   buyEx,
-		"exchange_sell":  sellEx,
-		"buy_exchange":   buyEx,
-		"sell_exchange":  sellEx,
-		"volume":         volume,
-		"net_profit_usd": netProfit,
-		"net_profit":     netProfit,
-		"new_total_usd":  session.TotalWealth,
-		"timestamp":      time.Now().Format("15:04:05.000"),
-		"credit_active":  session.Credit.Active,
-		"binance_usd":    session.Wallets["Binance"].USD,
-		"binance_btc":    session.Wallets["Binance"].BTC,
-		"bitso_usd":      session.Wallets["Bitso"].USD,
-		"bitso_btc":      session.Wallets["Bitso"].BTC,
-	}
+	totalWealth := session.TotalWealth
 	session.Mu.Unlock()
 
-	b, _ := json.Marshal(payload)
-	session.WriteMessage(websocket.TextMessage, b)
-	sendWalletUpdate(session)
+	sendLog(session, fmt.Sprintf("⚡ [ARBITRAJE] Executed %.4f BTC | Net Profit: +$%.2f USD | Total: $%.2f | Credit: %s", volume, netProfit, totalWealth, creditStatus))
+	sendArbExecuted(session, buyEx, sellEx, volume, netProfit)
 
 	recordTradeAsync(TradeRecord{
 		SessionID:    session.ID,
@@ -548,15 +625,21 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	}
 
 	btcPrice := getBTCPrice()
-	totalUSD := session.Wallets["Binance"].USD + session.Wallets["Bitso"].USD
-	totalBTC := session.Wallets["Binance"].BTC + session.Wallets["Bitso"].BTC
+	totalUSD, totalBTC := 0.0, 0.0
+	for _, w := range session.Wallets {
+		totalUSD += w.USD
+		totalBTC += w.BTC
+	}
 	totalWealthUSD := totalUSD + (totalBTC * btcPrice)
 
-	targetUSD := totalWealthUSD / 4.0
-	targetBTC := (totalWealthUSD / 4.0) / btcPrice
+	// Reparto uniforme: mitad del patrimonio en USD y mitad en BTC, divididos por
+	// igual entre los venues del registro (con 2 venues: 4 cuartos, como siempre).
+	perVenueUSD := totalWealthUSD / (2.0 * float64(len(Venues)))
+	perVenueBTC := perVenueUSD / btcPrice
 
-	session.Wallets["Binance"] = &Wallet{USD: targetUSD, BTC: targetBTC}
-	session.Wallets["Bitso"] = &Wallet{USD: targetUSD, BTC: targetBTC}
+	for _, v := range Venues {
+		session.Wallets[v.Name] = &Wallet{USD: perVenueUSD, BTC: perVenueBTC}
+	}
 	session.TotalWealth = totalWealthUSD
 	session.Mu.Unlock()
 
@@ -565,12 +648,12 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	payload := map[string]interface{}{
 		"event":            "market_rebalanced",
 		"total_wealth_usd": totalWealthUSD,
-		"target_usd":       targetUSD,
-		"target_btc":       targetBTC,
-		"binance_usd":      targetUSD,
-		"binance_btc":      targetBTC,
-		"bitso_usd":        targetUSD,
-		"bitso_btc":        targetBTC,
+		"target_usd":       perVenueUSD,
+		"target_btc":       perVenueBTC,
+		"binance_usd":      perVenueUSD,
+		"binance_btc":      perVenueBTC,
+		"bitso_usd":        perVenueUSD,
+		"bitso_btc":        perVenueBTC,
 	}
 	b, _ := json.Marshal(payload)
 	session.WriteMessage(websocket.TextMessage, b)
@@ -663,16 +746,20 @@ func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedPr
 	autoMode := session.Credit.AutoMode
 	session.Mu.Unlock()
 
+	// Inecuación de dominancia del crédito con el apetito de riesgo del usuario:
+	// endeudarse solo si la ganancia proyectada supera costo × RiskMultiplier.
+	p := session.Params()
 	creditCost := calculateCreditCost(CreditLineUSD)
+	required := creditCost * p.RiskMultiplier
 
-	if autoMode && projectedProfit > creditCost {
-		sendLog(session, fmt.Sprintf("🏦 [AUTO-CRÉDITO] Ganancia +$%.2f > costo préstamo $%.2f — activando línea de crédito...", projectedProfit, creditCost))
+	if autoMode && creditWorthIt(projectedProfit, creditCost, p.RiskMultiplier) {
+		sendLog(session, fmt.Sprintf("🏦 [AUTO-CRÉDITO] Ganancia +$%.2f > umbral $%.2f (costo $%.2f × riesgo %.1fx) — activando línea de crédito...", projectedProfit, required, creditCost, p.RiskMultiplier))
 		e.activateCreditSession(session)
 		return
 	}
 
 	if autoMode {
-		sendLog(session, fmt.Sprintf("⚖️ [REEQUILIBRIO] Ganancia +$%.2f ≤ costo préstamo $%.2f — pausando operaciones 1 min...", projectedProfit, creditCost))
+		sendLog(session, fmt.Sprintf("⚖️ [REEQUILIBRIO] Ganancia +$%.2f ≤ umbral $%.2f (costo $%.2f × riesgo %.1fx) — pausando operaciones 1 min...", projectedProfit, required, creditCost, p.RiskMultiplier))
 		e.startReplenishing(session, "La ganancia no cubre el costo del préstamo. Reequilibrando fondos entre exchanges.")
 		return
 	}
@@ -695,17 +782,8 @@ func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedPr
 		RequiresManualAction: true,
 		ProfitPotential:      projectedProfit,
 		CreditCost:           creditCost,
+		CreditRequired:       required,
 	})
-}
-
-// ExecuteRebalanceForSession queda como alias interno del reequilibrio instantáneo
-// (solo se invoca al completar la pausa de 1 min o al vencer el crédito).
-func (e *HFTEngine) ExecuteRebalanceForSession(session *ClientSession, _ bool) {
-	e.rebalanceWallets50_50(session)
-}
-
-func (e *HFTEngine) hasInventoryForChunkSession(session *ClientSession, buyEx, sellEx string, chunkSize, price float64) bool {
-	return e.sessionHasFundsForTrade(session, buyEx, sellEx, chunkSize, price)
 }
 
 func calculateCreditCost(usdBorrowed float64) float64 {
@@ -722,16 +800,18 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	}
 	cost := calculateCreditCost(CreditLineUSD)
 
-	halfUSD := CreditLineUSD / 2
-	halfBTC := CreditLineBTC / 2
+	// La línea de crédito se reparte por igual entre los venues del registro.
+	perVenueUSD := CreditLineUSD / float64(len(Venues))
+	perVenueBTC := CreditLineBTC / float64(len(Venues))
 
-	s.Wallets["Binance"].USD += halfUSD
-	s.Wallets["Bitso"].USD += halfUSD
-	s.Wallets["Binance"].BTC += halfBTC
-	s.Wallets["Bitso"].BTC += halfBTC
-
-	s.Credit.BorrowedUSD = map[string]float64{"Binance": halfUSD, "Bitso": halfUSD}
-	s.Credit.BorrowedBTC = map[string]float64{"Binance": halfBTC, "Bitso": halfBTC}
+	s.Credit.BorrowedUSD = make(map[string]float64, len(Venues))
+	s.Credit.BorrowedBTC = make(map[string]float64, len(Venues))
+	for _, v := range Venues {
+		s.Wallets[v.Name].USD += perVenueUSD
+		s.Wallets[v.Name].BTC += perVenueBTC
+		s.Credit.BorrowedUSD[v.Name] = perVenueUSD
+		s.Credit.BorrowedBTC[v.Name] = perVenueBTC
+	}
 
 	s.TotalNetProfit -= cost
 	s.TotalWealth -= cost
@@ -758,10 +838,10 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 		Message:            "Línea de crédito activa — operando con fondos prestados",
 		ExpiresAt:          expiresAt.Format(time.RFC3339),
 		CreditActive:       true,
-		BorrowedBinanceUSD: halfUSD,
-		BorrowedBitsoUSD:   halfUSD,
-		BorrowedBinanceBTC: halfBTC,
-		BorrowedBitsoBTC:   halfBTC,
+		BorrowedBinanceUSD: perVenueUSD,
+		BorrowedBitsoUSD:   perVenueUSD,
+		BorrowedBinanceBTC: perVenueBTC,
+		BorrowedBitsoBTC:   perVenueBTC,
 	})
 	sendWalletUpdate(s)
 
@@ -802,51 +882,24 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	}()
 }
 
-func (e *HFTEngine) calculateFeesSession(session *ClientSession, buyEx, sellEx string, chunkSize, price float64) float64 {
-	binanceTakerFee := session.Params.BinanceTakerFee
-	bitsoTakerFee := session.Params.BitsoTakerFee
-
-	var feeEstimate float64
-	if buyEx == "Binance" {
-		feeEstimate += price * binanceTakerFee * chunkSize
-	} else {
-		feeEstimate += price * bitsoTakerFee * chunkSize
-	}
-
-	if sellEx == "Binance" {
-		feeEstimate += price * binanceTakerFee * chunkSize
-	} else {
-		feeEstimate += price * bitsoTakerFee * chunkSize
-	}
-
-	return feeEstimate
-}
-
 func (e *HFTEngine) executeChunkMirrorSession(session *ClientSession, buyEx, sellEx string, chunkSize, buyPrice, sellPrice, netProfit float64) error {
 	if !e.sessionHasFundsForTrade(session, buyEx, sellEx, chunkSize, buyPrice) {
 		return fmt.Errorf("fondos insuficientes en %s/%s", buyEx, sellEx)
 	}
 
+	p := session.Params()
+
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
 
-	binanceTakerFee := session.Params.BinanceTakerFee
-	bitsoTakerFee := session.Params.BitsoTakerFee
+	session.Wallets[buyEx].USD -= buyPrice * chunkSize * (1 + p.takerFee(buyEx))
+	session.Wallets[buyEx].BTC += chunkSize
+	session.Wallets[sellEx].BTC -= chunkSize
+	session.Wallets[sellEx].USD += sellPrice * chunkSize * (1 - p.takerFee(sellEx))
 
-	if buyEx == "Binance" {
-		session.Wallets["Binance"].USD -= buyPrice * chunkSize * (1 + binanceTakerFee)
-		session.Wallets["Binance"].BTC += chunkSize
-		session.Wallets["Bitso"].BTC -= chunkSize
-		session.Wallets["Bitso"].USD += sellPrice * chunkSize * (1 - bitsoTakerFee)
-	} else {
-		session.Wallets["Bitso"].USD -= buyPrice * chunkSize * (1 + bitsoTakerFee)
-		session.Wallets["Bitso"].BTC += chunkSize
-		session.Wallets["Binance"].BTC -= chunkSize
-		session.Wallets["Binance"].USD += sellPrice * chunkSize * (1 - binanceTakerFee)
+	for _, w := range session.Wallets {
+		clampWallet(w)
 	}
-
-	clampWallet(session.Wallets["Binance"])
-	clampWallet(session.Wallets["Bitso"])
 
 	session.TotalWealth += netProfit
 	session.TotalNetProfit += netProfit
@@ -868,6 +921,11 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 		return
 	}
 
+	// El simulador respeta los parámetros de la sesión (fees y slippage del usuario);
+	// el tamaño de chunk es propio del escenario (modela consumo de un bloque de
+	// liquidez), independiente del tope de orden del modo en vivo.
+	p := session.Params()
+
 	var buyEx, sellEx string
 	if targetSpread > 0 {
 		sellEx = exchange
@@ -884,7 +942,7 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 			sellEx = "Binance"
 		}
 	}
-	
+
 	absSpread := math.Abs(targetSpread)
 
 	sendLog(session, fmt.Sprintf("🧪 [DEMO] INYECCIÓN ACTIVA: %s Spread: +$%.2f | Liquidez: %.4f BTC", exchange, absSpread, liquidity))
@@ -917,17 +975,11 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 			chunkSize = liquidity
 		}
 
-		currentMarket.mu.Lock()
-		price := currentMarket.BinanceAsk
-		if price == 0 {
-			price = DefaultBTCPriceFallback // fallback
-		}
-		currentMarket.mu.Unlock()
+		price := getBTCPrice()
 
-		if !e.hasInventoryForChunkSession(session, buyEx, sellEx, chunkSize, price) {
+		if !e.sessionHasFundsForTrade(session, buyEx, sellEx, chunkSize, price) {
 			liquidezRestante := liquidity
-			combinedFee := session.Params.BinanceTakerFee + session.Params.BitsoTakerFee
-			gananciaPotencial := absSpread*liquidezRestante*(1-combinedFee) - estimateSlippage(price, price+absSpread, liquidezRestante)
+			_, _, _, gananciaPotencial := computeNetProfit(price, price+absSpread, liquidezRestante, p.takerFee(buyEx), p.takerFee(sellEx), p.SlippageRate)
 
 			session.Mu.Lock()
 			wasReplenishing := session.IsReplenishing
@@ -951,10 +1003,7 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 		}
 
 		sellPrice := price + absSpread
-		grossProfit := absSpread * chunkSize
-		fees := e.calculateFeesSession(session, buyEx, sellEx, chunkSize, price)
-		slippage := estimateSlippage(price, sellPrice, chunkSize)
-		netProfit := grossProfit - fees - slippage
+		_, _, _, netProfit := computeNetProfit(price, sellPrice, chunkSize, p.takerFee(buyEx), p.takerFee(sellEx), p.SlippageRate)
 
 		if netProfit <= 0 {
 			sendLog(session, fmt.Sprintf("⚠️ [DEMO] Spread insuficiente para chunk de %.4f BTC. Abortando.", chunkSize))
@@ -986,29 +1035,7 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 		sendLog(session, fmt.Sprintf("⚡ [ARBITRAJE] Executed %.4f BTC | Faltan %.4f BTC en Order Book | Profit: +$%.2f USD",
 			chunkSize, liquidity, netProfit))
 
-		payload := map[string]interface{}{
-			"event":          "arbitrage_executed",
-			"exchange_buy":   buyEx,
-			"exchange_sell":  sellEx,
-			"buy_exchange":   buyEx,
-			"sell_exchange":  sellEx,
-			"volume":         chunkSize,
-			"net_profit_usd": netProfit,
-			"net_profit":     netProfit,
-			"timestamp":      time.Now().Format("15:04:05.000"),
-		}
-		session.Mu.Lock()
-		payload["new_total_usd"] = session.TotalWealth
-		payload["credit_active"] = session.Credit.Active
-		payload["binance_usd"] = session.Wallets["Binance"].USD
-		payload["binance_btc"] = session.Wallets["Binance"].BTC
-		payload["bitso_usd"] = session.Wallets["Bitso"].USD
-		payload["bitso_btc"] = session.Wallets["Bitso"].BTC
-		session.Mu.Unlock()
-
-		b, _ := json.Marshal(payload)
-		session.WriteMessage(websocket.TextMessage, b)
-		sendWalletUpdate(session)
+		sendArbExecuted(session, buyEx, sellEx, chunkSize, netProfit)
 
 		// Write-behind: persistimos cada chunk rentable sin frenar el siguiente.
 		recordTradeAsync(TradeRecord{

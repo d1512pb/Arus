@@ -4,8 +4,6 @@ import { useState, useCallback } from "react";
 import { Database, RefreshCw, ChevronDown, ChevronRight, ShieldCheck } from "lucide-react";
 import { ENGINE_HTTP_URL } from "../lib/config";
 
-const LEDGER_URL = `${ENGINE_HTTP_URL}/api/ledger`;
-
 interface TradeRecord {
   id: number;
   session_id: string;
@@ -24,7 +22,9 @@ function formatTimestamp(ts: string): string {
   return d.toLocaleString("es-ES", { hour12: false });
 }
 
-export function LedgerPanel() {
+// El ledger es POR SESIÓN (privacidad cross-sesión): el backend exige el
+// session_id (UUID no enumerable) y solo devuelve las operaciones de esta sesión.
+export function LedgerPanel({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
   const [records, setRecords] = useState<TradeRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -32,10 +32,15 @@ export function LedgerPanel() {
   const [loaded, setLoaded] = useState(false);
 
   const fetchLedger = useCallback(async () => {
+    if (!sessionId) {
+      setError("Sesión aún no establecida — intenta de nuevo en unos segundos.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(LEDGER_URL, { cache: "no-store" });
+      const url = `${ENGINE_HTTP_URL}/api/ledger?session_id=${encodeURIComponent(sessionId)}`;
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setRecords(Array.isArray(data) ? data : []);
@@ -45,7 +50,7 @@ export function LedgerPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sessionId]);
 
   const toggle = () => {
     const next = !open;

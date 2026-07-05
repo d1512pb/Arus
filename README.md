@@ -10,7 +10,7 @@
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![SQLite](https://img.shields.io/badge/SQLite-embebido%20·%20CGO--free-003B57?logo=sqlite&logoColor=white)
-![Detección](https://img.shields.io/badge/detección-~21ns%2Ftick-brightgreen)
+![Detección](https://img.shields.io/badge/detección-~50ns%2Ftick-brightgreen)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
 
 **Autor:** Daniel Peredo Borgonio · **Reto:** CODING_CHALLENGE_MEXICO
@@ -81,6 +81,20 @@ Arus implementa **arbitraje cross-exchange (espacial)** sobre BTC/USD en Binance
 3. **«¿Y si el dato está roto?»** — Spike Filter + compuerta de divergencia >20 % protegen el capital ante feeds corruptos y *flash crashes* → ver [Robustez](#-robustez-y-gestión-de-riesgo-circuit-breakers).
 4. **«¿Qué hago cuando un exchange se queda sin inventario?»** — Aquí está nuestro **diferenciador** ⤵️
 
+### 🎛️ Personalización de estrategia: el usuario tiene el control
+
+Desde la rama *arbitraje omnidireccional*, los parámetros que gobiernan al bot son **del usuario, no del sistema** — editables **en vivo** desde el panel de Estrategia, por sesión:
+
+| Parámetro | Qué controla | Ejemplo de personalización |
+|---|---|---|
+| **Margen mínimo (USD)** | Umbral de ganancia neta para ejecutar | El usuario A exige $10; el usuario B opera desde $1 y captura las oportunidades pequeñas que A ignora |
+| **Orden máxima (BTC)** | Tope de volumen por operación | Si el mercado ofrece 0.05 BTC de ineficiencia, quien configuró 0.01 entra; quien exige bloques de 1.0 la deja pasar |
+| **Slippage estimado (bps)** | Tolerancia de deslizamiento asumida por pierna | Un perfil agresivo asume menos fricción y ejecuta más |
+| **Comisiones por exchange** | Taker fee de cada casa (cuentas VIP pagan menos) | Ajustable por venue desde el registro |
+| **Multiplicador de riesgo** | Inecuación del crédito: `ganancia > costo × k` | Conservador `k=5` (solo endeudarse si cubre 5× el costo); agresivo `k=1` |
+
+El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`) y responde con lo realmente aplicado: un mensaje malicioso no puede corromper una sesión. Los cambios son atómicos (snapshot por operación): si editas a mitad de un trade, ese trade termina con los parámetros con los que empezó.
+
 ### ⭐ El diferenciador: capa de inteligencia financiera (crédito vs. reequilibrio)
 
 En el arbitraje real existe un enemigo silencioso: el **tiempo muerto**. Cuando un exchange agota su inventario, reponerlo exige una transferencia on-chain de **~30+ minutos**, y durante esa espera el capital queda ocioso mientras las oportunidades —que viven milisegundos— se evaporan. La mayoría de los bots simplemente **se detienen**.
@@ -98,14 +112,14 @@ El préstamo es **siempre temporal**: al vencer el plazo se devuelve y el invent
 
 > **¿Con qué latencia identifico una divergencia? ¿WebSockets o polling? ¿Cómo optimizo el tiempo real?**
 
-**Núcleo de detección — latencia medida, no estimada.** El cálculo que identifica y evalúa una oportunidad por cada tick (mids, spreads en ambas direcciones, media móvil del Spike Filter, fees, slippage, neto y decisión de viabilidad) es **O(1)** y está libre de asignaciones en el *hot path*:
+**Núcleo de detección — latencia medida, no estimada.** El cálculo que identifica y evalúa una oportunidad por cada tick (mids, spreads en ambas direcciones, media móvil del Spike Filter, fees, slippage, neto y decisión de viabilidad — todo vía la fórmula única `computeNetProfit`) es **O(1)** y está libre de asignaciones en el *hot path*:
 
 ```
-BenchmarkOpportunityDetection-12   ~21 ns/op   16 B/op   0 allocs/op
-(Intel i5-12450H · go test -bench · ~21–24 ns/op en corridas sostenidas)
+BenchmarkOpportunityDetection-12   ~50 ns/op   16 B/op   0 allocs/op
+(Intel i5-12450H · go test -bench · tracker del Spike Filter ya thread-safe)
 ```
 
-≈ **40–47 millones de evaluaciones por segundo y por núcleo**, con **cero asignaciones** en el camino crítico. Reproducible con:
+≈ **20 millones de evaluaciones por segundo y por núcleo**, con **cero asignaciones** en el camino crítico. (El número anterior de ~21 ns/op correspondía al tracker sin sincronizar; el actual incluye el mutex que lo hace seguro entre el bucle de detección y el simulador — preferimos un número honesto a uno bonito.) Reproducible con:
 
 ```bash
 cd apps/engine && go test -bench=Detection -benchmem -run=^$
@@ -139,7 +153,8 @@ Neto = (Spread × Volumen) − Fees(ambos exchanges) − Slippage estimado
 ```
 
 - **Fees por exchange, en las dos piernas:** taker de Binance `0.10 %` y de Bitso `0.65 %`. No se asumen "simétricos": la pierna de **compra** encarece el costo (`precio × volumen × (1 + fee)`) y la de **venta** reduce el ingreso (`precio × volumen × (1 − fee)`), tal como cobra cada exchange.
-- **Slippage estimado:** `5 bps por pierna` sobre el notional ejecutado (`estimateSlippage`). Modela que una orden de mercado no se llena íntegra en el *top-of-book*, sino que consume varios niveles y empeora el precio promedio. Se **descuenta antes de decidir** — incluso en la proyección que dispara la solicitud de préstamo.
+- **Slippage estimado:** `5 bps por pierna` por defecto sobre el notional ejecutado (`estimateSlippage`), **configurable por el usuario** desde el panel de Estrategia. Modela que una orden de mercado no se llena íntegra en el *top-of-book*, sino que consume varios niveles y empeora el precio promedio. Se **descuenta antes de decidir** — incluso en la proyección que dispara la solicitud de préstamo.
+- **Volumen dimensionado contra liquidez real:** el motor lee la **cantidad** ofrecida en el top-of-book de ambos exchanges (no solo el precio) y ejecuta `min(tope del usuario, liquidez de ambas piernas)`. Si el mercado solo ofrece 0.003 BTC, no se pretende operar 0.005.
 - **Las dos direcciones, cada tick:** el motor calcula el neto de `Binance→Bitso` **y** de `Bitso→Binance` y solo opera la de mayor neto (`netProfit1` vs `netProfit2`), nunca la primera que aparece.
 - **Umbral de viabilidad:** una operación se ejecuta solo si su neto supera `$0.10`. Una divergencia con spread bruto de, p. ej., `$2.81` pero `$2.78` de fricciones se clasifica `[EN ESPERA] (Inviable)` y **se bloquea**, evitando el *fee bleeding*.
 - **Cálculo auditable, no caja negra:** cada evaluación se emite al feed en vivo con su **desglose completo** —`Bruto | Fees | Slippage | Neto`— de modo que el jurado (o cualquier usuario) ve *por qué* una oportunidad se ejecutó o se descartó, en el instante en que ocurre.
@@ -153,6 +168,7 @@ Neto = (Spread × Volumen) − Fees(ambos exchanges) − Slippage estimado
 
 > **¿Cómo manejas baja liquidez, órdenes parciales y movimientos bruscos? ¿Hay circuit breaker?**
 
+- **Detección de feed congelado (staleness):** si un exchange lleva **>10 s** sin publicar, su último precio se considera **dato muerto** y la evaluación se pausa (`[FEED CONGELADO]`) — comparar un libro viejo contra uno fresco produciría spreads fantasma. El motor prefiere no operar a operar contra precios muertos.
 - **Spike Filter (circuit breaker de precio):** un tick cuya variación supere el **5 %** respecto al anterior se descarta como dato corrupto. Además, se mide el spread contra su **media móvil**:
   - factor **> 15×** → `[SPIKE ALERTA]` (evento extremo, se opera con aviso).
   - factor **> 50×** → `[SPIKE BLOQUEADO]` (probable error de API / flash crash → **se rechaza** para proteger el capital y evitar exchanges insolventes).
@@ -228,19 +244,25 @@ Arus/
 ├─ apps/
 │  ├─ engine/                 # Motor HFT en Go — capas separadas por archivo
 │  │  ├─ main.go              # Composition root: crea el canal, el Hub y el motor, cablea rutas /ws y /api/ledger, lee PORT y arranca las goroutines
-│  │  ├─ engine.go            # DOMINIO: bucle de detección (Start), ejecución por sesión, fees+slippage, Spike Filter y toda la lógica de crédito/reequilibrio
-│  │  ├─ server.go            # TRANSPORTE: upgrade WS, init de sesión, router de acciones del cliente y handler HTTP del ledger (CORS)
-│  │  ├─ ledger.go            # PERSISTENCIA: esquema SQLite, write-behind (recordTradeAsync) y consulta (getRecentTrades)
-│  │  ├─ models.go            # CONTRATOS y ESTADO: tipos de wire (ClientMessage/ServerEvent/LogEvent), ClientSession, el Hub multi-sesión y las constantes de negocio
-│  │  ├─ ws_real_market.go    # INGESTA: streams WebSocket de Binance/Bitso, reconexión y validación de libro (coherentBook)
+│  │  ├─ engine.go            # DOMINIO: fórmula única computeNetProfit, bucle de detección (Start), ejecución por sesión, Spike Filter, staleness y lógica de crédito/reequilibrio
+│  │  ├─ venues.go            # REGISTRO: los exchanges como DATOS (nombre, fee, activos) — agregar un venue no toca la lógica
+│  │  ├─ feed.go              # CONTRATO DE INGESTA: interface FeedAdapter (1 adaptador por exchange, ticks normalizados)
+│  │  ├─ ws_real_market.go    # ADAPTADORES: implementaciones Binance/Bitso (reconexión, coherentBook, precio+cantidad+timestamp)
+│  │  ├─ server.go            # TRANSPORTE: upgrade WS, init de sesión, set_params con clamps, router de acciones y handler HTTP del ledger (CORS)
+│  │  ├─ ledger.go            # PERSISTENCIA: esquema SQLite, write-behind (recordTradeAsync) y consulta por sesión
+│  │  ├─ models.go            # CONTRATOS y ESTADO: TradingParameters (editable en vivo, snapshot atómico), wire types, ClientSession, Hub y constantes
+│  │  ├─ graph.go             # FASE 2 (preparación): tipos del grafo de liquidez (nodos activo@venue, aristas, ciclos) — sin lógica aún
+│  │  ├─ engine_test.go       # Tests unitarios: fórmula institucional, clamps, crédito, sizing, concurrencia del tracker
 │  │  └─ engine_bench_test.go # Benchmark de latencia del núcleo de detección
 │  └─ web/                    # Dashboard en Next.js
 │     └─ src/
 │        ├─ app/              # page.tsx (dashboard, presentacional) + layout
-│        ├─ components/       # OnboardingModal · TutorialModal · LedgerPanel
+│        ├─ components/       # OnboardingModal · TutorialModal · LedgerPanel · StrategyPanel
 │        │                    #   (StrategyGuide/Funds/InsufficientFunds Modals viven en page.tsx)
 │        ├─ hooks/            # useArusEngine: única fuente de verdad (dueño del WebSocket + reducer de eventos → estado)
 │        └─ lib/              # config.ts (endpoints del motor por variable de entorno)
+├─ docs/
+│  └─ FASE2-GRAFO.md          # Diseño del motor omnidireccional (ciclos negativos sobre grafo de liquidez)
 └─ README.md
 ```
 
@@ -268,7 +290,8 @@ Web app accesible desde el navegador, pensada para que **cualquiera** entienda l
 - **Tutorial guiado (8 pasos):** en el primer ingreso (y desde el botón «Tutorial») un recorrido en **lenguaje sencillo** —sin jerga— que señala con un chip *📍 dónde está* cada elemento (saldos, «Editar fondos», «Probar el bot», feed, auditoría). Se recuerda en `localStorage` para no repetirse.
 - **Guía de estrategia (botón «?»):** explica el arbitraje con un **ejemplo visual** (comprar barato en una casa, vender caro en la otra *al mismo tiempo*) y desglosa las **3 condiciones de rentabilidad** (spread real · superar comisiones · liquidez en ambas casas), además de la *ventaja del bot* (crédito instantáneo vs. los ~30 min de un traslado on-chain, y el filtro anti–precio-falso).
 - **Configuración inicial guiada:** al entrar, un modal pide el capital de arranque (mín. `$1 000` y `0.1 BTC`) y muestra en vivo cómo se repartirá 50/50 entre Binance y Bitso antes de confirmar.
-- **Panel de Historial / Auditoría:** lee el ledger persistido (`/api/ledger`).
+- **Panel de Estrategia (personalización en vivo):** margen mínimo de ganancia, orden máxima, slippage estimado, comisiones por exchange y multiplicador de riesgo del crédito — cada usuario define sus reglas y el bot decide con ellas al instante.
+- **Panel de Historial / Auditoría:** lee el ledger persistido de TU sesión (`/api/ledger?session_id=`).
 - **Modo de pruebas (Simulador):** inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver al Spike Filter y a la lógica de crédito en acción — sin dinero real.
 - **Decisión asistida al quedarse sin fondos:** un diálogo ofrece *pedir préstamo* (solo si es rentable), *esperar el reequilibrio* (1 min en demo, ~30+ min en producción, con cuenta regresiva) o *detener el bot*.
 - **Modo oscuro, diseño responsive** y banner de préstamo activo con cuenta regresiva.
@@ -360,10 +383,13 @@ Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe 
 ## 🗺️ Roadmap
 
 - [x] ~~Migrar la ingesta de precios a WebSockets nativos~~ — **hecho**: streams `bookTicker` (Binance) y `orders` (Bitso) por WebSocket, con reconexión y validación de libro.
-- [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación lineal en bps).
-- [ ] Más pares y exchanges; evaluación de **arbitraje triangular**.
-- [ ] Persistencia por cliente (filtrado del ledger por `session_id` almacenado en el navegador).
-- [ ] Suite de tests unitarios además del benchmark de latencia.
+- [x] ~~Parámetros de estrategia personalizables por el usuario~~ — **hecho**: panel de Estrategia con margen mínimo, orden máxima, slippage, fees y multiplicador de riesgo, editables en vivo con validación de backend.
+- [x] ~~Ledger por sesión~~ — **hecho**: `/api/ledger?session_id=` con UUID no enumerable; el panel de auditoría consulta solo sus propias operaciones.
+- [x] ~~Suite de tests unitarios además del benchmark de latencia~~ — **hecho**: fórmula institucional, clamps, crédito, dimensionado y concurrencia (`go test ./...`).
+- [x] ~~Dimensionado de órdenes contra liquidez real~~ — **hecho**: el volumen ejecutado es `min(tope del usuario, cantidad del top-of-book de ambas piernas)`.
+- [ ] **Fase 2 — motor omnidireccional:** detección de ciclos negativos sobre el grafo de liquidez (generaliza el par actual a N exchanges × M monedas; primer hito: triangular intra-Binance). Diseño en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
+- [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación configurable en bps; pasará a ser una tolerancia máxima).
+- [ ] Persistencia del estado de sesión (wallets sobreviven reinicios del motor).
 
 ---
 

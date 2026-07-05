@@ -5,6 +5,7 @@ import { ShieldAlert, CheckCircle, Moon, Sun, Loader2, ArrowRight, HelpCircle, X
 import { useArusEngine, LogEntry } from "../hooks/useArusEngine";
 import { OnboardingModal } from "../components/OnboardingModal";
 import { LedgerPanel } from "../components/LedgerPanel";
+import { StrategyPanel } from "../components/StrategyPanel";
 import { TutorialModal } from "../components/TutorialModal";
 
 function logColor(level: string): string {
@@ -116,12 +117,13 @@ function ReplenishingBanner({ expiresAt, message }: { expiresAt: Date | null; me
   );
 }
 
-function InsufficientFundsModal({ 
-  open, profitPotential, creditCost, onRequestCredit, onWaitRebalance, onShutdown 
+function InsufficientFundsModal({
+  open, profitPotential, creditCost, creditRequired, onRequestCredit, onWaitRebalance, onShutdown
 }: {
   open: boolean;
   profitPotential: number;
   creditCost: number;
+  creditRequired: number;
   onRequestCredit: () => void;
   onWaitRebalance: () => void;
   onShutdown: () => void;
@@ -133,7 +135,11 @@ function InsufficientFundsModal({
   }, [open]);
 
   if (!open) return null;
-  const isProfitable = profitPotential > creditCost;
+  // Umbral real de la decisión: costo del préstamo × multiplicador de riesgo del
+  // usuario (configurable en el panel de Estrategia). Con multiplicador 1x equivale
+  // al costo a secas.
+  const threshold = creditRequired > 0 ? creditRequired : creditCost;
+  const isProfitable = profitPotential > threshold;
   const handleRequestCredit = () => { setLoading("credit"); onRequestCredit(); };
   const handleWait = () => { setLoading("wait"); onWaitRebalance(); };
   return (
@@ -161,6 +167,12 @@ function InsufficientFundsModal({
             <span className="text-gray-500 dark:text-gray-400">Costo del préstamo (con intereses)</span>
             <span className="text-red-500 font-bold">-${creditCost?.toFixed(2)}</span>
           </div>
+          {threshold > creditCost && (
+            <div className="flex justify-between">
+              <span className="text-gray-500 dark:text-gray-400">Tu umbral de riesgo (costo × {(threshold / creditCost).toFixed(1)})</span>
+              <span className="text-amber-500 font-bold">${threshold.toFixed(2)}</span>
+            </div>
+          )}
           <div className="flex justify-between border-t border-gray-200 dark:border-gray-800 pt-2 mt-2">
             <span className="text-gray-900 dark:text-gray-100 font-bold">Te quedaría</span>
             <span className={`font-black ${isProfitable ? "text-emerald-500" : "text-red-500"}`}>
@@ -173,7 +185,7 @@ function InsufficientFundsModal({
             className="w-full bg-orange-500 hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed text-white p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300 flex justify-center items-center gap-2"
             onClick={handleRequestCredit}
             disabled={loading !== null || !isProfitable}
-            title={!isProfitable ? "La ganancia no cubre el costo del préstamo" : undefined}
+            title={!isProfitable ? "La ganancia no supera tu umbral de riesgo para endeudarte" : undefined}
           >
             {loading === "credit" ? <><Loader2 className="w-4 h-4 animate-spin" /> Procesando...</> : "Pedir préstamo y seguir operando"}
           </button>
@@ -422,7 +434,7 @@ function FundsModal({ exchange, usd, btc, onClose, onSubmit }: {
 }
 
 export default function Home() {
-  const { sessionReady, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, adjustFunds, shutdownEngine } = useArusEngine();
+  const { sessionReady, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, adjustFunds, setParams, shutdownEngine } = useArusEngine();
   
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showInjectionModal, setShowInjectionModal] = useState(false);
@@ -535,10 +547,11 @@ export default function Home() {
         </div>
       )}
 
-      <InsufficientFundsModal 
+      <InsufficientFundsModal
         open={state.insufficientFundsModal?.open}
         profitPotential={state.insufficientFundsModal?.profitPotential}
         creditCost={state.insufficientFundsModal?.creditCost}
+        creditRequired={state.insufficientFundsModal?.creditRequired}
         onRequestCredit={requestCredit}
         onWaitRebalance={waitRebalance}
         onShutdown={shutdownEngine}
@@ -1150,8 +1163,11 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Estrategia — el usuario personaliza umbrales, fees y apetito de riesgo */}
+        <StrategyPanel params={state.params} onApply={setParams} />
+
         {/* Ledger / Auditoría Institucional — demuestra la persistencia de datos */}
-        <LedgerPanel />
+        <LedgerPanel sessionId={state.sessionId} />
       </main>
     </div>
   );

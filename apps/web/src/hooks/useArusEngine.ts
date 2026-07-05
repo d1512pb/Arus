@@ -21,7 +21,22 @@ export interface LogEntry {
   netProfit?: number;
 }
 
+// Parámetros de estrategia editables en vivo (espejo de TradingParameters en Go).
+// El backend clampea cada campo a rangos sanos y devuelve lo APLICADO vía
+// PARAMS_UPDATED — la UI siempre pinta lo aplicado, no lo solicitado.
+export interface TradingParams {
+  taker_fees: Record<string, number>;
+  min_net_profit_usd: number;
+  max_order_size_btc: number;
+  slippage_rate: number;
+  spike_tick_deviation: number;
+  max_divergence_ratio: number;
+  risk_multiplier: number;
+}
+
 export interface EngineState {
+  sessionId: string;
+  params: TradingParams | null;
   trades: Trade[];
   totalWealth: number;
   initialWealth: number;
@@ -45,7 +60,7 @@ export interface EngineState {
   rebalanceSuccessAmount: number | null;
   logs: LogEntry[];
   autoCreditMode: boolean;
-  insufficientFundsModal: { open: boolean; profitPotential: number; creditCost: number };
+  insufficientFundsModal: { open: boolean; profitPotential: number; creditCost: number; creditRequired: number };
   creditActiveState: { active: boolean; expiresAt: Date | null; depleted?: boolean };
   loanResults: { earnings: number; cost: number } | null;
   engineRunning: boolean;
@@ -75,6 +90,8 @@ function borrowedFromData(data: Record<string, unknown>) {
 export function useArusEngine() {
   const [sessionReady, setSessionReady] = useState(false);
   const [state, setState] = useState<EngineState>({
+    sessionId: "",
+    params: null,
     trades: [],
     totalWealth: 0,
     initialWealth: 0,
@@ -92,7 +109,7 @@ export function useArusEngine() {
     rebalanceSuccessAmount: null,
     logs: [],
     autoCreditMode: false,
-    insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0 },
+    insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
     creditActiveState: { active: false, expiresAt: null, depleted: false },
     loanResults: null,
     engineRunning: true,
@@ -180,6 +197,14 @@ export function useArusEngine() {
     }
   }, []);
 
+  // Personalización de estrategia en vivo: envía el struct COMPLETO de parámetros.
+  // El backend clampea y responde PARAMS_UPDATED con lo realmente aplicado.
+  const setParams = useCallback((params: TradingParams) => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ action: "set_params", params }));
+    }
+  }, []);
+
   const shutdownEngine = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ action: "shutdown_engine" }));
@@ -209,6 +234,8 @@ export function useArusEngine() {
       setSessionReady(true);
       setState(prev => ({
         ...prev,
+        sessionId: (data.session_id as string) || prev.sessionId,
+        params: (data.params as TradingParams) ?? prev.params,
         totalWealth: (data.total_wealth as number) ?? prev.totalWealth,
         initialWealth: (data.initial_wealth as number) || prev.initialWealth,
         initialUsd: (data.initial_usd as number) || prev.initialUsd,
@@ -225,9 +252,11 @@ export function useArusEngine() {
         isRebalancing: false,
         rebalanceExpiresAt: null,
         creditActiveState: { active: false, expiresAt: null, depleted: false },
-        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0 },
+        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
         loanResults: null,
       }));
+    } else if (data.type === "PARAMS_UPDATED") {
+      setState(prev => ({ ...prev, params: (data.params as TradingParams) ?? prev.params }));
     } else if (data.type === "log") {
       setState(prev => {
         const next = [...prev.logs, data as unknown as LogEntry];
@@ -242,13 +271,15 @@ export function useArusEngine() {
           open: true,
           profitPotential: (data.profit_potential as number) || 0,
           creditCost: (data.credit_cost as number) || 0,
+          // Umbral real de la decisión: costo × multiplicador de riesgo del usuario.
+          creditRequired: (data.credit_required as number) || (data.credit_cost as number) || 0,
         },
       }));
     } else if (data.type === "CREDIT_APPROVED" || data.type === "CREDIT_AUTO_APPROVED") {
       setState(prev => ({
         ...prev,
         ...applyWalletSync(prev),
-        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0 },
+        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
         creditActiveState: {
           active: true,
           expiresAt: data.expires_at ? new Date(data.expires_at as string) : null,
@@ -280,7 +311,7 @@ export function useArusEngine() {
         isRebalancing: true,
         rebalanceMessage: (data.message as string) || "Reequilibrando fondos entre exchanges...",
         rebalanceExpiresAt: data.replenish_expires_at ? new Date(data.replenish_expires_at as string) : null,
-        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0 },
+        insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
       }));
     } else if (data.type === "REPLENISHING_COMPLETE") {
       setState(prev => ({
@@ -345,6 +376,7 @@ export function useArusEngine() {
     requestCredit,
     waitRebalance,
     adjustFunds,
+    setParams,
     shutdownEngine,
   };
 }

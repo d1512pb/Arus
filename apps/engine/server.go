@@ -18,11 +18,6 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// wsWriteMutex is used to avoid concurrent writes to the same websocket connection
-var wsWriteMutex = make(map[*websocket.Conn]*time.Time) // mock map, better to lock inside session
-// actually we can just add a writeMutex to ClientSession if needed, but for simplicity let's use a global map or just not lock. 
-// Standard practice for Gorilla is a write channel or mutex. We will just use s.Mu for simplicity when writing, but it's dangerous. Let's not lock writes for now to avoid deadlocks.
-
 func initSession(s *ClientSession, usd, btc float64) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -30,25 +25,24 @@ func initSession(s *ClientSession, usd, btc float64) {
 	half := usd / 2.0
 	halfBTC := btc / 2.0
 
-	s.Wallets = map[string]*Wallet{
-		"Binance": {USD: half, BTC: halfBTC},
-		"Bitso":   {USD: half, BTC: halfBTC},
+	// Wallets se crean desde el registro de venues: agregar un exchange nuevo no
+	// requiere tocar esta función.
+	s.Wallets = make(map[string]*Wallet, len(Venues))
+	for _, v := range Venues {
+		s.Wallets[v.Name] = &Wallet{USD: half, BTC: halfBTC}
 	}
 
 	btcPrice := DefaultBTCPriceFallback
-	currentMarket.mu.Lock()
-	if currentMarket.BinanceAsk > 0 {
-		btcPrice = currentMarket.BinanceAsk
+	if book, ok := currentMarket.Get("Binance"); ok && book.Ask > 0 {
+		btcPrice = book.Ask
 	}
-	currentMarket.mu.Unlock()
 
 	s.TotalWealth = usd + (btc * btcPrice)
 	s.InitialWealth = s.TotalWealth // base del PnL = patrimonio al iniciar
 	s.TotalNetProfit = 0
 	s.Credit = CreditState{}
-	// NOTA: Params NO se toca aquí. Se fija una sola vez al crear la sesión (wsHandler) y
-	// es inmutable durante su vida, así que reset_session (que re-invoca initSession) no
-	// reintroduce un escritor concurrente que haría carrera con los lectores sin lock.
+	// NOTA: los parámetros de estrategia NO se tocan aquí: un reset de fondos no
+	// borra la configuración de riesgo que el usuario eligió (set_params).
 	s.InitialUSD = usd
 	s.InitialBTC = btc
 	s.IsReplenishing = false
@@ -73,7 +67,7 @@ func validInitFunds(usd, btc float64) bool {
 // sanitizeDemoInject valida y CLAMPEA los parámetros de una inyección del simulador.
 // Devuelve ok=false si son irrecuperables (exchange desconocido, NaN/Inf, liquidez ≤ 0).
 func sanitizeDemoInject(exchange string, spread, liquidity float64) (string, float64, float64, bool) {
-	if exchange != "Binance" && exchange != "Bitso" {
+	if !isKnownVenue(exchange) {
 		return "", 0, 0, false
 	}
 	if math.IsNaN(spread) || math.IsInf(spread, 0) || math.IsNaN(liquidity) || math.IsInf(liquidity, 0) {
@@ -91,6 +85,50 @@ func sanitizeDemoInject(exchange string, spread, liquidity float64) (string, flo
 		spread = -MaxDemoSpreadUSD
 	}
 	return exchange, spread, liquidity, true
+}
+
+// clampFloat acota v a [lo, hi]; NaN/Inf caen al valor de respaldo fallback.
+func clampFloat(v, lo, hi, fallback float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fallback
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// sanitizeTradingParams construye los parámetros APLICABLES a partir de lo que pidió
+// el cliente: cada campo se clampea a su rango sano (models.go) y los fees solo se
+// aceptan para venues registrados (claves desconocidas se descartan; venues ausentes
+// reciben su fee por defecto). El resultado es siempre un snapshot completo y válido:
+// no existe forma de dejar una sesión con parámetros corruptos.
+func sanitizeTradingParams(requested TradingParameters) TradingParameters {
+	defaults := DefaultTradingParameters()
+
+	fees := make(map[string]float64, len(Venues))
+	for _, v := range Venues {
+		fee := v.DefaultTakerFee
+		if requested.TakerFees != nil {
+			if f, ok := requested.TakerFees[v.Name]; ok {
+				fee = clampFloat(f, MinTakerFee, MaxTakerFee, v.DefaultTakerFee)
+			}
+		}
+		fees[v.Name] = fee
+	}
+
+	return TradingParameters{
+		TakerFees:          fees,
+		MinNetProfitUSD:    clampFloat(requested.MinNetProfitUSD, MinNetProfitFloor, MaxNetProfitCeil, defaults.MinNetProfitUSD),
+		MaxOrderSizeBTC:    clampFloat(requested.MaxOrderSizeBTC, MinOrderSizeBTC, MaxOrderSizeCapBTC, defaults.MaxOrderSizeBTC),
+		SlippageRate:       clampFloat(requested.SlippageRate, MinSlippageRate, MaxSlippageRate, defaults.SlippageRate),
+		SpikeTickDeviation: clampFloat(requested.SpikeTickDeviation, MinSpikeDeviation, MaxSpikeDeviation, defaults.SpikeTickDeviation),
+		MaxDivergenceRatio: clampFloat(requested.MaxDivergenceRatio, MinDivergenceRatioLimit, MaxDivergenceRatioLimit, defaults.MaxDivergenceRatio),
+		RiskMultiplier:     clampFloat(requested.RiskMultiplier, MinRiskMultiplier, MaxRiskMultiplier, defaults.RiskMultiplier),
+	}
 }
 
 func sendEvent(s *ClientSession, ev ServerEvent) {
@@ -113,8 +151,19 @@ func sendEvent(s *ClientSession, ev ServerEvent) {
 		return
 	}
 
-	// We ignore concurrent write errors for this demo, or we could add a dedicated write mutex.
 	s.WriteMessage(websocket.TextMessage, payload)
+}
+
+// sendParamsUpdate notifica a la sesión sus parámetros VIGENTES (post-clamps).
+// La UI pinta siempre lo aplicado, nunca lo solicitado.
+func sendParamsUpdate(s *ClientSession, eventType string, msg string) {
+	p := s.Params()
+	sendEvent(s, ServerEvent{
+		Type:      eventType,
+		SessionID: s.ID,
+		Message:   msg,
+		Params:    &p,
+	})
 }
 
 func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
@@ -124,17 +173,10 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			return
 		}
 
-		// Params se fija UNA sola vez aquí, en la creación de la sesión, ANTES de hub.Add:
-		// el happens-before del RWMutex del Hub ordena esta escritura antes de cualquier
-		// hub.Snapshot()/fan-out, así que los lectores del hot path leen session.Params SIN
-		// lock (value object inmutable durante la vida de la sesión). reset_session NO lo
-		// reescribe. Cuando un sprint futuro permita editar parámetros desde la UI, esas
-		// escrituras deberán sincronizarse con session.Mu.
-		session := &ClientSession{
-			ID:     generateUUID(),
-			Conn:   conn,
-			Params: DefaultTradingParameters(),
-		}
+		// La sesión nace con los parámetros por defecto ya publicados (snapshot
+		// atómico): cualquier lector del hot path ve parámetros válidos desde el
+		// primer instante, y set_params puede reemplazarlos en vivo sin locks.
+		session := newClientSession(generateUUID(), conn)
 		hub.Add(session)
 		defer func() {
 			hub.Remove(session.ID)
@@ -158,11 +200,29 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 					continue
 				}
 				initSession(session, msg.InitialUSD, msg.InitialBTC)
-				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada"})
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada", Params: &p})
 
 			case "reset_session":
 				initSession(session, session.InitialUSD, session.InitialBTC)
-				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada"})
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada", Params: &p})
+
+			case "set_params":
+				// Personalización de estrategia EN VIVO: el usuario define su apetito
+				// de riesgo (margen mínimo, tamaño de orden, slippage estimado, fees,
+				// multiplicador de crédito). El backend clampea todo a rangos sanos.
+				if msg.Params == nil {
+					sendLog(session, "🛑 [VALIDACIÓN] set_params sin parámetros — ignorado.")
+					continue
+				}
+				applied := sanitizeTradingParams(*msg.Params)
+				session.SetParams(applied)
+				log.Printf("🎛️ [PARAMS] Sesión %s: minNet=$%.2f maxOrden=%.4f BTC slip=%.1f bps riesgo=%.1fx",
+					session.ID, applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier)
+				sendLog(session, fmt.Sprintf("🎛️ [ESTRATEGIA] Parámetros actualizados: margen mín. $%.2f | orden máx. %.4f BTC | slippage %.1f bps | riesgo crédito %.1fx",
+					applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier))
+				sendParamsUpdate(session, "PARAMS_UPDATED", "Parámetros de estrategia aplicados")
 
 			case "demo_inject":
 				// Validación + clamp de backend: exchange conocido, sin NaN/Inf, liquidez > 0
@@ -221,9 +281,9 @@ func ledgerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	records := []TradeRecord{}
-	// Sin session_id no devolvemos nada (cierra la fuga). Respondemos [] —y NO 400— para
-	// no romper el panel de auditoría del frontend desplegado, que todavía consulta
-	// /api/ledger sin el parámetro; se actualizará en el siguiente sprint.
+	// Sin session_id no devolvemos nada (cierra la fuga). Respondemos [] —y NO 400—
+	// como respuesta neutra para clientes viejos; el panel de auditoría actual ya
+	// envía siempre su session_id.
 	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
 		var err error
 		records, err = getTradesForSession(sessionID, 100)
