@@ -106,6 +106,9 @@ func (s *SpreadTracker) Average() float64 {
 
 type HFTEngine struct {
 	Tracker *SpreadTracker
+	// Graph es el radar omnidireccional (Fase 2): el grafo de liquidez que se
+	// actualiza con cada tick y detecta ciclos de arbitraje automáticamente.
+	Graph *LiquidityGraph
 }
 
 func getLevel(msg string) string {
@@ -114,6 +117,9 @@ func getLevel(msg string) string {
 	}
 	if strings.Contains(msg, "[ARBITRAJE]") {
 		return "arb"
+	}
+	if strings.Contains(msg, "[RADAR]") {
+		return "opportunity"
 	}
 	if strings.Contains(msg, "SPIKE ALERTA") {
 		return "spike_warn"
@@ -333,6 +339,9 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 	states := make(map[string]*venueTickState)
 	lastLogTime := time.Now()
 	lastStaleLog := time.Time{}
+	// radarCycleActive evita repetir el log del radar en cada barrido: se anuncia
+	// al APARECER un ciclo rentable, no mientras persiste.
+	radarCycleActive := false
 	// Fees de referencia del registro, resueltos UNA vez fuera del hot loop
 	// (defaultTakerFees construye un mapa nuevo por llamada — no per-tick).
 	refFees := defaultTakerFees()
@@ -358,6 +367,12 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 		}
 		st.book = TopOfBook{Ask: tick.Ask, Bid: tick.Bid, AskQty: tick.AskQty, BidQty: tick.BidQty, UpdatedAt: when}
 		st.hasData = true
+
+		// Radar omnidireccional: el grafo refleja cada tick aceptado (O(1): solo
+		// las 2 aristas del libro afectado).
+		if e.Graph != nil {
+			e.Graph.UpdateBook(tick.Exchange, st.book)
+		}
 
 		bin, bit := states["Binance"], states["Bitso"]
 		if bin == nil || bit == nil || !bin.hasData || !bit.hasData {
@@ -428,6 +443,18 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 
 		if time.Since(lastLogTime) >= time.Second {
 			lastLogTime = time.Now()
+
+			// Radar (Fase 2): un solo Bellman-Ford por barrido; el snapshot por
+			// sesión solo superpone los saldos de cada usuario sobre el grafo.
+			var cycle *Cycle
+			if e.Graph != nil {
+				cycle = e.Graph.FindBestCycle(now)
+				if cycle != nil && !radarCycleActive {
+					broadcastLog(hub, fmt.Sprintf("📡 [RADAR] Ciclo rentable detectado: %s", DescribeCycle(cycle)), 0, cycle.NetReturn)
+				}
+				radarCycleActive = cycle != nil
+			}
+
 			for _, s := range hub.Snapshot() {
 				sendEvent(s, ServerEvent{
 					Type:         "market_update",
@@ -435,6 +462,16 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 					BitsoPrice:   bitsoMid,
 					Spread:       spread,
 				})
+				if e.Graph != nil && s.IsInitialized() {
+					s.Mu.Lock()
+					wallets := make(map[string]Wallet, len(s.Wallets))
+					for name, w := range s.Wallets {
+						wallets[name] = *w
+					}
+					s.Mu.Unlock()
+					snap := e.Graph.SnapshotFor(wallets, cycle, now)
+					sendEvent(s, ServerEvent{Type: "graph_update", SessionID: s.ID, Graph: snap})
+				}
 			}
 		}
 

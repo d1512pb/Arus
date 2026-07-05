@@ -1,9 +1,11 @@
 # Fase 2 — Motor de arbitraje omnidireccional (grafo de liquidez)
 
-> **Estado: DISEÑO.** Este documento define la Fase 2 para que se construya sobre la
-> Fase 1 sin retrabajos. Los tipos preparatorios ya existen en `apps/engine/graph.go`
-> (solo contratos, sin lógica). **No iniciar la implementación hasta validar la
-> solidez de la Fase 1 en producción de demo.**
+> **Estado: RADAR IMPLEMENTADO (hito 1).** El grafo de liquidez vive en
+> `apps/engine/graph.go`: se construye desde el registro de venues, se actualiza
+> con cada tick real (O(1) por libro), detecta ciclos negativos con Bellman-Ford
+> y se emite a la UI (~1/s) con los saldos de cada sesión superpuestos
+> (`GraphPanel`). La **ejecución de ciclos** sigue a cargo del núcleo de dos
+> venues probado — pasar la ejecución al grafo es el siguiente hito (sección 3).
 
 ## 1. Idea central
 
@@ -37,6 +39,24 @@ formalismo que usan los desks institucionales de arbitraje cross-venue.
 - **El costo de rebalancear se vuelve honesto.** `EdgeTransfer` carga fee de retiro,
   fee de red y latencia: la decisión crédito-vs-reequilibrio de la Fase 0 pasa a
   comparar contra el costo REAL de mover inventario.
+
+## 2.5 Qué hay implementado hoy (modo radar)
+
+- **Topología desde el registro:** 2 nodos por venue (base/quote), 2 aristas de
+  libro por venue, paridad entre quotes (USDT≈USD **visible y etiquetada**) y
+  swap de inventario pre-fondeado entre bases (tasa 1, costo 0 en demo).
+- **Actualización O(1) por tick:** cada tick aceptado refresca las 2 aristas de su
+  libro (tasa, fee efectivo = taker + slippage de referencia, liquidez, peso
+  `−log(tasa·(1−fee))` precalculado).
+- **Detección automática:** Bellman-Ford con fuente virtual cada barrido (~1/s);
+  las aristas de libro congeladas (>10 s) se excluyen — mismo criterio de
+  staleness de la Fase 1. Un ciclo nuevo se anuncia una sola vez en el feed
+  (`[RADAR] Ciclo rentable detectado: USDT@Binance → … (+0.12 % neto)`).
+- **Snapshot por sesión (`graph_update`):** el grafo global + los saldos del
+  usuario en cada nodo — "tu dinero en cada exchange y por dónde puede fluir".
+- **Aún NO:** ejecutar el ciclo detectado (radar ≠ gatillo), poda por Universe
+  por sesión, y fees personalizados en los pesos (usa los de referencia y la UI
+  lo declara).
 
 ## 3. Primer hito demostrable (el más barato)
 

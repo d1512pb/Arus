@@ -21,6 +21,10 @@ func main() {
 
 	engine := &HFTEngine{
 		Tracker: NewSpreadTracker(),
+		// Radar omnidireccional (Fase 2): grafo de liquidez construido desde el
+		// registro de venues, actualizado por tick y con detección automática de
+		// ciclos de arbitraje (Bellman-Ford sobre pesos -log(tasa·(1-fee))).
+		Graph: NewLiquidityGraph(),
 	}
 
 	http.HandleFunc("/ws", wsHandler(hub, engine))

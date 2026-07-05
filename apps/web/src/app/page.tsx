@@ -6,6 +6,7 @@ import { useArusEngine, LogEntry } from "../hooks/useArusEngine";
 import { OnboardingModal } from "../components/OnboardingModal";
 import { LedgerPanel } from "../components/LedgerPanel";
 import { StrategyPanel } from "../components/StrategyPanel";
+import { GraphPanel } from "../components/GraphPanel";
 import { TutorialModal } from "../components/TutorialModal";
 
 function logColor(level: string): string {
@@ -1162,6 +1163,9 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* Radar omnidireccional (Fase 2) — el grafo de liquidez en vivo */}
+        <GraphPanel graph={state.graph} />
 
         {/* Estrategia — el usuario personaliza umbrales, fees y apetito de riesgo */}
         <StrategyPanel params={state.params} onApply={setParams} />

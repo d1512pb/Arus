@@ -357,6 +357,10 @@ type ServerEvent struct {
 	// Params viaja en state_update y PARAMS_UPDATED para que la UI siempre refleje
 	// los parámetros APLICADOS (tras clamps del backend), no los que pidió.
 	Params *TradingParameters `json:"params,omitempty"`
+
+	// Graph viaja en los eventos graph_update (~1/s): el radar omnidireccional
+	// con los saldos de ESTA sesión superpuestos en cada nodo (ver graph.go).
+	Graph *GraphSnapshotWire `json:"graph,omitempty"`
 }
 
 // PriceTick representa un evento de mercado normalizado que un FeedAdapter publica

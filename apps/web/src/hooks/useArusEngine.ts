@@ -34,9 +34,47 @@ export interface TradingParams {
   risk_multiplier: number;
 }
 
+// --- Radar omnidireccional (Fase 2): espejo de GraphSnapshotWire en Go ---
+
+export interface GraphNode {
+  id: string;    // "BTC@Binance"
+  asset: string; // "BTC" | "USDT" | "USD"
+  venue: string;
+  balance: number;
+  balance_usd: number;
+  price_usd: number;
+  feed_stale: boolean;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  kind: "book" | "parity" | "inventory" | "transfer";
+  rate: number;
+  fee_pct: number;
+  liquidity_btc: number;
+  stale: boolean;
+}
+
+export interface GraphCycle {
+  path: string[]; // cerrado: primero == último
+  net_return_pct: number;
+  max_volume_btc: number;
+  viable: boolean;
+}
+
+export interface GraphSnapshot {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  best_cycle?: GraphCycle;
+  parity_assumed: boolean;
+  updated_at: string;
+}
+
 export interface EngineState {
   sessionId: string;
   params: TradingParams | null;
+  graph: GraphSnapshot | null;
   trades: Trade[];
   totalWealth: number;
   initialWealth: number;
@@ -92,6 +130,7 @@ export function useArusEngine() {
   const [state, setState] = useState<EngineState>({
     sessionId: "",
     params: null,
+    graph: null,
     trades: [],
     totalWealth: 0,
     initialWealth: 0,
@@ -257,6 +296,8 @@ export function useArusEngine() {
       }));
     } else if (data.type === "PARAMS_UPDATED") {
       setState(prev => ({ ...prev, params: (data.params as TradingParams) ?? prev.params }));
+    } else if (data.type === "graph_update") {
+      setState(prev => ({ ...prev, graph: (data.graph as GraphSnapshot) ?? prev.graph }));
     } else if (data.type === "log") {
       setState(prev => {
         const next = [...prev.logs, data as unknown as LogEntry];
