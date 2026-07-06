@@ -33,7 +33,7 @@ func initSession(s *ClientSession, usd, btc float64) {
 	}
 
 	btcPrice := DefaultBTCPriceFallback
-	if book, ok := currentMarket.Get("Binance"); ok && book.Ask > 0 {
+	if book, ok := currentMarket.Get("Binance:BTC/USDT"); ok && book.Ask > 0 {
 		btcPrice = book.Ask
 	}
 

@@ -1,11 +1,14 @@
 # Fase 2 — Motor de arbitraje omnidireccional (grafo de liquidez)
 
-> **Estado: RADAR IMPLEMENTADO (hito 1).** El grafo de liquidez vive en
-> `apps/engine/graph.go`: se construye desde el registro de venues, se actualiza
-> con cada tick real (O(1) por libro), detecta ciclos negativos con Bellman-Ford
-> y se emite a la UI (~1/s) con los saldos de cada sesión superpuestos
-> (`GraphPanel`). La **ejecución de ciclos** sigue a cargo del núcleo de dos
-> venues probado — pasar la ejecución al grafo es el siguiente hito (sección 3).
+> **Estado: RADAR MULTI-INSTRUMENTO IMPLEMENTADO (hitos 1 y 2).** El grafo de
+> liquidez vive en `apps/engine/graph.go`: la topología nace del registro de
+> INSTRUMENTOS (un venue publica N libros — Binance emite el triángulo BTC/USDT ·
+> ETH/USDT · ETH/BTC por un solo socket de streams combinados), se actualiza con
+> cada tick real (O(1) por libro), detecta ciclos negativos con Bellman-Ford
+> (espaciales Y TRIANGULARES) y se emite a la UI (~1/s) con los saldos de cada
+> sesión superpuestos (`GraphPanel`). La **ejecución de ciclos** sigue a cargo
+> del núcleo de dos venues probado — pasarla al grafo es el hito 3 (sección 3):
+> requiere wallets multi-activo (hoy ETH se radaría con saldo 0).
 
 ## 1. Idea central
 
@@ -40,23 +43,33 @@ formalismo que usan los desks institucionales de arbitraje cross-venue.
   fee de red y latencia: la decisión crédito-vs-reequilibrio de la Fase 0 pasa a
   comparar contra el costo REAL de mover inventario.
 
-## 2.5 Qué hay implementado hoy (modo radar)
+## 2.5 Qué hay implementado hoy (modo radar multi-instrumento)
 
-- **Topología desde el registro:** 2 nodos por venue (base/quote), 2 aristas de
-  libro por venue, paridad entre quotes (USDT≈USD **visible y etiquetada**) y
-  swap de inventario pre-fondeado entre bases (tasa 1, costo 0 en demo).
-- **Actualización O(1) por tick:** cada tick aceptado refresca las 2 aristas de su
-  libro (tasa, fee efectivo = taker + slippage de referencia, liquidez, peso
-  `−log(tasa·(1−fee))` precalculado).
-- **Detección automática:** Bellman-Ford con fuente virtual cada barrido (~1/s);
-  las aristas de libro congeladas (>10 s) se excluyen — mismo criterio de
-  staleness de la Fase 1. Un ciclo nuevo se anuncia una sola vez en el feed
-  (`[RADAR] Ciclo rentable detectado: USDT@Binance → … (+0.12 % neto)`).
+- **Instrumentos como datos:** `Instruments` en venues.go registra N libros por
+  venue; agregar un par = 1 entrada (el FeedAdapter se suscribe solo, el grafo
+  gana nodos/aristas, el radar lo cubre). Binance corre 3 libros por un único
+  socket de streams combinados; Bitso 1.
+- **Topología desde instrumentos:** 1 nodo por (venue, activo); 2 aristas de
+  libro por instrumento; paridad entre activos declarados equivalentes
+  (USDT≈USD **visible y etiquetada**) y swap de inventario pre-fondeado entre el
+  mismo activo cross-venue (tasa 1, costo 0 en demo).
+- **Actualización O(1) por tick:** cada tick refresca las 2 aristas de su libro
+  (tasa, fee efectivo = taker + slippage de referencia, liquidez en unidades del
+  base, peso `−log(tasa·(1−fee))` precalculado). Spike Filter y staleness POR
+  LIBRO (no por venue).
+- **Detección automática:** Bellman-Ford con fuente virtual cada barrido (~1/s)
+  encuentra ciclos espaciales (2 libros + swap + paridad) **y triangulares**
+  (3 libros dentro de Binance) con el mismo algoritmo; libros congelados (>10 s)
+  excluidos. Un ciclo nuevo se anuncia una sola vez en el feed (`[RADAR] …`).
 - **Snapshot por sesión (`graph_update`):** el grafo global + los saldos del
-  usuario en cada nodo — "tu dinero en cada exchange y por dónde puede fluir".
+  usuario en cada nodo (clasificados cash/crypto, con precio USD real); los
+  activos sin wallet respaldada (ETH) aparecen con saldo 0 y precio real.
+- **Volumen de ciclo:** homogéneo (min de liquidez) solo si todas las piernas de
+  libro comparten activo base; en triangulares (bases mixtas) se reporta "no
+  homogéneo" hasta el ejecutor del hito 3.
 - **Aún NO:** ejecutar el ciclo detectado (radar ≠ gatillo), poda por Universe
-  por sesión, y fees personalizados en los pesos (usa los de referencia y la UI
-  lo declara).
+  por sesión, fees personalizados en los pesos (usa referencia y la UI lo
+  declara) y wallets multi-activo (prerequisito del ejecutor).
 
 ## 3. Primer hito demostrable (el más barato)
 

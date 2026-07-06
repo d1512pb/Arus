@@ -8,17 +8,19 @@ import (
 
 func closeTo(a, b, tol float64) bool { return math.Abs(a-b) <= tol }
 
-// TestGraphTopology: la topología nace del registro de venues — 2 nodos por venue,
-// 2 aristas de libro por venue, paridad entre quotes y swap de inventario entre bases.
+// TestGraphTopology: la topología nace del registro de INSTRUMENTOS — un nodo por
+// (venue, activo), 2 aristas de libro por instrumento, swaps de inventario entre
+// mismo activo cross-venue y paridad entre activos declarados equivalentes.
 func TestGraphTopology(t *testing.T) {
 	g := NewLiquidityGraph()
 
-	if len(g.nodes) != 2*len(Venues) {
-		t.Fatalf("nodos=%d, esperado %d", len(g.nodes), 2*len(Venues))
+	// Con el registro actual: Binance {USDT, BTC, ETH} + Bitso {USD, BTC} = 5 nodos.
+	if len(g.nodes) != 5 {
+		t.Fatalf("nodos=%d, esperado 5", len(g.nodes))
 	}
-	// Con 2 venues: 4 libro + 2 paridad (USDT↔USD) + 2 swap (BTC↔BTC) = 8.
-	if len(g.edges) != 8 {
-		t.Fatalf("aristas=%d, esperado 8", len(g.edges))
+	// Aristas: 4 instrumentos × 2 (libro) + BTC↔BTC (2 swap) + USDT↔USD (2 paridad) = 12.
+	if len(g.edges) != 12 {
+		t.Fatalf("aristas=%d, esperado 12", len(g.edges))
 	}
 
 	usdtBin := MarketNode{Asset: "USDT", Venue: "Binance"}
@@ -31,6 +33,15 @@ func TestGraphTopology(t *testing.T) {
 	if e := g.edges[edgeKey(btcBin, btcBit)]; e == nil || e.Kind != EdgeInventorySwap {
 		t.Fatal("falta el swap de inventario BTC@Binance→BTC@Bitso")
 	}
+	// El triángulo de Binance: aristas de libro ETH/BTC dentro del mismo venue.
+	ethBin := MarketNode{Asset: "ETH", Venue: "Binance"}
+	if e := g.edges[edgeKey(btcBin, ethBin)]; e == nil || e.Kind != EdgeOrderBook || e.BaseAsset != "ETH" {
+		t.Fatal("falta la arista de libro BTC@Binance→ETH@Binance (comprar ETH/BTC)")
+	}
+	// ETH no existe en Bitso: no debe haber swap ETH cross-venue.
+	if _, ok := g.edges[edgeKey(ethBin, MarketNode{Asset: "ETH", Venue: "Bitso"})]; ok {
+		t.Fatal("swap de inventario hacia un nodo inexistente (ETH@Bitso)")
+	}
 }
 
 // TestGraphUpdateBook: las aristas de libro toman tasa, fee efectivo (taker +
@@ -38,7 +49,7 @@ func TestGraphTopology(t *testing.T) {
 func TestGraphUpdateBook(t *testing.T) {
 	g := NewLiquidityGraph()
 	now := time.Now()
-	g.UpdateBook("Binance", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
 
 	quote := MarketNode{Asset: "USDT", Venue: "Binance"}
 	base := MarketNode{Asset: "BTC", Venue: "Binance"}
@@ -60,6 +71,9 @@ func TestGraphUpdateBook(t *testing.T) {
 	if sell == nil || !closeTo(sell.Rate, 59_990, 1e-9) || sell.Liquidity != 1.5 {
 		t.Fatalf("arista de venta mal poblada: %+v", sell)
 	}
+
+	// Clave desconocida: no debe tocar nada ni hacer panic.
+	g.UpdateBook("Kraken:BTC/USD", TopOfBook{Ask: 1, Bid: 1, UpdatedAt: now})
 }
 
 // DefaultBinanceFeeForTest evita acoplarse a literales: lee el registro.
@@ -73,8 +87,11 @@ func DefaultBinanceFeeForTest() float64 {
 func TestFindBestCycle_NoArb(t *testing.T) {
 	g := NewLiquidityGraph()
 	now := time.Now()
-	g.UpdateBook("Binance", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
-	g.UpdateBook("Bitso", TopOfBook{Ask: 60_010, Bid: 60_000, AskQty: 1, BidQty: 1, UpdatedAt: now})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_010, Bid: 60_000, AskQty: 1, BidQty: 1, UpdatedAt: now})
+	// Triángulo coherente con esos precios (ETH ≈ $3 000, ETH/BTC ≈ 0.05): sin arb.
+	g.UpdateBook("Binance:ETH/USDT", TopOfBook{Ask: 3_000.3, Bid: 3_000, AskQty: 10, BidQty: 10, UpdatedAt: now})
+	g.UpdateBook("Binance:ETH/BTC", TopOfBook{Ask: 0.05001, Bid: 0.05, AskQty: 10, BidQty: 10, UpdatedAt: now})
 
 	if c := g.FindBestCycle(now); c != nil {
 		t.Fatalf("ciclo fantasma detectado: %s", DescribeCycle(c))
@@ -82,12 +99,12 @@ func TestFindBestCycle_NoArb(t *testing.T) {
 }
 
 // TestFindBestCycle_Profitable: un spread grande entre venues produce el ciclo
-// comprar@Binance → swap → vender@Bitso → paridad, con la tasa neta exacta.
+// espacial comprar@Binance → swap → vender@Bitso → paridad, con la tasa neta exacta.
 func TestFindBestCycle_Profitable(t *testing.T) {
 	g := NewLiquidityGraph()
 	now := time.Now()
-	g.UpdateBook("Binance", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
-	g.UpdateBook("Bitso", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 0.8, BidQty: 0.4, UpdatedAt: now})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 0.8, BidQty: 0.4, UpdatedAt: now})
 
 	c := g.FindBestCycle(now)
 	if c == nil {
@@ -102,12 +119,11 @@ func TestFindBestCycle_Profitable(t *testing.T) {
 		t.Fatalf("tasa neta=%v, esperada %v", c.NetReturn, wantNet)
 	}
 
-	// La liquidez la acota la pierna menos líquida de LIBRO (bid de Bitso: 0.4).
+	// Piernas de libro homogéneas (base BTC): la liquidez la acota el bid de Bitso.
 	if !closeTo(c.MaxVolumeBTC, 0.4, 1e-12) {
 		t.Fatalf("volumen máx=%v, esperado 0.4", c.MaxVolumeBTC)
 	}
 
-	// El ciclo debe pasar por los 4 nodos y cerrarse sobre sí mismo.
 	if len(c.Edges) != 4 {
 		t.Fatalf("longitud del ciclo=%d aristas, esperado 4 (%s)", len(c.Edges), DescribeCycle(c))
 	}
@@ -125,26 +141,67 @@ func TestFindBestCycle_Profitable(t *testing.T) {
 	}
 }
 
+// TestFindBestCycle_Triangular: el hito 2 en acción — un desalineamiento entre los
+// TRES libros de Binance produce un ciclo triangular DENTRO del exchange, sin que
+// Bitso participe (sus libros ni siquiera tienen datos).
+func TestFindBestCycle_Triangular(t *testing.T) {
+	g := NewLiquidityGraph()
+	now := time.Now()
+	// ETH/BTC cotiza "caro" respecto a los otros dos libros:
+	// (1/askETHUSDT) · bidETHBTC · bidBTCUSDT = (1/3000)·0.0515·59990 ≈ 1.0298 > 1.
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
+	g.UpdateBook("Binance:ETH/USDT", TopOfBook{Ask: 3_000, Bid: 2_999, AskQty: 10, BidQty: 10, UpdatedAt: now})
+	g.UpdateBook("Binance:ETH/BTC", TopOfBook{Ask: 0.0516, Bid: 0.0515, AskQty: 5, BidQty: 5, UpdatedAt: now})
+
+	c := g.FindBestCycle(now)
+	if c == nil {
+		t.Fatal("el radar no detectó el ciclo triangular")
+	}
+
+	// Todas las piernas deben ser de LIBRO y vivir en Binance.
+	if len(c.Edges) != 3 {
+		t.Fatalf("longitud del ciclo=%d, esperado 3 (%s)", len(c.Edges), DescribeCycle(c))
+	}
+	for _, e := range c.Edges {
+		if e.Kind != EdgeOrderBook || e.From.Venue != "Binance" || e.To.Venue != "Binance" {
+			t.Fatalf("pierna fuera del triángulo de Binance: %+v (%s)", e, DescribeCycle(c))
+		}
+	}
+
+	// Tasa neta exacta: producto de tasas × (1−fee)³ − 1.
+	fee := DefaultBinanceFeeForTest() + DefaultSlippageRate
+	wantNet := (1.0/3_000.0)*0.0515*59_990.0*math.Pow(1-fee, 3) - 1
+	if !closeTo(c.NetReturn, wantNet, 1e-9) {
+		t.Fatalf("tasa neta=%v, esperada %v (%s)", c.NetReturn, wantNet, DescribeCycle(c))
+	}
+
+	// Bases mixtas (ETH y BTC): el volumen homogéneo aún no aplica → 0.
+	if c.MaxVolumeBTC != 0 {
+		t.Fatalf("volumen=%v, esperado 0 (bases mixtas)", c.MaxVolumeBTC)
+	}
+}
+
 // TestFindBestCycle_StaleBookExcluded: un libro congelado no participa — el mismo
 // spread gigante que antes era ciclo deja de serlo si Bitso lleva >10s sin datos.
 func TestFindBestCycle_StaleBookExcluded(t *testing.T) {
 	g := NewLiquidityGraph()
 	now := time.Now()
-	g.UpdateBook("Binance", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
-	g.UpdateBook("Bitso", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 1, BidQty: 1, UpdatedAt: now.Add(-MaxBookStaleness - time.Second)})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 1, BidQty: 1, UpdatedAt: now.Add(-MaxBookStaleness - time.Second)})
 
 	if c := g.FindBestCycle(now); c != nil {
 		t.Fatalf("el radar usó un libro muerto: %s", DescribeCycle(c))
 	}
 }
 
-// TestSnapshotFor: el snapshot superpone los saldos del usuario en cada nodo y
-// expone el supuesto de paridad; los nodos base se valoran al mid de su venue.
+// TestSnapshotFor: el snapshot superpone los saldos del usuario en cada nodo,
+// clasifica cash/crypto, expone el supuesto de paridad y valora al mid.
 func TestSnapshotFor(t *testing.T) {
 	g := NewLiquidityGraph()
 	now := time.Now()
-	g.UpdateBook("Binance", TopOfBook{Ask: 60_010, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
-	g.UpdateBook("Bitso", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 1, BidQty: 0.4, UpdatedAt: now})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_010, Bid: 59_990, AskQty: 2, BidQty: 2, UpdatedAt: now})
+	g.UpdateBook("Binance:ETH/USDT", TopOfBook{Ask: 3_001, Bid: 2_999, AskQty: 10, BidQty: 10, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 1, BidQty: 0.4, UpdatedAt: now})
 
 	wallets := map[string]Wallet{
 		"Binance": {USD: 5_000, BTC: 0.5},
@@ -156,22 +213,26 @@ func TestSnapshotFor(t *testing.T) {
 	if !snap.ParityAssumed {
 		t.Fatal("el snapshot debe declarar el supuesto de paridad USDT≈USD")
 	}
-	if len(snap.Nodes) != 4 {
-		t.Fatalf("nodos en snapshot=%d, esperado 4", len(snap.Nodes))
+	if len(snap.Nodes) != 5 {
+		t.Fatalf("nodos en snapshot=%d, esperado 5", len(snap.Nodes))
 	}
 
 	byID := map[string]GraphNodeWire{}
 	for _, n := range snap.Nodes {
 		byID[n.ID] = n
 	}
-	if n := byID["BTC@Binance"]; n.Balance != 0.5 || !closeTo(n.PriceUSD, 60_000, 1e-9) || !closeTo(n.BalanceUSD, 30_000, 1e-6) {
+	if n := byID["BTC@Binance"]; n.Balance != 0.5 || n.Kind != "crypto" || !closeTo(n.PriceUSD, 60_000, 1e-9) || !closeTo(n.BalanceUSD, 30_000, 1e-6) {
 		t.Fatalf("BTC@Binance mal poblado: %+v", n)
 	}
-	if n := byID["USDT@Binance"]; n.Balance != 5_000 || n.PriceUSD != 1 {
+	if n := byID["USDT@Binance"]; n.Balance != 5_000 || n.Kind != "cash" || n.PriceUSD != 1 {
 		t.Fatalf("USDT@Binance mal poblado: %+v", n)
 	}
-	if n := byID["USD@Bitso"]; n.Balance != 7_000 {
+	if n := byID["USD@Bitso"]; n.Balance != 7_000 || n.Kind != "cash" {
 		t.Fatalf("USD@Bitso mal poblado: %+v", n)
+	}
+	// ETH: activo del radar sin wallet respaldada — saldo 0 pero precio real.
+	if n := byID["ETH@Binance"]; n.Balance != 0 || n.Kind != "crypto" || !closeTo(n.PriceUSD, 3_000, 1e-9) {
+		t.Fatalf("ETH@Binance mal poblado: %+v", n)
 	}
 
 	if snap.BestCycle == nil || !snap.BestCycle.Viable {

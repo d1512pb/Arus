@@ -364,15 +364,21 @@ type ServerEvent struct {
 }
 
 // PriceTick representa un evento de mercado normalizado que un FeedAdapter publica
-// hacia el motor: la mejor punta del libro de UN venue, con su liquidez y su hora.
+// hacia el motor: la mejor punta de UN LIBRO (venue + par), con su liquidez y su hora.
 type PriceTick struct {
 	Exchange string
+	Base     string  // activo base del libro ("BTC", "ETH")
+	Quote    string  // activo quote del libro ("USDT", "USD", "BTC")
 	Ask      float64 // Precio al que compramos (top of book)
 	Bid      float64 // Precio al que vendemos (top of book)
-	// AskQty/BidQty: cantidad (BTC) ofrecida en cada punta. 0 = desconocida; el
-	// motor la interpreta como "sin dato" y dimensiona solo con MaxOrderSizeBTC.
+	// AskQty/BidQty: cantidad (en Base) ofrecida en cada punta. 0 = desconocida;
+	// el motor la interpreta como "sin dato" y dimensiona solo con MaxOrderSizeBTC.
 	AskQty float64
 	BidQty float64
 	// Time habilita el control de staleness (no comparar libros muertos).
 	Time time.Time
 }
+
+// InstrKey identifica el libro del tick ("Binance:ETH/BTC") — misma convención
+// que Instrument.Key().
+func (t PriceTick) InstrKey() string { return t.Exchange + ":" + t.Base + "/" + t.Quote }

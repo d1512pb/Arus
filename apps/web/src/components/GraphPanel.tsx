@@ -12,28 +12,38 @@ import { GraphSnapshot, GraphNode, GraphEdge } from "../hooks/useArusEngine";
 // en cada uno — actualizada ~1 vez por segundo desde el backend.
 
 const W = 860;
-const H = 400;
+const H = 440;
 
 function fmtUSD(v: number): string {
   return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function fmtBalance(n: GraphNode): string {
-  return n.asset === "BTC" ? `${n.balance.toFixed(4)} ₿` : fmtUSD(n.balance);
+  if (n.kind === "cash") return fmtUSD(n.balance);
+  if (n.asset === "BTC") return `${n.balance.toFixed(4)} ₿`;
+  return `${n.balance.toFixed(4)} ${n.asset}`;
 }
 
-// Posiciones: una columna por venue (en orden de aparición), quote arriba y base abajo.
+// Posiciones: una columna por venue (en orden de aparición); dentro de cada
+// columna, el efectivo (cash) arriba y las criptomonedas apiladas debajo en
+// orden estable. Funciona para cualquier número de activos por venue.
 function layout(nodes: GraphNode[]): Map<string, { x: number; y: number }> {
   const venues: string[] = [];
   for (const n of nodes) if (!venues.includes(n.venue)) venues.push(n.venue);
 
   const pos = new Map<string, { x: number; y: number }>();
   const colW = W / Math.max(venues.length, 1);
-  nodes.forEach(n => {
-    const col = venues.indexOf(n.venue);
+  const yTop = 130, yBot = 340;
+
+  venues.forEach((venue, col) => {
+    const inVenue = nodes
+      .filter(n => n.venue === venue)
+      .sort((a, b) => (a.kind === b.kind ? a.asset.localeCompare(b.asset) : a.kind === "cash" ? -1 : 1));
     const x = colW * col + colW / 2;
-    const y = n.price_usd === 1 ? 120 : 285; // quote (USD/USDT) arriba, base (BTC) abajo
-    pos.set(n.id, { x, y });
+    inVenue.forEach((n, i) => {
+      const y = inVenue.length === 1 ? (yTop + yBot) / 2 : yTop + (i * (yBot - yTop)) / (inVenue.length - 1);
+      pos.set(n.id, { x, y });
+    });
   });
   return pos;
 }
@@ -69,11 +79,17 @@ function EdgePath({ edge, pos, highlighted }: { edge: GraphEdge; pos: Map<string
         ? "stroke-gray-300 dark:stroke-gray-700"
         : "stroke-gray-200 dark:stroke-gray-800";
 
-  // Etiqueta: precio para libros (tasa <1 = compra → mostramos el precio 1/rate).
+  // Etiqueta de libros: dirección por el activo base (comprar entra AL base,
+  // vender sale DEL base) y precio expresado en el activo quote del libro.
   let label = "";
-  if (isBook && edge.rate > 0) {
-    const price = edge.rate < 1 ? 1 / edge.rate : edge.rate;
-    label = `${edge.rate < 1 ? "compra" : "venta"} ${fmtUSD(price)} · fee ${edge.fee_pct.toFixed(2)}%`;
+  if (isBook && edge.rate > 0 && edge.base_asset) {
+    const isBuy = edge.to.startsWith(edge.base_asset + "@");
+    const price = isBuy ? 1 / edge.rate : edge.rate;
+    const quoteAsset = (isBuy ? edge.from : edge.to).split("@")[0];
+    const priceTxt = quoteAsset === "USD" || quoteAsset === "USDT"
+      ? fmtUSD(price)
+      : `${price.toFixed(5)} ${quoteAsset}`;
+    label = `${isBuy ? "compra" : "venta"} ${priceTxt} · fee ${edge.fee_pct.toFixed(2)}%`;
   } else if (edge.kind === "parity") {
     label = "≈ paridad 1:1 (supuesto declarado)";
   } else if (edge.kind === "inventory") {
@@ -102,7 +118,8 @@ function EdgePath({ edge, pos, highlighted }: { edge: GraphEdge; pos: Map<string
 }
 
 function NodeCircle({ node, pos, inBestCycle }: { node: GraphNode; pos: { x: number; y: number }; inBestCycle: boolean }) {
-  const isBTC = node.asset === "BTC";
+  const isCash = node.kind === "cash";
+  const assetColor = isCash ? "fill-blue-500" : node.asset === "BTC" ? "fill-amber-500" : "fill-violet-500";
   return (
     <g>
       <circle
@@ -112,20 +129,20 @@ function NodeCircle({ node, pos, inBestCycle }: { node: GraphNode; pos: { x: num
         className={`${inBestCycle ? "stroke-emerald-500" : "stroke-gray-200 dark:stroke-gray-700"} fill-white dark:fill-gray-900 transition-all duration-500`}
         strokeWidth={inBestCycle ? 3 : 1.5}
       />
-      <text x={pos.x} y={pos.y - 8} textAnchor="middle" className={`text-[13px] font-black ${isBTC ? "fill-amber-500" : "fill-blue-500"}`}>
+      <text x={pos.x} y={pos.y - 8} textAnchor="middle" className={`text-[13px] font-black ${assetColor}`}>
         {node.asset}
       </text>
       <text x={pos.x} y={pos.y + 8} textAnchor="middle" className="text-[10px] font-mono font-bold fill-gray-700 dark:fill-gray-300">
         {fmtBalance(node)}
       </text>
-      {isBTC && node.balance_usd > 0 && (
+      {!isCash && node.balance_usd > 0 && (
         <text x={pos.x} y={pos.y + 21} textAnchor="middle" className="text-[8px] font-mono fill-gray-400 dark:fill-gray-500">
           ≈ {fmtUSD(node.balance_usd)}
         </text>
       )}
-      {isBTC && node.price_usd > 1 && (
+      {!isCash && node.price_usd > 0 && (
         <text x={pos.x} y={pos.y + 50} textAnchor="middle" className="text-[9px] font-mono fill-gray-400 dark:fill-gray-500">
-          1 BTC = {fmtUSD(node.price_usd)}
+          1 {node.asset} = {fmtUSD(node.price_usd)}
         </text>
       )}
     </g>

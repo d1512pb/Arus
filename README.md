@@ -245,7 +245,7 @@ Arus/
 │  ├─ engine/                 # Motor HFT en Go — capas separadas por archivo
 │  │  ├─ main.go              # Composition root: crea el canal, el Hub y el motor, cablea rutas /ws y /api/ledger, lee PORT y arranca las goroutines
 │  │  ├─ engine.go            # DOMINIO: fórmula única computeNetProfit, bucle de detección (Start), ejecución por sesión, Spike Filter, staleness y lógica de crédito/reequilibrio
-│  │  ├─ venues.go            # REGISTRO: los exchanges como DATOS (nombre, fee, activos) — agregar un venue no toca la lógica
+│  │  ├─ venues.go            # REGISTRO: exchanges e INSTRUMENTOS como DATOS (N libros por venue, paridades declaradas) — agregar venue/par no toca la lógica
 │  │  ├─ feed.go              # CONTRATO DE INGESTA: interface FeedAdapter (1 adaptador por exchange, ticks normalizados)
 │  │  ├─ ws_real_market.go    # ADAPTADORES: implementaciones Binance/Bitso (reconexión, coherentBook, precio+cantidad+timestamp)
 │  │  ├─ server.go            # TRANSPORTE: upgrade WS, init de sesión, set_params con clamps, router de acciones y handler HTTP del ledger (CORS)
@@ -290,7 +290,7 @@ Web app accesible desde el navegador, pensada para que **cualquiera** entienda l
 - **Tutorial guiado (8 pasos):** en el primer ingreso (y desde el botón «Tutorial») un recorrido en **lenguaje sencillo** —sin jerga— que señala con un chip *📍 dónde está* cada elemento (saldos, «Editar fondos», «Probar el bot», feed, auditoría). Se recuerda en `localStorage` para no repetirse.
 - **Guía de estrategia (botón «?»):** explica el arbitraje con un **ejemplo visual** (comprar barato en una casa, vender caro en la otra *al mismo tiempo*) y desglosa las **3 condiciones de rentabilidad** (spread real · superar comisiones · liquidez en ambas casas), además de la *ventaja del bot* (crédito instantáneo vs. los ~30 min de un traslado on-chain, y el filtro anti–precio-falso).
 - **Configuración inicial guiada:** al entrar, un modal pide el capital de arranque (mín. `$1 000` y `0.1 BTC`) y muestra en vivo cómo se repartirá 50/50 entre Binance y Bitso antes de confirmar.
-- **📡 Radar Omnidireccional (Fase 2):** el grafo de liquidez en vivo — tus monedas en cada exchange (saldo + valor), por dónde puede fluir el dinero (libros, paridad USDT≈USD declarada, inventario pre-fondeado) y el ciclo rentable que el motor detecta automáticamente cada segundo (Bellman-Ford sobre pesos `−log(tasa·(1−fee))`), resaltado en verde cuando existe.
+- **📡 Radar Omnidireccional (Fase 2):** el grafo de liquidez en vivo — tus monedas en cada exchange (saldo + valor), por dónde puede fluir el dinero (5 nodos y 8 libros reales: el triángulo BTC/USDT · ETH/USDT · ETH/BTC de Binance más BTC/USD de Bitso, paridad USDT≈USD declarada e inventario pre-fondeado) y el ciclo rentable —espacial o triangular— que el motor detecta automáticamente cada segundo (Bellman-Ford sobre pesos `−log(tasa·(1−fee))`), resaltado en verde cuando existe.
 - **Panel de Estrategia (personalización en vivo):** margen mínimo de ganancia, orden máxima, slippage estimado, comisiones por exchange y multiplicador de riesgo del crédito — cada usuario define sus reglas y el bot decide con ellas al instante.
 - **Panel de Historial / Auditoría:** lee el ledger persistido de TU sesión (`/api/ledger?session_id=`).
 - **Modo de pruebas (Simulador):** inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver al Spike Filter y a la lógica de crédito en acción — sin dinero real.
@@ -389,7 +389,9 @@ Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe 
 - [x] ~~Suite de tests unitarios además del benchmark de latencia~~ — **hecho**: fórmula institucional, clamps, crédito, dimensionado y concurrencia (`go test ./...`).
 - [x] ~~Dimensionado de órdenes contra liquidez real~~ — **hecho**: el volumen ejecutado es `min(tope del usuario, cantidad del top-of-book de ambas piernas)`.
 - [x] ~~Fase 2 · hito 1 — Radar Omnidireccional~~ — **hecho**: grafo de liquidez en vivo con detección automática de ciclos negativos (Bellman-Ford) y visualización por sesión (`GraphPanel`). Diseño completo en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
-- [ ] **Fase 2 · hito 2 — ejecución de ciclos:** pasar la ejecución del par fijo al ciclo detectado (poda por Universe del usuario, fees personalizados en los pesos, triangular intra-Binance con 3 streams).
+- [x] ~~Fase 2 · hito 2 — radar triangular multi-instrumento~~ — **hecho**: instrumentos como datos (N libros por venue), Binance emite el triángulo BTC/USDT · ETH/USDT · ETH/BTC por un solo socket de streams combinados, y el mismo Bellman-Ford detecta ciclos espaciales **y triangulares** con datos reales.
+- [x] ~~CI en GitHub Actions~~ — **hecho**: cada push corre `go vet` + `go test -race` (detector de data races) + build del motor y del dashboard.
+- [ ] **Fase 2 · hito 3 — ejecución de ciclos:** wallets multi-activo, pasar la ejecución del par fijo al ciclo detectado, poda por Universe del usuario y fees personalizados en los pesos.
 - [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación configurable en bps; pasará a ser una tolerancia máxima).
 - [ ] Persistencia del estado de sesión (wallets sobreviven reinicios del motor).
 

@@ -10,18 +10,21 @@ import (
 // graph.go — FASE 2: MOTOR DE ARBITRAJE OMNIDIRECCIONAL (grafo de liquidez).
 //
 // El mercado se modela como un grafo dirigido (ver docs/FASE2-GRAFO.md):
-//   - un NODO es un activo en un lugar concreto: BTC@Binance, USDT@Binance, USD@Bitso…
+//   - un NODO es un activo en un lugar concreto: BTC@Binance, ETH@Binance, USD@Bitso…
 //   - una ARISTA es una forma de convertir un activo en otro (libro de órdenes,
 //     paridad entre stablecoins, swap de inventario pre-fondeado).
 //   - una OPORTUNIDAD es un ciclo cuyo producto de tasas efectivas supera 1 —
 //     equivalentemente, un ciclo de peso NEGATIVO con w = −log(tasa × (1 − fee)),
 //     detectable con Bellman-Ford.
 //
-// En esta primera entrega el grafo opera en MODO RADAR: se construye desde el
-// registro de venues, se actualiza en vivo con cada tick de los FeedAdapters,
-// detecta ciclos automáticamente y los narra a la UI (GraphPanel) — la EJECUCIÓN
-// sigue a cargo del núcleo de dos venues ya probado (executeForSession). Ejecutar
-// ciclos arbitrarios es el siguiente hito (ver doc, sección 3).
+// Desde el hito 2, la topología nace del registro de INSTRUMENTOS (venues.go): un
+// venue puede publicar N libros. Con el triángulo de Binance (BTC/USDT · ETH/USDT
+// · ETH/BTC) el radar detecta arbitraje TRIANGULAR dentro de un solo exchange,
+// además del espacial entre exchanges — con datos 100 % reales.
+//
+// El grafo opera en MODO RADAR: detecta y narra; la EJECUCIÓN sigue a cargo del
+// núcleo de dos venues probado (executeForSession). Ejecutar ciclos arbitrarios
+// exige wallets multi-activo (hito 3, ver doc).
 
 // Asset identifica una moneda o token ("BTC", "USD", "USDT", "ETH"…).
 // USDT y USD son activos DISTINTOS en el grafo: el basis entre ellos deja de ser
@@ -45,9 +48,9 @@ const (
 	// (p. ej. USDT@Binance → BTC@Binance comprando al ask). Su tasa viene del
 	// top-of-book del FeedAdapter; su fee combina taker de referencia + slippage.
 	EdgeOrderBook EdgeKind = iota
-	// EdgeParity conecta stablecoins/monedas equivalentes entre venues (USDT@Binance
-	// ↔ USD@Bitso) a tasa 1. Hace VISIBLE el supuesto AssumeUSDTParity en vez de
-	// esconderlo; cuando exista un libro USDT/USD real, esta arista tomará su precio.
+	// EdgeParity conecta stablecoins/monedas declaradas equivalentes entre venues
+	// (USDT@Binance ↔ USD@Bitso) a tasa 1. Hace VISIBLE el supuesto AssumeUSDTParity;
+	// cuando exista un libro USDT/USD real, esta arista tomará su precio.
 	EdgeParity
 	// EdgeInventorySwap conecta el MISMO activo entre venues a tasa 1 y costo 0:
 	// modela el arbitraje PRE-FONDEADO (hay inventario en ambos lados, la compra y
@@ -83,9 +86,12 @@ type Edge struct {
 	Rate float64
 	// Fee: fracción cobrada por usar la arista (taker + slippage estimado de referencia).
 	Fee float64
-	// Liquidity acota el volumen (en BTC) que soporta la arista al Rate visible;
-	// 0 = sin dato/sin límite práctico (paridad, swaps de inventario).
+	// Liquidity acota el volumen que soporta la arista al Rate visible, en unidades
+	// de BaseAsset; 0 = sin dato/sin límite práctico (paridad, swaps de inventario).
 	Liquidity float64
+	// BaseAsset es el activo en que se expresa Liquidity (el base del libro).
+	// Vacío en aristas que no son de libro.
+	BaseAsset string
 	// Latency estima cuánto tarda la conversión (≈0 salvo transfers on-chain).
 	Latency time.Duration
 	// UpdatedAt habilita el control de staleness: una arista de libro vieja no
@@ -115,7 +121,10 @@ type Cycle struct {
 	// NetReturn es la tasa neta del ciclo (0.001 = +0.1 % por vuelta de capital).
 	NetReturn float64
 	// MaxVolumeBTC es el volumen ejecutable acotado por la arista de libro menos
-	// líquida (mismo principio que sizeOrder en el núcleo de dos venues).
+	// líquida, SOLO cuando todas las piernas de libro comparten el mismo activo
+	// base (p. ej. el ciclo espacial BTC). En ciclos con bases mixtas (triangular
+	// BTC/ETH) vale 0 = "no homogéneo"; la homogeneización llega con la ejecución
+	// de ciclos (hito 3).
 	MaxVolumeBTC float64
 }
 
@@ -164,86 +173,94 @@ type LiquidityGraph struct {
 
 func edgeKey(from, to MarketNode) string { return from.ID() + ">" + to.ID() }
 
-// NewLiquidityGraph construye la topología desde el registro de venues:
-//   - 2 nodos por venue (base y quote),
-//   - 2 aristas de libro por venue (comprar: quote→base; vender: base→quote),
-//   - aristas de paridad entre los quotes de venues distintos (USDT≈USD, visible),
-//   - swaps de inventario entre los base de venues distintos (pre-fondeado).
+// NewLiquidityGraph construye la topología desde el registro de INSTRUMENTOS:
+//   - 1 nodo por (venue, activo) que aparezca en algún libro,
+//   - 2 aristas de libro por instrumento (comprar: quote→base; vender: base→quote),
+//   - swaps de inventario entre el MISMO activo en venues distintos (pre-fondeado),
+//   - paridad entre activos declarados equivalentes (USDT≈USD, visible).
 //
-// Agregar un venue al registro agrega sus nodos y aristas aquí sin tocar nada más.
+// Agregar un instrumento o un venue al registro agrega sus nodos y aristas aquí
+// sin tocar nada más.
 func NewLiquidityGraph() *LiquidityGraph {
 	g := &LiquidityGraph{edges: make(map[string]*Edge)}
 
-	for _, v := range Venues {
-		base := MarketNode{Asset: Asset(v.BaseAsset), Venue: v.Name}
-		quote := MarketNode{Asset: Asset(v.QuoteAsset), Venue: v.Name}
-		g.nodes = append(g.nodes, quote, base)
+	seen := map[string]bool{}
+	addNode := func(n MarketNode) {
+		if !seen[n.ID()] {
+			seen[n.ID()] = true
+			g.nodes = append(g.nodes, n)
+		}
+	}
 
-		// Aristas de libro: sin datos aún (Rate 0 → Weight +Inf, no participan).
-		buy := &Edge{Kind: EdgeOrderBook, From: quote, To: base}
-		sell := &Edge{Kind: EdgeOrderBook, From: base, To: quote}
+	// Nodos y aristas de libro, por instrumento.
+	for _, in := range Instruments {
+		base := MarketNode{Asset: Asset(in.Base), Venue: in.Venue}
+		quote := MarketNode{Asset: Asset(in.Quote), Venue: in.Venue}
+		addNode(quote)
+		addNode(base)
+
+		buy := &Edge{Kind: EdgeOrderBook, From: quote, To: base, BaseAsset: in.Base}
+		sell := &Edge{Kind: EdgeOrderBook, From: base, To: quote, BaseAsset: in.Base}
 		buy.recomputeWeight()
 		sell.recomputeWeight()
 		g.edges[edgeKey(quote, base)] = buy
 		g.edges[edgeKey(base, quote)] = sell
 	}
 
-	// Conexiones entre venues (ambas direcciones).
-	for i, a := range Venues {
-		for j, b := range Venues {
-			if i == j {
+	// Conexiones entre venues (ambas direcciones): mismo activo → swap de
+	// inventario; activos en paridad declarada → arista de paridad.
+	for _, from := range g.nodes {
+		for _, to := range g.nodes {
+			if from.Venue == to.Venue || g.edges[edgeKey(from, to)] != nil {
 				continue
 			}
-			// Paridad entre quotes (USDT@Binance → USD@Bitso): tasa 1, fee 0.
-			from := MarketNode{Asset: Asset(a.QuoteAsset), Venue: a.Name}
-			to := MarketNode{Asset: Asset(b.QuoteAsset), Venue: b.Name}
-			kind := EdgeParity
-			if a.QuoteAsset == b.QuoteAsset {
-				kind = EdgeInventorySwap // mismo activo: es inventario, no paridad
+			var kind EdgeKind
+			switch {
+			case from.Asset == to.Asset:
+				kind = EdgeInventorySwap
+			case assetsParity(string(from.Asset), string(to.Asset)):
+				kind = EdgeParity
+			default:
+				continue
 			}
-			p := &Edge{Kind: kind, From: from, To: to, Rate: 1}
-			p.recomputeWeight()
-			g.edges[edgeKey(from, to)] = p
-
-			// Swap de inventario entre bases (BTC@Binance → BTC@Bitso).
-			fb := MarketNode{Asset: Asset(a.BaseAsset), Venue: a.Name}
-			tb := MarketNode{Asset: Asset(b.BaseAsset), Venue: b.Name}
-			if a.BaseAsset == b.BaseAsset {
-				s := &Edge{Kind: EdgeInventorySwap, From: fb, To: tb, Rate: 1}
-				s.recomputeWeight()
-				g.edges[edgeKey(fb, tb)] = s
-			}
+			e := &Edge{Kind: kind, From: from, To: to, Rate: 1}
+			e.recomputeWeight()
+			g.edges[edgeKey(from, to)] = e
 		}
 	}
 
 	return g
 }
 
-// UpdateBook refresca las 2 aristas de libro de un venue con su top-of-book.
-// O(1) por tick. El fee efectivo de referencia = taker del registro + slippage
-// estimado por defecto (la vista personalizada por sesión llega con la ejecución
-// de ciclos; el radar usa parámetros de referencia y lo declara en la UI).
-func (g *LiquidityGraph) UpdateBook(venueName string, book TopOfBook) {
-	v, ok := venueByName(venueName)
+// UpdateBook refresca las 2 aristas del instrumento (clave "Venue:BASE/QUOTE")
+// con su top-of-book. O(1) por tick. El fee efectivo de referencia = taker del
+// registro + slippage estimado por defecto (la vista personalizada por sesión
+// llega con la ejecución de ciclos; el radar usa referencia y lo declara en la UI).
+func (g *LiquidityGraph) UpdateBook(instrKey string, book TopOfBook) {
+	in, ok := instrumentByKey(instrKey)
 	if !ok || book.Ask <= 0 || book.Bid <= 0 {
 		return
 	}
-	base := MarketNode{Asset: Asset(v.BaseAsset), Venue: v.Name}
-	quote := MarketNode{Asset: Asset(v.QuoteAsset), Venue: v.Name}
+	v, ok := venueByName(in.Venue)
+	if !ok {
+		return
+	}
+	base := MarketNode{Asset: Asset(in.Base), Venue: in.Venue}
+	quote := MarketNode{Asset: Asset(in.Quote), Venue: in.Venue}
 	effFee := v.DefaultTakerFee + DefaultSlippageRate
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	if buy := g.edges[edgeKey(quote, base)]; buy != nil {
-		buy.Rate = 1 / book.Ask // 1 USD(T) compra 1/ask BTC
+		buy.Rate = 1 / book.Ask // 1 quote compra 1/ask unidades de base
 		buy.Fee = effFee
 		buy.Liquidity = book.AskQty
 		buy.UpdatedAt = book.UpdatedAt
 		buy.recomputeWeight()
 	}
 	if sell := g.edges[edgeKey(base, quote)]; sell != nil {
-		sell.Rate = book.Bid // 1 BTC vende a bid USD(T)
+		sell.Rate = book.Bid // 1 base vende a bid unidades de quote
 		sell.Fee = effFee
 		sell.Liquidity = book.BidQty
 		sell.UpdatedAt = book.UpdatedAt
@@ -251,8 +268,8 @@ func (g *LiquidityGraph) UpdateBook(venueName string, book TopOfBook) {
 	}
 }
 
-// activeEdges devuelve las aristas utilizables en este instante: libros frescos
-// (staleness) y con datos; paridad/inventario siempre. Debe llamarse con g.mu tomado.
+// activeEdgesLocked devuelve las aristas utilizables en este instante: libros
+// frescos (staleness) y con datos; paridad/inventario siempre. Con g.mu tomado.
 func (g *LiquidityGraph) activeEdgesLocked(now time.Time) []Edge {
 	active := make([]Edge, 0, len(g.edges))
 	for _, e := range g.edges {
@@ -272,7 +289,7 @@ const cycleEpsilon = 1e-9
 
 // FindBestCycle busca un ciclo de peso negativo (arbitraje) con Bellman-Ford
 // sobre las aristas activas. Devuelve nil si no hay ciclo rentable ahora mismo.
-// Con el grafo actual (≤ 6 nodos) la búsqueda completa es de microsegundos; si el
+// Con el grafo actual (≤ 8 nodos) la búsqueda completa es de microsegundos; si el
 // universo crece, el doc de Fase 2 contempla SPFA incremental.
 func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 	g.mu.Lock()
@@ -314,7 +331,6 @@ func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 
 	var cycleEdges []Edge
 	sum := 0.0
-	maxVol := 0.0
 	u := v
 	for {
 		e, ok := pred[u]
@@ -323,11 +339,6 @@ func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 		}
 		cycleEdges = append([]Edge{e}, cycleEdges...)
 		sum += e.Weight
-		if e.Kind == EdgeOrderBook && e.Liquidity > 0 {
-			if maxVol == 0 || e.Liquidity < maxVol {
-				maxVol = e.Liquidity
-			}
-		}
 		u = e.From.ID()
 		if u == v {
 			break
@@ -341,6 +352,28 @@ func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 	if net <= cycleEpsilon {
 		return nil
 	}
+
+	// Volumen máximo: solo homogéneo si todas las piernas de libro comparten base.
+	maxVol := 0.0
+	baseAsset := ""
+	homogeneous := true
+	for _, e := range cycleEdges {
+		if e.Kind != EdgeOrderBook {
+			continue
+		}
+		if baseAsset == "" {
+			baseAsset = e.BaseAsset
+		} else if e.BaseAsset != baseAsset {
+			homogeneous = false
+		}
+		if e.Liquidity > 0 && (maxVol == 0 || e.Liquidity < maxVol) {
+			maxVol = e.Liquidity
+		}
+	}
+	if !homogeneous {
+		maxVol = 0 // bases mixtas (triangular): sin volumen homogéneo aún
+	}
+
 	return &Cycle{Edges: cycleEdges, NetReturn: net, MaxVolumeBTC: maxVol}
 }
 
@@ -351,31 +384,35 @@ func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 // GraphNodeWire es un nodo del radar para la UI: el activo, dónde vive, cuánto
 // tiene el usuario ahí y cuánto vale — "la información básica de tu dinero".
 type GraphNodeWire struct {
-	ID         string  `json:"id"`    // "BTC@Binance"
-	Asset      string  `json:"asset"` // "BTC" | "USDT" | "USD"
-	Venue      string  `json:"venue"`
+	ID    string `json:"id"`    // "BTC@Binance"
+	Asset string `json:"asset"` // "BTC" | "ETH" | "USDT" | "USD"
+	Venue string `json:"venue"`
+	// Kind: "cash" para USD y equivalentes declarados (fila superior del panel);
+	// "crypto" para el resto.
+	Kind       string  `json:"kind"`
 	Balance    float64 `json:"balance"`     // saldo del usuario en unidades del activo
 	BalanceUSD float64 `json:"balance_usd"` // valor aproximado en USD
-	PriceUSD   float64 `json:"price_usd"`   // precio del activo (mid) — 1 para quotes
-	FeedStale  bool    `json:"feed_stale"`  // true si el libro de este venue está congelado
+	PriceUSD   float64 `json:"price_usd"`   // precio del activo (mid) — 1 para cash, 0 = sin dato
+	FeedStale  bool    `json:"feed_stale"`  // true si el libro principal del venue está congelado
 }
 
 // GraphEdgeWire es una arista del radar para la UI.
 type GraphEdgeWire struct {
-	From         string  `json:"from"`
-	To           string  `json:"to"`
-	Kind         string  `json:"kind"` // "book" | "parity" | "inventory" | "transfer"
-	Rate         float64 `json:"rate"`
-	FeePct       float64 `json:"fee_pct"`       // fee efectivo en % (taker + slippage)
-	LiquidityBTC float64 `json:"liquidity_btc"` // 0 = sin dato / sin límite
-	Stale        bool    `json:"stale"`
+	From      string  `json:"from"`
+	To        string  `json:"to"`
+	Kind      string  `json:"kind"` // "book" | "parity" | "inventory" | "transfer"
+	Rate      float64 `json:"rate"`
+	FeePct    float64 `json:"fee_pct"`   // fee efectivo en % (taker + slippage)
+	Liquidity float64 `json:"liquidity"` // en unidades de BaseAsset; 0 = sin dato
+	BaseAsset string  `json:"base_asset,omitempty"`
+	Stale     bool    `json:"stale"`
 }
 
 // GraphCycleWire describe el mejor ciclo detectado, listo para narrar.
 type GraphCycleWire struct {
 	Path         []string `json:"path"` // IDs de nodos en orden, cerrado (primero == último)
 	NetReturnPct float64  `json:"net_return_pct"`
-	MaxVolumeBTC float64  `json:"max_volume_btc"`
+	MaxVolumeBTC float64  `json:"max_volume_btc"` // 0 = piernas con bases mixtas (triangular)
 	Viable       bool     `json:"viable"`
 }
 
@@ -391,9 +428,18 @@ type GraphSnapshotWire struct {
 	UpdatedAt     string `json:"updated_at"`
 }
 
+// isCashAsset: USD o cualquier activo declarado en paridad con USD (USDT).
+func isCashAsset(a Asset) bool {
+	return a == "USD" || assetsParity(string(a), "USD")
+}
+
 // SnapshotFor arma la vista del radar para UNA sesión: el grafo global de mercado
 // con los SALDOS de esa sesión superpuestos en cada nodo. El ciclo (calculado una
 // sola vez por barrido) se pasa ya resuelto para no repetir Bellman-Ford por sesión.
+//
+// Saldos: los wallets actuales respaldan SOLO el par principal de cada venue
+// (Base/Quote del registro de venues); los demás activos del radar (ETH) muestran
+// saldo 0 hasta que lleguen las wallets multi-activo (hito 3).
 func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, now time.Time) *GraphSnapshotWire {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -403,19 +449,33 @@ func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, no
 		UpdatedAt:     now.Format(time.RFC3339),
 	}
 
-	// Precio mid por venue (para valorar los nodos base) y staleness por venue.
-	mids := make(map[string]float64, len(Venues))
-	stale := make(map[string]bool, len(Venues))
-	for _, v := range Venues {
-		base := MarketNode{Asset: Asset(v.BaseAsset), Venue: v.Name}
-		quote := MarketNode{Asset: Asset(v.QuoteAsset), Venue: v.Name}
+	// Precio USD por nodo: cash = 1; cripto = mid de su libro contra un quote
+	// cash del mismo venue (BTC/USDT, ETH/USDT, BTC/USD…).
+	priceUSD := make(map[string]float64, len(g.nodes))
+	for _, in := range Instruments {
+		if !isCashAsset(Asset(in.Quote)) {
+			continue // ETH/BTC no da precio USD directo
+		}
+		base := MarketNode{Asset: Asset(in.Base), Venue: in.Venue}
+		quote := MarketNode{Asset: Asset(in.Quote), Venue: in.Venue}
 		sell := g.edges[edgeKey(base, quote)]
 		buy := g.edges[edgeKey(quote, base)]
 		if sell != nil && buy != nil && sell.Rate > 0 && buy.Rate > 0 {
-			mids[v.Name] = (sell.Rate + 1/buy.Rate) / 2 // (bid + ask) / 2
-			stale[v.Name] = now.Sub(sell.UpdatedAt) > MaxBookStaleness
-		} else {
-			stale[v.Name] = true
+			priceUSD[base.ID()] = (sell.Rate + 1/buy.Rate) / 2 // (bid + ask) / 2
+		}
+	}
+
+	// Staleness por venue: el libro PRINCIPAL (respaldado por wallets) manda para
+	// el chip de la UI; cada arista lleva además su propio flag de staleness.
+	staleVenue := make(map[string]bool, len(Venues))
+	for _, v := range Venues {
+		staleVenue[v.Name] = true
+		if in, ok := primaryInstrument(v.Name); ok {
+			base := MarketNode{Asset: Asset(in.Base), Venue: in.Venue}
+			quote := MarketNode{Asset: Asset(in.Quote), Venue: in.Venue}
+			if sell := g.edges[edgeKey(base, quote)]; sell != nil && sell.Rate > 0 {
+				staleVenue[v.Name] = now.Sub(sell.UpdatedAt) > MaxBookStaleness
+			}
 		}
 	}
 
@@ -426,16 +486,24 @@ func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, no
 			ID:        n.ID(),
 			Asset:     string(n.Asset),
 			Venue:     n.Venue,
-			FeedStale: stale[n.Venue],
+			Kind:      "crypto",
+			FeedStale: staleVenue[n.Venue],
 		}
-		if string(n.Asset) == v.BaseAsset {
+		switch {
+		case isCashAsset(n.Asset):
+			node.Kind = "cash"
+			node.PriceUSD = 1
+			if string(n.Asset) == v.QuoteAsset {
+				node.Balance = w.USD
+				node.BalanceUSD = w.USD
+			}
+		case string(n.Asset) == v.BaseAsset:
 			node.Balance = w.BTC
-			node.PriceUSD = mids[n.Venue]
-			node.BalanceUSD = w.BTC * mids[n.Venue]
-		} else {
-			node.Balance = w.USD
-			node.PriceUSD = 1 // quotes valorados 1:1 (paridad declarada)
-			node.BalanceUSD = w.USD
+			node.PriceUSD = priceUSD[n.ID()]
+			node.BalanceUSD = w.BTC * node.PriceUSD
+		default:
+			// Activo del radar sin wallet respaldada aún (ETH): saldo 0, precio real.
+			node.PriceUSD = priceUSD[n.ID()]
 		}
 		snap.Nodes = append(snap.Nodes, node)
 	}
@@ -445,13 +513,14 @@ func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, no
 			continue // libro sin datos: no pintar una arista vacía
 		}
 		snap.Edges = append(snap.Edges, GraphEdgeWire{
-			From:         e.From.ID(),
-			To:           e.To.ID(),
-			Kind:         e.Kind.wireKind(),
-			Rate:         e.Rate,
-			FeePct:       e.Fee * 100,
-			LiquidityBTC: e.Liquidity,
-			Stale:        e.Kind == EdgeOrderBook && now.Sub(e.UpdatedAt) > MaxBookStaleness,
+			From:      e.From.ID(),
+			To:        e.To.ID(),
+			Kind:      e.Kind.wireKind(),
+			Rate:      e.Rate,
+			FeePct:    e.Fee * 100,
+			Liquidity: e.Liquidity,
+			BaseAsset: e.BaseAsset,
+			Stale:     e.Kind == EdgeOrderBook && now.Sub(e.UpdatedAt) > MaxBookStaleness,
 		})
 	}
 
@@ -482,5 +551,8 @@ func DescribeCycle(c *Cycle) string {
 	for _, e := range c.Edges {
 		s += " → " + e.To.ID()
 	}
-	return fmt.Sprintf("%s (%+.3f %% neto, hasta %.4f BTC)", s, c.NetReturn*100, c.MaxVolumeBTC)
+	if c.MaxVolumeBTC > 0 {
+		return fmt.Sprintf("%s (%+.3f %% neto, hasta %.4f BTC)", s, c.NetReturn*100, c.MaxVolumeBTC)
+	}
+	return fmt.Sprintf("%s (%+.3f %% neto)", s, c.NetReturn*100)
 }

@@ -38,11 +38,12 @@ export interface TradingParams {
 
 export interface GraphNode {
   id: string;    // "BTC@Binance"
-  asset: string; // "BTC" | "USDT" | "USD"
+  asset: string; // "BTC" | "ETH" | "USDT" | "USD"
   venue: string;
+  kind: "cash" | "crypto";
   balance: number;
   balance_usd: number;
-  price_usd: number;
+  price_usd: number; // 1 para cash; 0 = aún sin dato de precio
   feed_stale: boolean;
 }
 
@@ -52,14 +53,15 @@ export interface GraphEdge {
   kind: "book" | "parity" | "inventory" | "transfer";
   rate: number;
   fee_pct: number;
-  liquidity_btc: number;
+  liquidity: number; // en unidades de base_asset; 0 = sin dato
+  base_asset?: string;
   stale: boolean;
 }
 
 export interface GraphCycle {
   path: string[]; // cerrado: primero == último
   net_return_pct: number;
-  max_volume_btc: number;
+  max_volume_btc: number; // 0 = piernas con bases mixtas (triangular)
   viable: boolean;
 }
 

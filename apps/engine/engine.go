@@ -175,7 +175,7 @@ func isValidTick(newPrice, lastPrice, maxDeviation float64) bool {
 }
 
 func getBTCPrice() float64 {
-	if book, ok := currentMarket.Get("Binance"); ok && book.Ask > 0 {
+	if book, ok := currentMarket.Get("Binance:BTC/USDT"); ok && book.Ask > 0 {
 		return book.Ask
 	}
 	return DefaultBTCPriceFallback
@@ -336,6 +336,9 @@ type venueTickState struct {
 }
 
 func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
+	// states lleva un estado por INSTRUMENTO (clave InstrKey): desde el hito 2 un
+	// venue puede publicar N libros (Binance emite el triángulo BTC/USDT ·
+	// ETH/USDT · ETH/BTC) y cada uno tiene su propio Spike Filter y staleness.
 	states := make(map[string]*venueTickState)
 	lastLogTime := time.Now()
 	lastStaleLog := time.Time{}
@@ -347,15 +350,22 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 	refFees := defaultTakerFees()
 	refBinanceFee, refBitsoFee := refFees["Binance"], refFees["Bitso"]
 
+	// Los dos libros RESPALDADOS POR WALLETS que ejecuta el motor de dos venues.
+	// Los demás instrumentos alimentan solo al radar (detección, no ejecución).
+	binInstr, _ := primaryInstrument("Binance")
+	bitInstr, _ := primaryInstrument("Bitso")
+	binKey, bitKey := binInstr.Key(), bitInstr.Key()
+
 	for tick := range priceChan {
-		st, ok := states[tick.Exchange]
+		key := tick.InstrKey()
+		st, ok := states[key]
 		if !ok {
 			st = &venueTickState{}
-			states[tick.Exchange] = st
+			states[key] = st
 		}
 
 		if !isValidTick(tick.Ask, st.lastAsk, DefaultSpikeTickDeviation) || !isValidTick(tick.Bid, st.lastBid, DefaultSpikeTickDeviation) {
-			broadcastLog(hub, "[DESCARTADO] 🚨 Spike Filter Activado: Variación anómala detectada. Ignorando tick para proteger capital.", 0, 0)
+			broadcastLog(hub, fmt.Sprintf("[DESCARTADO] 🚨 Spike Filter Activado en %s: Variación anómala detectada. Ignorando tick para proteger capital.", key), 0, 0)
 			continue
 		}
 
@@ -371,76 +381,96 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 		// Radar omnidireccional: el grafo refleja cada tick aceptado (O(1): solo
 		// las 2 aristas del libro afectado).
 		if e.Graph != nil {
-			e.Graph.UpdateBook(tick.Exchange, st.book)
+			e.Graph.UpdateBook(key, st.book)
 		}
 
-		bin, bit := states["Binance"], states["Bitso"]
-		if bin == nil || bit == nil || !bin.hasData || !bit.hasData {
-			continue
-		}
-
-		// Control de staleness: si el feed de un venue lleva demasiado sin publicar,
-		// su último precio es un dato muerto — compararlo contra el precio fresco del
-		// otro produciría spreads fantasma. Preferimos no evaluar a evaluar mal.
 		now := time.Now()
-		if now.Sub(bin.book.UpdatedAt) > MaxBookStaleness || now.Sub(bit.book.UpdatedAt) > MaxBookStaleness {
-			if now.Sub(lastStaleLog) >= 5*time.Second {
-				lastStaleLog = now
-				staleVenue := "Binance"
-				if now.Sub(bit.book.UpdatedAt) > MaxBookStaleness {
-					staleVenue = "Bitso"
+		bin, bit := states[binKey], states[bitKey]
+		pairReady := bin != nil && bit != nil && bin.hasData && bit.hasData
+		pairFresh := pairReady &&
+			now.Sub(bin.book.UpdatedAt) <= MaxBookStaleness &&
+			now.Sub(bit.book.UpdatedAt) <= MaxBookStaleness
+
+		var binanceMid, bitsoMid, spread float64
+		if pairReady {
+			binanceMid = (bin.book.Ask + bin.book.Bid) / 2
+			bitsoMid = (bit.book.Ask + bit.book.Bid) / 2
+			spread = math.Abs(binanceMid - bitsoMid)
+		}
+
+		// Evaluación del PAR (solo cuando el tick pertenece a uno de los dos libros
+		// respaldados por wallets — los ticks de ETH no re-evalúan el par).
+		isPairTick := key == binKey || key == bitKey
+		if isPairTick && pairReady {
+			if !pairFresh {
+				// Control de staleness: si el feed de un lado lleva demasiado sin
+				// publicar, su último precio es un dato muerto — compararlo contra el
+				// precio fresco del otro produciría spreads fantasma.
+				if now.Sub(lastStaleLog) >= 5*time.Second {
+					lastStaleLog = now
+					staleSide := binKey
+					if now.Sub(bit.book.UpdatedAt) > MaxBookStaleness {
+						staleSide = bitKey
+					}
+					broadcastLog(hub, fmt.Sprintf("🧊 [FEED CONGELADO] El libro %s lleva >%s sin datos — evaluación pausada para no operar contra precios muertos.", staleSide, MaxBookStaleness), 0, 0)
 				}
-				broadcastLog(hub, fmt.Sprintf("🧊 [FEED CONGELADO] El feed de %s lleva >%s sin datos — evaluación pausada para no operar contra precios muertos.", staleVenue, MaxBookStaleness), 0, 0)
-			}
-			continue
-		}
-
-		binanceMid := (bin.book.Ask + bin.book.Bid) / 2
-		bitsoMid := (bit.book.Ask + bit.book.Bid) / 2
-
-		grossSpread1 := bit.book.Bid - bin.book.Ask // comprar Binance → vender Bitso
-		grossSpread2 := bin.book.Bid - bit.book.Ask // comprar Bitso → vender Binance
-		grossSpread := math.Max(grossSpread1, grossSpread2)
-		spread := math.Abs(binanceMid - bitsoMid)
-
-		e.Tracker.Add(spread)
-
-		avg := e.Tracker.Average()
-		factor := 0.0
-		if avg > 0 {
-			factor = spread / avg
-		}
-
-		// Vista de mercado de REFERENCIA: se evalúa con los parámetros por defecto
-		// (el bucle corre pre-fan-out, sin sesión). La decisión personalizada de
-		// cada usuario ocurre en executeForSession con SUS parámetros.
-		baseVolume := DefaultMaxOrderSizeBTC
-		var grossOp, fees, slippageOp, netOp float64
-		if grossSpread1 > grossSpread2 {
-			grossOp, fees, slippageOp, netOp = computeNetProfit(bin.book.Ask, bit.book.Bid, baseVolume, refBinanceFee, refBitsoFee, DefaultSlippageRate)
-		} else {
-			grossOp, fees, slippageOp, netOp = computeNetProfit(bit.book.Ask, bin.book.Bid, baseVolume, refBitsoFee, refBinanceFee, DefaultSlippageRate)
-		}
-
-		isSpiked := false
-		switch {
-		case factor > SpikeBlockMultiplier:
-			broadcastLog(hub, fmt.Sprintf("⚠️  [SPIKE BLOQUEADO] Spread: $%.2f | Promedio: $%.2f | Factor: %.1fx — posible error de API", spread, avg, factor), spread, 0)
-			isSpiked = true
-		case factor > SpikeWarnMultiplier:
-			broadcastLog(hub, fmt.Sprintf("⚡ [SPIKE ALERTA] Spread: $%.2f | Factor: %.1fx — evento extremo, ejecutando", spread, factor), spread, 0)
-		default:
-			if netOp > DefaultMinNetProfitUSD {
-				broadcastLog(hub, fmt.Sprintf("✅ [OPORTUNIDAD] Spread (1 BTC): $%.2f | Vol: %.3f BTC | Bruto: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: +$%.2f", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
 			} else {
-				broadcastLog(hub, fmt.Sprintf("⏳ [EN ESPERA] Spread (1 BTC): $%.2f | Volumen: %.3f BTC | Bruto Op: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: $%.2f (Inviable)", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
+				grossSpread1 := bit.book.Bid - bin.book.Ask // comprar Binance → vender Bitso
+				grossSpread2 := bin.book.Bid - bit.book.Ask // comprar Bitso → vender Binance
+				grossSpread := math.Max(grossSpread1, grossSpread2)
+
+				e.Tracker.Add(spread)
+
+				avg := e.Tracker.Average()
+				factor := 0.0
+				if avg > 0 {
+					factor = spread / avg
+				}
+
+				// Vista de mercado de REFERENCIA: se evalúa con los parámetros por
+				// defecto (el bucle corre pre-fan-out, sin sesión). La decisión
+				// personalizada de cada usuario ocurre en executeForSession.
+				baseVolume := DefaultMaxOrderSizeBTC
+				var grossOp, fees, slippageOp, netOp float64
+				if grossSpread1 > grossSpread2 {
+					grossOp, fees, slippageOp, netOp = computeNetProfit(bin.book.Ask, bit.book.Bid, baseVolume, refBinanceFee, refBitsoFee, DefaultSlippageRate)
+				} else {
+					grossOp, fees, slippageOp, netOp = computeNetProfit(bit.book.Ask, bin.book.Bid, baseVolume, refBitsoFee, refBinanceFee, DefaultSlippageRate)
+				}
+
+				isSpiked := false
+				switch {
+				case factor > SpikeBlockMultiplier:
+					broadcastLog(hub, fmt.Sprintf("⚠️  [SPIKE BLOQUEADO] Spread: $%.2f | Promedio: $%.2f | Factor: %.1fx — posible error de API", spread, avg, factor), spread, 0)
+					isSpiked = true
+				case factor > SpikeWarnMultiplier:
+					broadcastLog(hub, fmt.Sprintf("⚡ [SPIKE ALERTA] Spread: $%.2f | Factor: %.1fx — evento extremo, ejecutando", spread, factor), spread, 0)
+				default:
+					if netOp > DefaultMinNetProfitUSD {
+						broadcastLog(hub, fmt.Sprintf("✅ [OPORTUNIDAD] Spread (1 BTC): $%.2f | Vol: %.3f BTC | Bruto: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: +$%.2f", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
+					} else {
+						broadcastLog(hub, fmt.Sprintf("⏳ [EN ESPERA] Spread (1 BTC): $%.2f | Volumen: %.3f BTC | Bruto Op: $%.2f | Fees: $%.2f | Slippage: $%.2f | Neto: $%.2f (Inviable)", grossSpread, baseVolume, grossOp, fees, slippageOp, netOp), grossSpread, netOp)
+					}
+				}
+
+				if !isSpiked {
+					mkt := pairView{
+						BinAsk: bin.book.Ask, BinBid: bin.book.Bid,
+						BitAsk: bit.book.Ask, BitBid: bit.book.Bid,
+						BinAskQty: bin.book.AskQty, BinBidQty: bin.book.BidQty,
+						BitAskQty: bit.book.AskQty, BitBidQty: bit.book.BidQty,
+					}
+					for _, session := range hub.Snapshot() {
+						if session.IsInitialized() {
+							go e.executeForSession(session, mkt)
+						}
+					}
+				}
 			}
 		}
 
-		if isSpiked {
-			continue
-		}
-
+		// Bloque de emisión ~1/s: corre con CUALQUIER tick (el radar cubre todos
+		// los libros, no solo el par ejecutable).
 		if time.Since(lastLogTime) >= time.Second {
 			lastLogTime = time.Now()
 
@@ -456,12 +486,14 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 			}
 
 			for _, s := range hub.Snapshot() {
-				sendEvent(s, ServerEvent{
-					Type:         "market_update",
-					BinancePrice: binanceMid,
-					BitsoPrice:   bitsoMid,
-					Spread:       spread,
-				})
+				if pairFresh {
+					sendEvent(s, ServerEvent{
+						Type:         "market_update",
+						BinancePrice: binanceMid,
+						BitsoPrice:   bitsoMid,
+						Spread:       spread,
+					})
+				}
 				if e.Graph != nil && s.IsInitialized() {
 					s.Mu.Lock()
 					wallets := make(map[string]Wallet, len(s.Wallets))
@@ -472,18 +504,6 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 					snap := e.Graph.SnapshotFor(wallets, cycle, now)
 					sendEvent(s, ServerEvent{Type: "graph_update", SessionID: s.ID, Graph: snap})
 				}
-			}
-		}
-
-		mkt := pairView{
-			BinAsk: bin.book.Ask, BinBid: bin.book.Bid,
-			BitAsk: bit.book.Ask, BitBid: bit.book.Bid,
-			BinAskQty: bin.book.AskQty, BinBidQty: bin.book.BidQty,
-			BitAskQty: bit.book.AskQty, BitBidQty: bit.book.BidQty,
-		}
-		for _, session := range hub.Snapshot() {
-			if session.IsInitialized() {
-				go e.executeForSession(session, mkt)
 			}
 		}
 	}

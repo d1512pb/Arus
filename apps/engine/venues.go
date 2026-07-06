@@ -33,9 +33,87 @@ const AssumeUSDTParity = true
 
 // Venues es la fuente de verdad de los exchanges activos. El orden es estable
 // (se usa para iterar de forma determinista en logs y reequilibrios).
+// BaseAsset/QuoteAsset señalan los activos RESPALDADOS POR WALLET del venue (el
+// par principal que el motor de dos venues ejecuta); los demás instrumentos del
+// registro de abajo alimentan al radar aunque el usuario aún no tenga saldo ahí.
 var Venues = []Venue{
 	{Name: "Binance", DefaultTakerFee: 0.001, BaseAsset: "BTC", QuoteAsset: "USDT"},
 	{Name: "Bitso", DefaultTakerFee: 0.0065, BaseAsset: "BTC", QuoteAsset: "USD"},
+}
+
+// Instrument es un libro de órdenes concreto de un venue (Fase 2 · hito 2: un
+// venue puede publicar N libros). Agregar un instrumento = 1 entrada aquí; el
+// FeedAdapter del venue se suscribe solo y el grafo gana sus nodos y aristas.
+type Instrument struct {
+	Venue string
+	Base  string // activo que se compra/vende ("BTC", "ETH")
+	Quote string // activo con el que se paga ("USDT", "USD", "BTC")
+	// StreamID identifica el libro dentro del venue (Binance: símbolo del stream
+	// combinado en minúsculas; Bitso: nombre del book del canal orders).
+	StreamID string
+}
+
+// Key es el identificador estable del instrumento ("Binance:ETH/BTC").
+func (i Instrument) Key() string { return i.Venue + ":" + i.Base + "/" + i.Quote }
+
+// Instruments registra los libros activos. Los tres de Binance forman el
+// TRIÁNGULO clásico (BTC/USDT · ETH/USDT · ETH/BTC): con ellos el radar puede
+// detectar arbitraje triangular DENTRO de un solo exchange, con datos reales.
+var Instruments = []Instrument{
+	{Venue: "Binance", Base: "BTC", Quote: "USDT", StreamID: "btcusdt"},
+	{Venue: "Binance", Base: "ETH", Quote: "USDT", StreamID: "ethusdt"},
+	{Venue: "Binance", Base: "ETH", Quote: "BTC", StreamID: "ethbtc"},
+	{Venue: "Bitso", Base: "BTC", Quote: "USD", StreamID: "btc_usd"},
+}
+
+// instrumentByKey busca un instrumento por su clave ("Binance:ETH/BTC").
+func instrumentByKey(key string) (Instrument, bool) {
+	for _, i := range Instruments {
+		if i.Key() == key {
+			return i, true
+		}
+	}
+	return Instrument{}, false
+}
+
+// instrumentsForVenue devuelve los libros de un venue, en orden estable.
+func instrumentsForVenue(venue string) []Instrument {
+	list := make([]Instrument, 0, len(Instruments))
+	for _, i := range Instruments {
+		if i.Venue == venue {
+			list = append(list, i)
+		}
+	}
+	return list
+}
+
+// primaryInstrument es el libro RESPALDADO POR WALLETS de un venue (Base/Quote
+// del registro de venues): el que ejecuta el motor de dos venues.
+func primaryInstrument(venue string) (Instrument, bool) {
+	v, ok := venueByName(venue)
+	if !ok {
+		return Instrument{}, false
+	}
+	for _, i := range Instruments {
+		if i.Venue == venue && i.Base == v.BaseAsset && i.Quote == v.QuoteAsset {
+			return i, true
+		}
+	}
+	return Instrument{}, false
+}
+
+// parityPairs declara qué activos distintos se tratan como equivalentes 1:1
+// (supuesto visible en el grafo como aristas EdgeParity). Hoy: USDT ≈ USD.
+var parityPairs = [][2]string{{"USDT", "USD"}}
+
+// assetsParity informa si dos activos distintos están declarados equivalentes.
+func assetsParity(a, b string) bool {
+	for _, p := range parityPairs {
+		if (p[0] == a && p[1] == b) || (p[0] == b && p[1] == a) {
+			return true
+		}
+	}
+	return false
 }
 
 // VenueNames devuelve los nombres de los venues activos, en orden estable.
