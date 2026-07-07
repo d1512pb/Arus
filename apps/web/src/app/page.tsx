@@ -435,7 +435,7 @@ function FundsModal({ exchange, usd, btc, onClose, onSubmit }: {
 }
 
 export default function Home() {
-  const { sessionReady, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, adjustFunds, setParams, shutdownEngine } = useArusEngine();
+  const { sessionReady, resuming, cancelResume, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, adjustFunds, setParams, shutdownEngine } = useArusEngine();
   
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showInjectionModal, setShowInjectionModal] = useState(false);
@@ -522,6 +522,28 @@ export default function Home() {
   };
 
   if (!sessionReady) {
+    // Continuidad: si hay una sesión persistida, se recupera de la base de datos
+    // en lugar de pedir el capital de nuevo (saldos, estrategia e historial
+    // sobreviven a reinicios del motor y del navegador).
+    if (resuming) {
+      return (
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex flex-col items-center justify-center gap-6 font-mono">
+          <div className="w-14 h-14 border-4 border-gray-200 dark:border-gray-800 border-t-emerald-500 rounded-full animate-spin"></div>
+          <div className="text-center">
+            <p className="text-sm font-bold tracking-widest uppercase text-gray-700 dark:text-gray-300">Recuperando tu sesión…</p>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-2 max-w-xs">
+              Tus saldos, tu estrategia y tu historial están guardados en la base de datos.
+            </p>
+          </div>
+          <button
+            onClick={cancelResume}
+            className="text-[11px] uppercase tracking-widest font-bold text-gray-400 hover:text-red-500 transition-colors"
+          >
+            Empezar de cero en su lugar
+          </button>
+        </div>
+      );
+    }
     return <OnboardingModal onInit={initSession} />;
   }
 

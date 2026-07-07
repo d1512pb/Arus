@@ -79,6 +79,13 @@ func InitLedger() error {
 
 	ledgerDB = db
 	log.Printf("📒 [LEDGER] SQLite inicializado en %s", dbPath)
+
+	// Sprint A: la MISMA base persiste también las sesiones completas (saldos
+	// multi-activo, parámetros, PnL) — ver store.go. Si el esquema falla, el
+	// trading continúa con sesiones volátiles, igual que sin ledger.
+	if err := initSessionStore(db); err != nil {
+		log.Printf("⚠️ [STORE] No se pudo inicializar la persistencia de sesiones: %v", err)
+	}
 	return nil
 }
 

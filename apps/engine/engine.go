@@ -287,6 +287,11 @@ func sendWalletUpdate(s *ClientSession) {
 	}
 	s.Mu.Unlock()
 	sendEvent(s, ev)
+
+	// Persistencia write-behind (Sprint A): sendWalletUpdate es el punto de paso
+	// de TODA mutación de saldos (trades, depósitos/retiros, crédito, rebalanceo),
+	// así que aquí la fotografía de la sesión llega a SQLite sin frenar el trading.
+	persistSessionAsync(s)
 }
 
 // sendArbExecuted emite el evento arbitrage_executed con el estado de wallets al

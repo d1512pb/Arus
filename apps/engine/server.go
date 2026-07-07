@@ -179,8 +179,16 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 		session := newClientSession(generateUUID(), conn)
 		hub.Add(session)
 		defer func() {
-			hub.Remove(session.ID)
+			hub.Remove(session)
 			conn.Close()
+			// Última fotografía + last_seen al desconectar: el usuario puede
+			// cerrar el navegador y volver mañana.
+			persistSessionAsync(session)
+			if sessionStore != nil {
+				if err := sessionStore.TouchSession(session.ID, time.Now()); err != nil {
+					log.Printf("⚠️ [STORE] touch al desconectar: %v", err)
+				}
+			}
 		}()
 
 		for {
@@ -200,11 +208,48 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 					continue
 				}
 				initSession(session, msg.InitialUSD, msg.InitialBTC)
+				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada", Params: &p})
 
+			case "resume_session":
+				// Continuidad (Sprint A): el navegador presenta su token (UUID de la
+				// sesión persistida) y recupera saldos, parámetros y base del PnL.
+				// El historial del ledger vuelve a ser SUYO porque el ID se conserva.
+				id := msg.SessionID
+				if sessionStore == nil || id == "" || len(id) > 64 {
+					sendEvent(session, ServerEvent{Type: "RESUME_FAILED", SessionID: session.ID, Message: "Sesión no recuperable."})
+					continue
+				}
+				rec, found, err := sessionStore.LoadSession(id)
+				if err != nil || !found || !rec.Initialized {
+					if err != nil {
+						log.Printf("⚠️ [STORE] resume_session %s: %v", id, err)
+					}
+					sendEvent(session, ServerEvent{Type: "RESUME_FAILED", SessionID: session.ID, Message: "Sesión no encontrada — configura tu capital para empezar de nuevo."})
+					continue
+				}
+				// Takeover: si otra pestaña vive con este token, se desconecta.
+				// Hub.Remove es identity-aware: su defer no expulsará a esta sesión.
+				if old := hub.Get(id); old != nil && old != session {
+					log.Printf("🔁 [RESUME] Takeover de sesión %s (conexión previa desconectada)", id)
+					old.CloseConn()
+				}
+				hub.Remove(session) // suelta el ID efímero de esta conexión
+				applySessionRecord(session, rec)
+				session.ID = id
+				hub.Add(session)
+				if err := sessionStore.TouchSession(id, time.Now()); err != nil {
+					log.Printf("⚠️ [STORE] touch al reanudar: %v", err)
+				}
+				log.Printf("💾 [RESUME] Sesión %s recuperada (patrimonio $%.2f, PnL $%.4f)", id, rec.TotalWealth, rec.TotalNetProfit)
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión recuperada — tus fondos y tu estrategia siguen aquí.", Params: &p, Resumed: true})
+				sendLog(session, "💾 [SESIÓN] Bienvenido de vuelta: saldos, estrategia e historial recuperados de la base de datos.")
+
 			case "reset_session":
 				initSession(session, session.InitialUSD, session.InitialBTC)
+				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada", Params: &p})
 
@@ -218,6 +263,7 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				}
 				applied := sanitizeTradingParams(*msg.Params)
 				session.SetParams(applied)
+				persistSessionAsync(session) // la estrategia del usuario sobrevive reinicios
 				log.Printf("🎛️ [PARAMS] Sesión %s: minNet=$%.2f maxOrden=%.4f BTC slip=%.1f bps riesgo=%.1fx",
 					session.ID, applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier)
 				sendLog(session, fmt.Sprintf("🎛️ [ESTRATEGIA] Parámetros actualizados: margen mín. $%.2f | orden máx. %.4f BTC | slippage %.1f bps | riesgo crédito %.1fx",
@@ -253,6 +299,7 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				autoMode := session.Credit.AutoMode
 				session.Mu.Unlock()
 				log.Printf("🔁 [TOGGLE] Préstamo automático: %v", autoMode)
+				persistSessionAsync(session)
 				// Evento dedicado: NO usar "state_update" para no reiniciar el feed/logs del dashboard.
 				sendEvent(session, ServerEvent{Type: "AUTO_CREDIT_TOGGLED", SessionID: session.ID, AutoMode: autoMode, Message: fmt.Sprintf("Préstamo automático: %v", autoMode)})
 

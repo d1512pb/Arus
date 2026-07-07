@@ -182,9 +182,18 @@ Neto = (Spread × Volumen) − Fees(ambos exchanges) − Slippage estimado
 
 ---
 
-## 💾 Persistencia de datos (Trade Ledger)
+## 💾 Persistencia de datos (sesiones completas + Trade Ledger)
 
-En lugar de un sistema de usuarios/login (que no aporta valor a un motor HFT), Arus persiste un **Trade Ledger**: un registro de auditoría **inmutable** de cada operación.
+Arus persiste en SQLite **la sesión completa de cada usuario**, no solo sus trades: el demo dejó de ser volátil.
+
+- **Continuidad real:** saldos, parámetros de estrategia, base del PnL y preferencias sobreviven a reinicios del motor **y** del navegador. El token de sesión (UUID v4 no enumerable) vive en `localStorage`: al volver, la acción `resume_session` recupera todo — sin login, sin fricción.
+- **Esquema multi-activo por diseño:** la tabla `balances` es `(session_id, venue, asset, amount)` — cuando lleguen las wallets multi-activo (ETH y más), los datos ya estarán en la forma correcta, sin migración.
+- **Patrón repositorio:** el motor habla con la interfaz `SessionStore`, no con SQLite. Migrar a Postgres (si algún día hay múltiples instancias o cuentas reales) es escribir otro driver, cero cambios de lógica.
+- **Reconexión sin pérdidas:** un parpadeo de red ya no reinicia el progreso — el cliente reanuda la sesión persistida en lugar de re-inicializarla. Si otra pestaña reclama el mismo token, la vieja se desconecta limpiamente (takeover).
+- **Sin préstamos fantasma:** la fotografía persiste solo los fondos PROPIOS; un crédito activo no sobrevive a un reinicio como si fuera capital del usuario.
+- **Write-behind siempre:** persistir jamás frena el trading (mismo patrón que el ledger); si el disco falla, el motor sigue operando en memoria.
+
+Además, el **Trade Ledger** sigue siendo el registro de auditoría **inmutable** de cada operación:
 
 - **Motor de almacenamiento:** **SQLite** vía `modernc.org/sqlite` — **Go puro, sin CGO**, por lo que el despliegue no requiere contenedores ni toolchain de C. La base vive en `apps/engine/data/ledger.db` (modo WAL).
 - **Escritura asíncrona (write-behind):** tras emitir cada operación por WebSocket, una goroutine inserta el `TradeRecord` sin bloquear la ejecución del siguiente chunk.
@@ -249,7 +258,8 @@ Arus/
 │  │  ├─ feed.go              # CONTRATO DE INGESTA: interface FeedAdapter (1 adaptador por exchange, ticks normalizados)
 │  │  ├─ ws_real_market.go    # ADAPTADORES: implementaciones Binance/Bitso (reconexión, coherentBook, precio+cantidad+timestamp)
 │  │  ├─ server.go            # TRANSPORTE: upgrade WS, init de sesión, set_params con clamps, router de acciones y handler HTTP del ledger (CORS)
-│  │  ├─ ledger.go            # PERSISTENCIA: esquema SQLite, write-behind (recordTradeAsync) y consulta por sesión
+│  │  ├─ ledger.go            # PERSISTENCIA: esquema SQLite del ledger, write-behind (recordTradeAsync) y consulta por sesión
+│  │  ├─ store.go             # PERSISTENCIA: sesiones completas (interfaz SessionStore + SQLite) — saldos multi-activo, estrategia, PnL, resume
 │  │  ├─ models.go            # CONTRATOS y ESTADO: TradingParameters (editable en vivo, snapshot atómico), wire types, ClientSession, Hub y constantes
 │  │  ├─ graph.go             # FASE 2 · RADAR: grafo de liquidez en vivo (nodos activo@venue, aristas con pesos -log, Bellman-Ford, snapshot por sesión)
 │  │  ├─ engine_test.go       # Tests unitarios: fórmula institucional, clamps, crédito, sizing, concurrencia del tracker
@@ -391,7 +401,8 @@ Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe 
 - [x] ~~Fase 2 · hito 1 — Radar Omnidireccional~~ — **hecho**: grafo de liquidez en vivo con detección automática de ciclos negativos (Bellman-Ford) y visualización por sesión (`GraphPanel`). Diseño completo en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
 - [x] ~~Fase 2 · hito 2 — radar triangular multi-instrumento~~ — **hecho**: instrumentos como datos (N libros por venue), Binance emite el triángulo BTC/USDT · ETH/USDT · ETH/BTC por un solo socket de streams combinados, y el mismo Bellman-Ford detecta ciclos espaciales **y triangulares** con datos reales.
 - [x] ~~CI en GitHub Actions~~ — **hecho**: cada push corre `go vet` + `go test -race` (detector de data races) + build del motor y del dashboard.
-- [ ] **Fase 2 · hito 3 — ejecución de ciclos:** wallets multi-activo, pasar la ejecución del par fijo al ciclo detectado, poda por Universe del usuario y fees personalizados en los pesos.
+- [x] ~~Persistencia del estado de sesión (Sprint A)~~ — **hecho**: sesiones completas en SQLite (saldos multi-activo, estrategia, PnL), token en el navegador y `resume_session`; el demo sobrevive a reinicios del motor y del navegador.
+- [ ] **Fase 2 · hito 3 — ejecución de ciclos:** wallets multi-activo en memoria (el esquema en base de datos ya lo es), pasar la ejecución del par fijo al ciclo detectado, poda por Universe del usuario y fees personalizados en los pesos.
 - [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación configurable en bps; pasará a ser una tolerancia máxima).
 - [ ] Persistencia del estado de sesión (wallets sobreviven reinicios del motor).
 

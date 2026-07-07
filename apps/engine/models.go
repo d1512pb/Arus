@@ -253,6 +253,16 @@ func (s *ClientSession) WriteMessage(messageType int, data []byte) error {
 	return nil
 }
 
+// CloseConn cierra el socket de la sesión (usado en el takeover de reanudación:
+// la pestaña vieja se desconecta limpiamente cuando otra reclama el mismo token).
+func (s *ClientSession) CloseConn() {
+	s.ConnMu.Lock()
+	defer s.ConnMu.Unlock()
+	if s.Conn != nil {
+		s.Conn.Close()
+	}
+}
+
 type Hub struct {
 	mu       sync.RWMutex
 	sessions map[string]*ClientSession
@@ -270,10 +280,22 @@ func (h *Hub) Add(s *ClientSession) {
 	h.sessions[s.ID] = s
 }
 
-func (h *Hub) Remove(id string) {
+// Remove elimina la sesión SOLO si sigue siendo la registrada bajo su ID
+// (identity-aware): tras un takeover por reanudación, el defer de la conexión
+// vieja no debe expulsar del Hub a la conexión nueva que heredó el mismo ID.
+func (h *Hub) Remove(s *ClientSession) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.sessions, id)
+	if cur, ok := h.sessions[s.ID]; ok && cur == s {
+		delete(h.sessions, s.ID)
+	}
+}
+
+// Get devuelve la sesión viva registrada bajo un ID (nil si no hay).
+func (h *Hub) Get(id string) *ClientSession {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.sessions[id]
 }
 
 func (h *Hub) Snapshot() []*ClientSession {
@@ -307,12 +329,16 @@ type ClientMessage struct {
 	Action     string  `json:"action"`
 	InitialUSD float64 `json:"initial_usd,omitempty"`
 	InitialBTC float64 `json:"initial_btc,omitempty"`
-	Exchange   string  `json:"exchange,omitempty"`
-	Spread     float64 `json:"spread,omitempty"`
-	Liquidity  float64 `json:"liquidity,omitempty"`
-	UseCredit  bool    `json:"use_credit,omitempty"`
-	Currency   string  `json:"currency,omitempty"` // "USD" | "BTC" para depósito/retiro
-	Amount     float64 `json:"amount,omitempty"`   // >0 deposita, <0 retira
+
+	// SessionID acompaña a resume_session: el token (UUID no enumerable) que el
+	// navegador guarda en localStorage para recuperar SU sesión persistida.
+	SessionID string  `json:"session_id,omitempty"`
+	Exchange  string  `json:"exchange,omitempty"`
+	Spread    float64 `json:"spread,omitempty"`
+	Liquidity float64 `json:"liquidity,omitempty"`
+	UseCredit bool    `json:"use_credit,omitempty"`
+	Currency  string  `json:"currency,omitempty"` // "USD" | "BTC" para depósito/retiro
+	Amount    float64 `json:"amount,omitempty"`   // >0 deposita, <0 retira
 
 	// Params acompaña a la acción set_params: la UI envía el struct COMPLETO
 	// (no parches parciales) y el backend clampea cada campo a rangos sanos.
@@ -361,6 +387,10 @@ type ServerEvent struct {
 	// Graph viaja en los eventos graph_update (~1/s): el radar omnidireccional
 	// con los saldos de ESTA sesión superpuestos en cada nodo (ver graph.go).
 	Graph *GraphSnapshotWire `json:"graph,omitempty"`
+
+	// Resumed marca el state_update de una sesión RECUPERADA de la base de datos
+	// (el frontend salta el onboarding y no resetea la configuración local).
+	Resumed bool `json:"resumed,omitempty"`
 }
 
 // PriceTick representa un evento de mercado normalizado que un FeedAdapter publica

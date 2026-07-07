@@ -127,8 +127,17 @@ function borrowedFromData(data: Record<string, unknown>) {
   };
 }
 
+// Clave del token de sesión en localStorage: el UUID de la sesión persistida en
+// el backend. Quien tiene el token, recupera SU sesión (saldos, estrategia,
+// historial) tras cerrar el navegador o tras un reinicio del motor.
+const SESSION_KEY = "arus_session_id";
+
 export function useArusEngine() {
   const [sessionReady, setSessionReady] = useState(false);
+  // resuming: hay un token guardado y estamos recuperando la sesión del servidor
+  // (la UI muestra "recuperando..." en vez del onboarding).
+  const [resuming, setResuming] = useState(false);
+  const sessionIdRef = useRef<string | null>(null);
   const [state, setState] = useState<EngineState>({
     sessionId: "",
     params: null,
@@ -160,18 +169,19 @@ export function useArusEngine() {
   const configRef = useRef<{ usd: number; btc: number } | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const initSession = useCallback((usd: number, btc: number) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+  // openSocket abre la conexión con los handlers compartidos. La reconexión
+  // automática PREFIERE reanudar la sesión persistida (resume_session con el
+  // token) en vez de re-inicializar — un parpadeo de red ya no borra el progreso.
+  const openSocket = useCallback((onOpen: (ws: WebSocket) => void) => {
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      wsRef.current.onclose = null; // el socket viejo no debe disparar reconexiones
       wsRef.current.close();
     }
 
-    configRef.current = { usd, btc };
     const ws = new WebSocket(ENGINE_WS_URL);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ action: "init_session", initial_usd: usd, initial_btc: btc }));
-    };
+    ws.onopen = () => onOpen(ws);
 
     ws.onmessage = (event) => {
       try {
@@ -186,13 +196,47 @@ export function useArusEngine() {
       setSessionReady(false);
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = setTimeout(() => {
-        if (configRef.current) {
-          initSession(configRef.current.usd, configRef.current.btc);
+        const token = sessionIdRef.current;
+        if (token) {
+          openSocket(s => s.send(JSON.stringify({ action: "resume_session", session_id: token })));
+        } else if (configRef.current) {
+          openSocket(s => s.send(JSON.stringify({ action: "init_session", initial_usd: configRef.current!.usd, initial_btc: configRef.current!.btc })));
         }
       }, 3000);
     };
 
     ws.onerror = () => ws.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const initSession = useCallback((usd: number, btc: number) => {
+    configRef.current = { usd, btc };
+    const msg = JSON.stringify({ action: "init_session", initial_usd: usd, initial_btc: btc });
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(msg); // socket vivo (p. ej. tras RESUME_FAILED): reúsalo
+      return;
+    }
+    openSocket(ws => ws.send(msg));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reanudación al cargar la página: si hay token guardado, recuperamos la
+  // sesión persistida en el backend en lugar de mostrar el onboarding.
+  useEffect(() => {
+    const token = typeof window !== "undefined" ? localStorage.getItem(SESSION_KEY) : null;
+    if (!token) return;
+    sessionIdRef.current = token;
+    setResuming(true);
+    openSocket(ws => ws.send(JSON.stringify({ action: "resume_session", session_id: token })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // cancelResume: escape para el usuario si la recuperación tarda o falla —
+  // olvida el token y vuelve al onboarding para empezar de cero.
+  const cancelResume = useCallback(() => {
+    if (typeof window !== "undefined") localStorage.removeItem(SESSION_KEY);
+    sessionIdRef.current = null;
+    setResuming(false);
   }, []);
 
   const resetSession = useCallback(() => {
@@ -272,6 +316,14 @@ export function useArusEngine() {
     };
 
     if (data.type === "state_update") {
+      // El session_id es el TOKEN de continuidad: se guarda para reanudar la
+      // sesión tras cerrar el navegador o reiniciar el motor.
+      const sid = data.session_id as string;
+      if (sid && typeof window !== "undefined") {
+        sessionIdRef.current = sid;
+        localStorage.setItem(SESSION_KEY, sid);
+      }
+      setResuming(false);
       setSessionReady(true);
       setState(prev => ({
         ...prev,
@@ -296,6 +348,12 @@ export function useArusEngine() {
         insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
         loanResults: null,
       }));
+    } else if (data.type === "RESUME_FAILED") {
+      // El token ya no corresponde a una sesión válida: se olvida y el usuario
+      // pasa por el onboarding normal (el socket queda abierto para el init).
+      if (typeof window !== "undefined") localStorage.removeItem(SESSION_KEY);
+      sessionIdRef.current = null;
+      setResuming(false);
     } else if (data.type === "PARAMS_UPDATED") {
       setState(prev => ({ ...prev, params: (data.params as TradingParams) ?? prev.params }));
     } else if (data.type === "graph_update") {
@@ -411,6 +469,8 @@ export function useArusEngine() {
 
   return {
     sessionReady,
+    resuming,
+    cancelResume,
     state,
     initSession,
     resetSession,
