@@ -1189,8 +1189,8 @@ export default function Home() {
         {/* Radar omnidireccional (Fase 2) — el grafo de liquidez en vivo */}
         <GraphPanel graph={state.graph} />
 
-        {/* Estrategia — el usuario personaliza umbrales, fees y apetito de riesgo */}
-        <StrategyPanel params={state.params} onApply={setParams} />
+        {/* Estrategia — umbrales, fees, apetito de riesgo, universo y autopiloto */}
+        <StrategyPanel params={state.params} graph={state.graph} onApply={setParams} />
 
         {/* Ledger / Auditoría Institucional — demuestra la persistencia de datos */}
         <LedgerPanel sessionId={state.sessionId} />

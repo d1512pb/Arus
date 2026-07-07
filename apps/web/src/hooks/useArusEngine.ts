@@ -32,6 +32,12 @@ export interface TradingParams {
   spike_tick_deviation: number;
   max_divergence_ratio: number;
   risk_multiplier: number;
+  // Universo del usuario (hito 3): con qué exchanges y monedas juega.
+  // Ausente/vacío = todos.
+  enabled_venues?: string[];
+  enabled_assets?: string[];
+  // Autopiloto del radar: detección → ejecución del mejor ciclo del universo.
+  radar_autopilot?: boolean;
 }
 
 // --- Radar omnidireccional (Fase 2): espejo de GraphSnapshotWire en Go ---

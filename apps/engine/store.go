@@ -240,30 +240,26 @@ func snapshotSessionRecord(s *ClientSession) (SessionRecord, bool) {
 		Balances:       make(map[string]map[string]float64, len(Venues)),
 	}
 
-	for _, v := range Venues {
-		w, ok := s.Wallets[v.Name]
-		if !ok {
-			continue
+	// Fotografía multi-activo COMPLETA (hito 3): todos los activos de todos los
+	// venues; el préstamo activo (que vive solo en quote/base) se descuenta.
+	for venue, assets := range s.Wallets {
+		inner := make(map[string]float64, len(assets))
+		for asset, amt := range assets {
+			own := amt
+			if s.Credit.Active {
+				if asset == quoteOf(venue) && s.Credit.BorrowedUSD != nil {
+					own -= s.Credit.BorrowedUSD[venue]
+				}
+				if asset == baseOf(venue) && s.Credit.BorrowedBTC != nil {
+					own -= s.Credit.BorrowedBTC[venue]
+				}
+				if own < 0 {
+					own = 0 // el bot consumió parte del préstamo: lo propio nunca es negativo
+				}
+			}
+			inner[asset] = own
 		}
-		ownUSD, ownBTC := w.USD, w.BTC
-		if s.Credit.Active {
-			if s.Credit.BorrowedUSD != nil {
-				ownUSD -= s.Credit.BorrowedUSD[v.Name]
-			}
-			if s.Credit.BorrowedBTC != nil {
-				ownBTC -= s.Credit.BorrowedBTC[v.Name]
-			}
-			if ownUSD < 0 {
-				ownUSD = 0 // el bot consumió parte del préstamo: lo propio nunca es negativo
-			}
-			if ownBTC < 0 {
-				ownBTC = 0
-			}
-		}
-		rec.Balances[v.Name] = map[string]float64{
-			v.QuoteAsset: ownUSD,
-			v.BaseAsset:  ownBTC,
-		}
+		rec.Balances[venue] = inner
 	}
 
 	return rec, true
@@ -297,17 +293,20 @@ func applySessionRecord(s *ClientSession, rec SessionRecord) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
-	s.Wallets = make(map[string]*Wallet, len(Venues))
+	// Restauración multi-activo COMPLETA (hito 3): cada activo persistido vuelve
+	// a su venue — incluidos los que no son quote/base (ETH de un triangular).
+	s.Wallets = make(Balances, len(Venues))
 	for _, v := range Venues {
-		w := &Wallet{}
-		if assets, ok := rec.Balances[v.Name]; ok {
-			// Mapeo multi-activo → wallet actual (quote/base). Activos adicionales
-			// del esquema (futuros: ETH…) se conservan en la base y se montarán
-			// cuando el tipo en memoria sea multi-activo (hito 3).
-			w.USD = assets[v.QuoteAsset]
-			w.BTC = assets[v.BaseAsset]
+		s.Wallets.Set(v.Name, v.QuoteAsset, 0)
+		s.Wallets.Set(v.Name, v.BaseAsset, 0)
+	}
+	for venue, assets := range rec.Balances {
+		if !isKnownVenue(venue) {
+			continue
 		}
-		s.Wallets[v.Name] = w
+		for asset, amt := range assets {
+			s.Wallets.Set(venue, asset, amt)
+		}
 	}
 
 	s.InitialUSD = rec.InitialUSD

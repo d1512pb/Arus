@@ -25,11 +25,12 @@ func initSession(s *ClientSession, usd, btc float64) {
 	half := usd / 2.0
 	halfBTC := btc / 2.0
 
-	// Wallets se crean desde el registro de venues: agregar un exchange nuevo no
-	// requiere tocar esta función.
-	s.Wallets = make(map[string]*Wallet, len(Venues))
+	// Saldos multi-activo creados desde el registro de venues: agregar un
+	// exchange o un activo nuevo no requiere tocar esta función.
+	s.Wallets = make(Balances, len(Venues))
 	for _, v := range Venues {
-		s.Wallets[v.Name] = &Wallet{USD: half, BTC: halfBTC}
+		s.Wallets.Set(v.Name, v.QuoteAsset, half)
+		s.Wallets.Set(v.Name, v.BaseAsset, halfBTC)
 	}
 
 	btcPrice := DefaultBTCPriceFallback
@@ -120,6 +121,26 @@ func sanitizeTradingParams(requested TradingParameters) TradingParameters {
 		fees[v.Name] = fee
 	}
 
+	// Universo (hito 3): solo venues y activos REGISTRADOS; duplicados fuera.
+	// Si tras el filtrado queda vacío, se interpreta como "todos" (nil) — el
+	// usuario no puede dejarse a sí mismo sin mercado por accidente.
+	var venuesU []string
+	seenV := map[string]bool{}
+	for _, v := range requested.EnabledVenues {
+		if isKnownVenue(v) && !seenV[v] {
+			seenV[v] = true
+			venuesU = append(venuesU, v)
+		}
+	}
+	var assetsU []string
+	seenA := map[string]bool{}
+	for _, a := range requested.EnabledAssets {
+		if isKnownAsset(a) && !seenA[a] {
+			seenA[a] = true
+			assetsU = append(assetsU, a)
+		}
+	}
+
 	return TradingParameters{
 		TakerFees:          fees,
 		MinNetProfitUSD:    clampFloat(requested.MinNetProfitUSD, MinNetProfitFloor, MaxNetProfitCeil, defaults.MinNetProfitUSD),
@@ -128,6 +149,9 @@ func sanitizeTradingParams(requested TradingParameters) TradingParameters {
 		SpikeTickDeviation: clampFloat(requested.SpikeTickDeviation, MinSpikeDeviation, MaxSpikeDeviation, defaults.SpikeTickDeviation),
 		MaxDivergenceRatio: clampFloat(requested.MaxDivergenceRatio, MinDivergenceRatioLimit, MaxDivergenceRatioLimit, defaults.MaxDivergenceRatio),
 		RiskMultiplier:     clampFloat(requested.RiskMultiplier, MinRiskMultiplier, MaxRiskMultiplier, defaults.RiskMultiplier),
+		EnabledVenues:      venuesU,
+		EnabledAssets:      assetsU,
+		RadarAutopilot:     requested.RadarAutopilot,
 	}
 }
 
@@ -135,10 +159,10 @@ func sendEvent(s *ClientSession, ev ServerEvent) {
 	// Enrich with wallet state if initialized
 	s.Mu.Lock()
 	if s.Wallets != nil {
-		ev.BinanceUSD = s.Wallets["Binance"].USD
-		ev.BinanceBTC = s.Wallets["Binance"].BTC
-		ev.BitsoUSD = s.Wallets["Bitso"].USD
-		ev.BitsoBTC = s.Wallets["Bitso"].BTC
+		ev.BinanceUSD = s.Wallets.Get("Binance", quoteOf("Binance"))
+		ev.BinanceBTC = s.Wallets.Get("Binance", baseOf("Binance"))
+		ev.BitsoUSD = s.Wallets.Get("Bitso", quoteOf("Bitso"))
+		ev.BitsoBTC = s.Wallets.Get("Bitso", baseOf("Bitso"))
 		ev.TotalWealth = s.TotalWealth
 		ev.TotalNetProfit = s.TotalNetProfit
 		ev.InitialWealth = s.InitialWealth

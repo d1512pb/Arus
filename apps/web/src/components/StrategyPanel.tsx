@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { SlidersHorizontal, ChevronDown, ChevronRight, Check } from "lucide-react";
-import { TradingParams } from "../hooks/useArusEngine";
+import { SlidersHorizontal, ChevronDown, ChevronRight, Check, Radar } from "lucide-react";
+import { TradingParams, GraphSnapshot } from "../hooks/useArusEngine";
 
 // StrategyPanel — personalización de la estrategia EN VIVO (Fase 0).
 // El usuario define su apetito de riesgo: margen mínimo, tamaño máximo de orden,
@@ -12,6 +12,9 @@ import { TradingParams } from "../hooks/useArusEngine";
 
 interface Props {
   params: TradingParams | null;
+  // graph aporta el CATÁLOGO de venues/activos disponibles (los nodos del radar)
+  // para pintar el universo del usuario.
+  graph: GraphSnapshot | null;
   onApply: (p: TradingParams) => void;
 }
 
@@ -23,9 +26,12 @@ interface FormState {
   slippageBps: string;
   risk: string;
   fees: Record<string, string>;
+  autopilot: boolean;
+  venues: string[]; // universo seleccionado (vacío antes de conocer catálogo)
+  assets: string[];
 }
 
-function fromParams(p: TradingParams): FormState {
+function fromParams(p: TradingParams, catalogVenues: string[], catalogAssets: string[]): FormState {
   const fees: Record<string, string> = {};
   for (const [venue, fee] of Object.entries(p.taker_fees ?? {})) {
     fees[venue] = (fee * 100).toString(); // fracción → %
@@ -36,6 +42,10 @@ function fromParams(p: TradingParams): FormState {
     slippageBps: (p.slippage_rate * 10000).toString(), // fracción → bps
     risk: p.risk_multiplier.toString(),
     fees,
+    autopilot: p.radar_autopilot === true,
+    // Lista vacía en el servidor = "todos": se materializa con el catálogo.
+    venues: p.enabled_venues?.length ? p.enabled_venues : catalogVenues,
+    assets: p.enabled_assets?.length ? p.enabled_assets : catalogAssets,
   };
 }
 
@@ -44,20 +54,29 @@ const num = (s: string) => {
   return Number.isFinite(v) ? v : 0;
 };
 
-export function StrategyPanel({ params, onApply }: Props) {
+export function StrategyPanel({ params, graph, onApply }: Props) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<FormState | null>(null);
   const [dirty, setDirty] = useState(false);
   const [justApplied, setJustApplied] = useState(false);
+
+  // Catálogo de venues/activos disponibles, derivado de los nodos del radar.
+  const catalogVenues: string[] = [];
+  const catalogAssets: string[] = [];
+  for (const n of graph?.nodes ?? []) {
+    if (!catalogVenues.includes(n.venue)) catalogVenues.push(n.venue);
+    if (!catalogAssets.includes(n.asset)) catalogAssets.push(n.asset);
+  }
 
   // Sincroniza el formulario con los parámetros VIGENTES del servidor mientras el
   // usuario no esté editando (dirty). Tras aplicar, el PARAMS_UPDATED del backend
   // refresca params y aquí se pintan los valores post-clamp.
   useEffect(() => {
     if (params && !dirty) {
-      setForm(fromParams(params));
+      setForm(fromParams(params, catalogVenues, catalogAssets));
     }
-  }, [params, dirty]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, dirty, graph === null]);
 
   if (!params || !form) return null;
 
@@ -67,11 +86,18 @@ export function StrategyPanel({ params, onApply }: Props) {
     setJustApplied(false);
   };
 
+  const toggleIn = (list: string[], item: string) =>
+    list.includes(item) ? list.filter(x => x !== item) : [...list, item];
+
   const handleApply = () => {
     const fees: Record<string, number> = {};
     for (const [venue, pct] of Object.entries(form.fees)) {
       fees[venue] = num(pct) / 100; // % → fracción
     }
+    // Universo: si TODO está seleccionado se envía vacío (= "todos"), para que
+    // futuros exchanges/monedas entren solos al universo de este usuario.
+    const allV = catalogVenues.length > 0 && form.venues.length === catalogVenues.length;
+    const allA = catalogAssets.length > 0 && form.assets.length === catalogAssets.length;
     onApply({
       ...params,
       taker_fees: fees,
@@ -79,6 +105,9 @@ export function StrategyPanel({ params, onApply }: Props) {
       max_order_size_btc: num(form.maxOrder),
       slippage_rate: num(form.slippageBps) / 10000, // bps → fracción
       risk_multiplier: num(form.risk),
+      enabled_venues: allV ? [] : form.venues,
+      enabled_assets: allA ? [] : form.assets,
+      radar_autopilot: form.autopilot,
     });
     setDirty(false);
     setJustApplied(true);
@@ -112,6 +141,11 @@ export function StrategyPanel({ params, onApply }: Props) {
           <span className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-bold text-violet-600 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 px-2.5 py-1 rounded-full">
             mín. ${params.min_net_profit_usd.toFixed(2)} · máx. {params.max_order_size_btc} BTC · riesgo {params.risk_multiplier}x
           </span>
+          {params.radar_autopilot && (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 px-2.5 py-1 rounded-full">
+              <Radar className="w-3 h-3" /> Autopiloto
+            </span>
+          )}
           {open ? <ChevronDown className="w-5 h-5 text-gray-400" /> : <ChevronRight className="w-5 h-5 text-gray-400" />}
         </div>
       </button>
@@ -158,6 +192,67 @@ export function StrategyPanel({ params, onApply }: Props) {
               ))}
             </div>
             <p className={hintCls}>Ajústalas si tu nivel de cuenta paga comisiones distintas a las estándar.</p>
+          </div>
+
+          {/* Universo del usuario (hito 3): con qué exchanges y monedas juega */}
+          {catalogVenues.length > 0 && (
+            <div className="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800">
+              <p className={`${labelCls} mb-3`}>Tu universo: elige con qué jugar</p>
+              <div className="flex flex-wrap gap-4">
+                <div>
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mb-1.5">Casas de cambio</p>
+                  <div className="flex flex-wrap gap-2">
+                    {catalogVenues.map(v => (
+                      <button
+                        key={v}
+                        onClick={() => edit({ venues: toggleIn(form.venues, v) })}
+                        className={`px-3 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${form.venues.includes(v) ? "bg-violet-600 text-white border-violet-600" : "bg-gray-50 dark:bg-gray-950 text-gray-400 border-gray-200 dark:border-gray-700 line-through"}`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mb-1.5">Monedas</p>
+                  <div className="flex flex-wrap gap-2">
+                    {catalogAssets.map(a => (
+                      <button
+                        key={a}
+                        onClick={() => edit({ assets: toggleIn(form.assets, a) })}
+                        className={`px-3 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${form.assets.includes(a) ? "bg-violet-600 text-white border-violet-600" : "bg-gray-50 dark:bg-gray-950 text-gray-400 border-gray-200 dark:border-gray-700 line-through"}`}
+                      >
+                        {a}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <p className={hintCls}>El radar solo busca ciclos dentro de tu universo. Deseleccionar todo equivale a permitir todo.</p>
+            </div>
+          )}
+
+          {/* Autopiloto del radar (hito 3): detección → ejecución */}
+          <div className="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800">
+            <div className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950">
+              <Radar className={`w-5 h-5 flex-shrink-0 ${form.autopilot ? "text-emerald-500" : "text-gray-400"}`} />
+              <div className="flex-1">
+                <p className="text-sm font-bold text-gray-900 dark:text-gray-100">Autopiloto del radar</p>
+                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5 leading-relaxed">
+                  {form.autopilot
+                    ? "El bot EJECUTA automáticamente el mejor ciclo de tu universo (espacial o triangular), con tus comisiones y tu margen. Sustituye al modo clásico del par."
+                    : "Apagado: el radar solo detecta y muestra los ciclos; la ejecución sigue en el modo clásico (par BTC entre Binance y Bitso)."}
+                </p>
+              </div>
+              <button
+                onClick={() => edit({ autopilot: !form.autopilot })}
+                role="switch"
+                aria-checked={form.autopilot}
+                className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-1 flex-shrink-0 ${form.autopilot ? "bg-emerald-500" : "bg-gray-300 dark:bg-gray-700"}`}
+              >
+                <div className={`w-4 h-4 bg-white rounded-full transition-transform transform ${form.autopilot ? "translate-x-6" : "translate-x-0"}`} />
+              </button>
+            </div>
           </div>
 
           <div className="mt-5 flex items-center justify-between gap-3">

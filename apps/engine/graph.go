@@ -288,15 +288,47 @@ func (g *LiquidityGraph) activeEdgesLocked(now time.Time) []Edge {
 const cycleEpsilon = 1e-9
 
 // FindBestCycle busca un ciclo de peso negativo (arbitraje) con Bellman-Ford
-// sobre las aristas activas. Devuelve nil si no hay ciclo rentable ahora mismo.
-// Con el grafo actual (≤ 8 nodos) la búsqueda completa es de microsegundos; si el
-// universo crece, el doc de Fase 2 contempla SPFA incremental.
+// sobre las aristas activas, con los FEES DE REFERENCIA del registro. Es la
+// vista global del radar. Devuelve nil si no hay ciclo rentable ahora mismo.
 func (g *LiquidityGraph) FindBestCycle(now time.Time) *Cycle {
 	g.mu.Lock()
 	edges := g.activeEdgesLocked(now)
 	nodeCount := len(g.nodes)
 	g.mu.Unlock()
+	return findNegativeCycle(edges, nodeCount)
+}
 
+// FindBestCycleFor es la detección PERSONALIZADA del hito 3: mismas aristas
+// activas, pero con los fees DEL USUARIO en los pesos y el grafo PODADO a su
+// universo (venues/activos habilitados). Dos usuarios ven ciclos distintos en
+// el mismo mercado — la personalización es literalmente la forma del espacio
+// de búsqueda.
+func (g *LiquidityGraph) FindBestCycleFor(p TradingParameters, now time.Time) *Cycle {
+	g.mu.Lock()
+	all := g.activeEdgesLocked(now)
+	nodeCount := len(g.nodes)
+	g.mu.Unlock()
+
+	edges := make([]Edge, 0, len(all))
+	for _, e := range all {
+		if !p.universeAllows(e.From) || !p.universeAllows(e.To) {
+			continue // poda: fuera del universo del usuario
+		}
+		if e.Kind == EdgeOrderBook {
+			// Pesos con el fee de ESTE usuario (+ su slippage estimado).
+			e.Fee = p.takerFee(e.From.Venue) + p.SlippageRate
+			e.recomputeWeight()
+		}
+		edges = append(edges, e)
+	}
+	return findNegativeCycle(edges, nodeCount)
+}
+
+// findNegativeCycle es el núcleo compartido: Bellman-Ford con fuente virtual +
+// extracción del ciclo por predecesores + volumen homogéneo. Con grafos de este
+// tamaño (≤ 8 nodos) la búsqueda completa es de microsegundos; si el universo
+// crece, el doc de Fase 2 contempla SPFA incremental.
+func findNegativeCycle(edges []Edge, nodeCount int) *Cycle {
 	if len(edges) == 0 || nodeCount == 0 {
 		return nil
 	}
@@ -434,13 +466,10 @@ func isCashAsset(a Asset) bool {
 }
 
 // SnapshotFor arma la vista del radar para UNA sesión: el grafo global de mercado
-// con los SALDOS de esa sesión superpuestos en cada nodo. El ciclo (calculado una
-// sola vez por barrido) se pasa ya resuelto para no repetir Bellman-Ford por sesión.
-//
-// Saldos: los wallets actuales respaldan SOLO el par principal de cada venue
-// (Base/Quote del registro de venues); los demás activos del radar (ETH) muestran
-// saldo 0 hasta que lleguen las wallets multi-activo (hito 3).
-func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, now time.Time) *GraphSnapshotWire {
+// con los SALDOS MULTI-ACTIVO de esa sesión superpuestos en cada nodo (hito 3:
+// el ETH de un ciclo triangular aparece con su saldo real). El ciclo (calculado
+// una vez por barrido) se pasa ya resuelto para no repetir Bellman-Ford por sesión.
+func (g *LiquidityGraph) SnapshotFor(wallets Balances, cycle *Cycle, now time.Time) *GraphSnapshotWire {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -480,31 +509,21 @@ func (g *LiquidityGraph) SnapshotFor(wallets map[string]Wallet, cycle *Cycle, no
 	}
 
 	for _, n := range g.nodes {
-		v, _ := venueByName(n.Venue)
-		w := wallets[n.Venue]
 		node := GraphNodeWire{
 			ID:        n.ID(),
 			Asset:     string(n.Asset),
 			Venue:     n.Venue,
 			Kind:      "crypto",
+			Balance:   wallets.Get(n.Venue, string(n.Asset)),
 			FeedStale: staleVenue[n.Venue],
 		}
-		switch {
-		case isCashAsset(n.Asset):
+		if isCashAsset(n.Asset) {
 			node.Kind = "cash"
 			node.PriceUSD = 1
-			if string(n.Asset) == v.QuoteAsset {
-				node.Balance = w.USD
-				node.BalanceUSD = w.USD
-			}
-		case string(n.Asset) == v.BaseAsset:
-			node.Balance = w.BTC
-			node.PriceUSD = priceUSD[n.ID()]
-			node.BalanceUSD = w.BTC * node.PriceUSD
-		default:
-			// Activo del radar sin wallet respaldada aún (ETH): saldo 0, precio real.
+		} else {
 			node.PriceUSD = priceUSD[n.ID()]
 		}
+		node.BalanceUSD = node.Balance * node.PriceUSD
 		snap.Nodes = append(snap.Nodes, node)
 	}
 

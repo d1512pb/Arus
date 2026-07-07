@@ -92,6 +92,8 @@ Desde la rama *arbitraje omnidireccional*, los parámetros que gobiernan al bot 
 | **Slippage estimado (bps)** | Tolerancia de deslizamiento asumida por pierna | Un perfil agresivo asume menos fricción y ejecuta más |
 | **Comisiones por exchange** | Taker fee de cada casa (cuentas VIP pagan menos) | Ajustable por venue desde el registro |
 | **Multiplicador de riesgo** | Inecuación del crédito: `ganancia > costo × k` | Conservador `k=5` (solo endeudarse si cubre 5× el costo); agresivo `k=1` |
+| **Tu universo** | Con qué exchanges y monedas juega el bot (poda del grafo) | Solo Binance → el radar busca únicamente ciclos triangulares internos |
+| **Autopiloto del radar** | Detección → ejecución del mejor ciclo del universo | ON: ejecuta ciclos espaciales o triangulares con TUS fees; OFF: modo clásico del par |
 
 El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`) y responde con lo realmente aplicado: un mensaje malicioso no puede corromper una sesión. Los cambios son atómicos (snapshot por operación): si editas a mitad de un trade, ese trade termina con los parámetros con los que empezó.
 
@@ -262,6 +264,7 @@ Arus/
 │  │  ├─ store.go             # PERSISTENCIA: sesiones completas (interfaz SessionStore + SQLite) — saldos multi-activo, estrategia, PnL, resume
 │  │  ├─ models.go            # CONTRATOS y ESTADO: TradingParameters (editable en vivo, snapshot atómico), wire types, ClientSession, Hub y constantes
 │  │  ├─ graph.go             # FASE 2 · RADAR: grafo de liquidez en vivo (nodos activo@venue, aristas con pesos -log, Bellman-Ford, snapshot por sesión)
+│  │  ├─ cycle.go             # FASE 2 · EJECUTOR: autopiloto del radar — planificación pura de ciclos + commit atómico multi-activo
 │  │  ├─ engine_test.go       # Tests unitarios: fórmula institucional, clamps, crédito, sizing, concurrencia del tracker
 │  │  └─ engine_bench_test.go # Benchmark de latencia del núcleo de detección
 │  └─ web/                    # Dashboard en Next.js
@@ -402,7 +405,9 @@ Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe 
 - [x] ~~Fase 2 · hito 2 — radar triangular multi-instrumento~~ — **hecho**: instrumentos como datos (N libros por venue), Binance emite el triángulo BTC/USDT · ETH/USDT · ETH/BTC por un solo socket de streams combinados, y el mismo Bellman-Ford detecta ciclos espaciales **y triangulares** con datos reales.
 - [x] ~~CI en GitHub Actions~~ — **hecho**: cada push corre `go vet` + `go test -race` (detector de data races) + build del motor y del dashboard.
 - [x] ~~Persistencia del estado de sesión (Sprint A)~~ — **hecho**: sesiones completas en SQLite (saldos multi-activo, estrategia, PnL), token en el navegador y `resume_session`; el demo sobrevive a reinicios del motor y del navegador.
-- [ ] **Fase 2 · hito 3 — ejecución de ciclos:** wallets multi-activo en memoria (el esquema en base de datos ya lo es), pasar la ejecución del par fijo al ciclo detectado, poda por Universe del usuario y fees personalizados en los pesos.
+- [x] ~~Fase 2 · hito 3 — ejecución de ciclos~~ — **hecho**: wallets multi-activo en memoria (`Balances`), ejecutor de ciclos con planificación pura + commit atómico (`cycle.go`), Universe por sesión (elige tus exchanges y monedas), fees del usuario en los pesos del grafo y **autopiloto del radar** opt-in que sustituye al modo clásico.
+- [ ] Crédito automático para ciclos del radar (hoy el autopiloto omite oportunidades sin fondos, sin ofrecer préstamo).
+- [ ] Kraken como tercer venue (Sprint C) — con el ejecutor de ciclos ya llega operable, no solo visible.
 - [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación configurable en bps; pasará a ser una tolerancia máxima).
 - [ ] Persistencia del estado de sesión (wallets sobreviven reinicios del motor).
 

@@ -1,14 +1,15 @@
 # Fase 2 — Motor de arbitraje omnidireccional (grafo de liquidez)
 
-> **Estado: RADAR MULTI-INSTRUMENTO IMPLEMENTADO (hitos 1 y 2).** El grafo de
-> liquidez vive en `apps/engine/graph.go`: la topología nace del registro de
-> INSTRUMENTOS (un venue publica N libros — Binance emite el triángulo BTC/USDT ·
-> ETH/USDT · ETH/BTC por un solo socket de streams combinados), se actualiza con
-> cada tick real (O(1) por libro), detecta ciclos negativos con Bellman-Ford
-> (espaciales Y TRIANGULARES) y se emite a la UI (~1/s) con los saldos de cada
-> sesión superpuestos (`GraphPanel`). La **ejecución de ciclos** sigue a cargo
-> del núcleo de dos venues probado — pasarla al grafo es el hito 3 (sección 3):
-> requiere wallets multi-activo (hoy ETH se radaría con saldo 0).
+> **Estado: HITOS 1, 2 Y 3 IMPLEMENTADOS.** El grafo de liquidez
+> (`apps/engine/graph.go`) nace del registro de INSTRUMENTOS, se actualiza con
+> cada tick real y detecta ciclos negativos (espaciales y triangulares) con
+> Bellman-Ford. Desde el **hito 3** el radar además EJECUTA: wallets
+> **multi-activo en memoria** (`Balances`, mismo esquema que persiste el store),
+> ejecutor de ciclos (`cycle.go`: planificación pura + commit atómico con
+> Fill-or-Kill antes de tocar saldos), **Universe por sesión** (poda del grafo a
+> los venues/monedas del usuario), **fees del usuario en los pesos**
+> (`FindBestCycleFor`) y el **autopiloto opt-in** (`RadarAutopilot`) que
+> sustituye al ejecutor clásico del par cuando está activo.
 
 ## 1. Idea central
 
@@ -67,9 +68,15 @@ formalismo que usan los desks institucionales de arbitraje cross-venue.
 - **Volumen de ciclo:** homogéneo (min de liquidez) solo si todas las piernas de
   libro comparten activo base; en triangulares (bases mixtas) se reporta "no
   homogéneo" hasta el ejecutor del hito 3.
-- **Aún NO:** ejecutar el ciclo detectado (radar ≠ gatillo), poda por Universe
-  por sesión, fees personalizados en los pesos (usa referencia y la UI lo
-  declara) y wallets multi-activo (prerequisito del ejecutor).
+- **Hito 3 (hecho):** ejecución de ciclos vía autopiloto opt-in — el plan rota
+  el ciclo a un inicio CASH, dimensiona contra saldo + tope del usuario +
+  liquidez por pierna (mapeada a unidades de inicio) y solo ejecuta si el neto
+  supera el margen DEL usuario; commit atómico bajo el lock de sesión con
+  re-verificación de fondos (hard block) y Fill-or-Kill previo (cero exposición).
+- **Aún NO:** crédito automático para ciclos (el shortfall de ciclos se omite en
+  silencio, sin ofrecer préstamo), liquidez compartida entre sesiones, y el wire
+  plano 2-venue convive con el campo `balances` multi-activo (la UI de wallets
+  clásicas sigue leyendo el plano).
 
 ## 3. Primer hito demostrable (el más barato)
 

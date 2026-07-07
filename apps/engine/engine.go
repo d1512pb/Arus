@@ -181,13 +181,23 @@ func getBTCPrice() float64 {
 	return DefaultBTCPriceFallback
 }
 
-func clampWallet(w *Wallet) {
-	if w.USD < 0 && w.USD > -1e-8 {
-		w.USD = 0
+// assetPriceUSD valora un activo en USD con el mid de su libro contra un quote
+// cash (BTC vía Binance:BTC/USDT, ETH vía Binance:ETH/USDT…); cash = 1.
+func assetPriceUSD(asset string) float64 {
+	if asset == "USD" || assetsParity(asset, "USD") {
+		return 1
 	}
-	if w.BTC < 0 && w.BTC > -1e-8 {
-		w.BTC = 0
+	for _, in := range Instruments {
+		if in.Base == asset && (in.Quote == "USD" || assetsParity(in.Quote, "USD")) {
+			if book, ok := currentMarket.Get(in.Key()); ok && book.Ask > 0 && book.Bid > 0 {
+				return (book.Ask + book.Bid) / 2
+			}
+		}
 	}
+	if asset == "BTC" {
+		return DefaultBTCPriceFallback
+	}
+	return 0
 }
 
 func (e *HFTEngine) sessionHasFundsForTrade(session *ClientSession, buyEx, sellEx string, volume, buyPrice float64) bool {
@@ -196,7 +206,8 @@ func (e *HFTEngine) sessionHasFundsForTrade(session *ClientSession, buyEx, sellE
 
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
-	return session.Wallets[buyEx].USD >= requiredUSD && session.Wallets[sellEx].BTC >= volume
+	return session.Wallets.Get(buyEx, quoteOf(buyEx)) >= requiredUSD &&
+		session.Wallets.Get(sellEx, baseOf(sellEx)) >= volume
 }
 
 // adjustFunds permite al usuario depositar (amount > 0) o retirar (amount < 0) USD o
@@ -209,12 +220,7 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 	}
 
 	session.Mu.Lock()
-	if session.Wallets == nil {
-		session.Mu.Unlock()
-		return
-	}
-	w, ok := session.Wallets[exchange]
-	if !ok {
+	if session.Wallets == nil || !isKnownVenue(exchange) {
 		session.Mu.Unlock()
 		return
 	}
@@ -224,18 +230,20 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 
 	switch strings.ToUpper(currency) {
 	case "USD":
-		if amount < 0 && w.USD+amount < 0 {
-			applied = -w.USD // no permitir saldo negativo: retira como máximo lo disponible
+		asset := quoteOf(exchange)
+		if cur := session.Wallets.Get(exchange, asset); amount < 0 && cur+amount < 0 {
+			applied = -cur // no permitir saldo negativo: retira como máximo lo disponible
 		}
-		w.USD += applied
+		session.Wallets.Add(exchange, asset, applied)
 		session.TotalWealth += applied
 		session.InitialWealth += applied // base sube/baja igual → no se contabiliza como PnL
 		session.InitialUSD += applied
 	case "BTC":
-		if amount < 0 && w.BTC+amount < 0 {
-			applied = -w.BTC
+		asset := baseOf(exchange)
+		if cur := session.Wallets.Get(exchange, asset); amount < 0 && cur+amount < 0 {
+			applied = -cur
 		}
-		w.BTC += applied
+		session.Wallets.Add(exchange, asset, applied)
 		session.TotalWealth += applied * btcPrice
 		session.InitialWealth += applied * btcPrice
 		session.InitialBTC += applied
@@ -243,7 +251,6 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 		session.Mu.Unlock()
 		return
 	}
-	clampWallet(w)
 	session.Mu.Unlock()
 
 	action := "Depósito"
@@ -261,12 +268,16 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 func sendWalletUpdate(s *ClientSession) {
 	s.Mu.Lock()
 	ev := ServerEvent{
-		Type:           "wallet_update",
-		SessionID:      s.ID,
-		BinanceUSD:     s.Wallets["Binance"].USD,
-		BinanceBTC:     s.Wallets["Binance"].BTC,
-		BitsoUSD:       s.Wallets["Bitso"].USD,
-		BitsoBTC:       s.Wallets["Bitso"].BTC,
+		Type:      "wallet_update",
+		SessionID: s.ID,
+		// Wire plano 2-venue (compatibilidad con el dashboard desplegado): el
+		// quote del venue viaja como *_usd y el base como *_btc. El estado
+		// COMPLETO multi-activo viaja además en Balances.
+		BinanceUSD:     s.Wallets.Get("Binance", quoteOf("Binance")),
+		BinanceBTC:     s.Wallets.Get("Binance", baseOf("Binance")),
+		BitsoUSD:       s.Wallets.Get("Bitso", quoteOf("Bitso")),
+		BitsoBTC:       s.Wallets.Get("Bitso", baseOf("Bitso")),
+		Balances:       s.Wallets.Clone(),
 		TotalWealth:    s.TotalWealth,
 		TotalNetProfit: s.TotalNetProfit,
 		IsReplenishing: s.IsReplenishing,
@@ -311,10 +322,10 @@ func sendArbExecuted(session *ClientSession, buyEx, sellEx string, volume, netPr
 	session.Mu.Lock()
 	payload["new_total_usd"] = session.TotalWealth
 	payload["credit_active"] = session.Credit.Active
-	payload["binance_usd"] = session.Wallets["Binance"].USD
-	payload["binance_btc"] = session.Wallets["Binance"].BTC
-	payload["bitso_usd"] = session.Wallets["Bitso"].USD
-	payload["bitso_btc"] = session.Wallets["Bitso"].BTC
+	payload["binance_usd"] = session.Wallets.Get("Binance", quoteOf("Binance"))
+	payload["binance_btc"] = session.Wallets.Get("Binance", baseOf("Binance"))
+	payload["bitso_usd"] = session.Wallets.Get("Bitso", quoteOf("Bitso"))
+	payload["bitso_btc"] = session.Wallets.Get("Bitso", baseOf("Bitso"))
 	session.Mu.Unlock()
 
 	b, _ := json.Marshal(payload)
@@ -501,13 +512,19 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 				}
 				if e.Graph != nil && s.IsInitialized() {
 					s.Mu.Lock()
-					wallets := make(map[string]Wallet, len(s.Wallets))
-					for name, w := range s.Wallets {
-						wallets[name] = *w
-					}
+					wallets := s.Wallets.Clone()
 					s.Mu.Unlock()
 					snap := e.Graph.SnapshotFor(wallets, cycle, now)
 					sendEvent(s, ServerEvent{Type: "graph_update", SessionID: s.ID, Graph: snap})
+
+					// Hito 3 — AUTOPILOTO DEL RADAR: si el usuario lo activó, el
+					// mejor ciclo de SU subgrafo (sus fees, su universo) se ejecuta.
+					p := s.Params()
+					if p.RadarAutopilot {
+						if userCycle := e.Graph.FindBestCycleFor(p, now); userCycle != nil {
+							go e.executeCycleForSession(s, userCycle, p)
+						}
+					}
 				}
 			}
 		}
@@ -533,6 +550,13 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 	// Snapshot de los parámetros de ESTA sesión: vista consistente para toda la
 	// función aunque el usuario los edite a mitad de la evaluación (set_params).
 	p := session.Params()
+
+	// Con el autopiloto del radar activo, la ejecución la gobierna el ciclo
+	// detectado en el subgrafo del usuario (executeCycleForSession): el ejecutor
+	// clásico del par se apaga para no operar dos veces la misma oportunidad.
+	if p.RadarAutopilot {
+		return
+	}
 
 	if mkt.BitAsk > mkt.BinAsk*p.MaxDivergenceRatio || mkt.BinAsk > mkt.BitAsk*p.MaxDivergenceRatio {
 		return
@@ -602,8 +626,8 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 	}
 
 	session.Mu.Lock()
-	hasFunds := session.Wallets[buyEx].USD >= (volume*buyPrice*(1+p.takerFee(buyEx))) &&
-		session.Wallets[sellEx].BTC >= volume
+	hasFunds := session.Wallets.Get(buyEx, quoteOf(buyEx)) >= (volume*buyPrice*(1+p.takerFee(buyEx))) &&
+		session.Wallets.Get(sellEx, baseOf(sellEx)) >= volume
 	session.Mu.Unlock()
 
 	if !hasFunds {
@@ -640,16 +664,12 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 
 	session.LastTradeTime = time.Now()
 
-	// Movimiento de wallets genérico por venue: la pierna de compra paga
+	// Movimiento de saldos genérico por venue: la pierna de compra paga
 	// precio × (1 + fee) y la de venta ingresa precio × (1 − fee).
-	session.Wallets[buyEx].USD -= (buyPrice * volume) * (1 + p.takerFee(buyEx))
-	session.Wallets[buyEx].BTC += volume
-	session.Wallets[sellEx].BTC -= volume
-	session.Wallets[sellEx].USD += (sellPrice * volume) * (1 - p.takerFee(sellEx))
-
-	for _, w := range session.Wallets {
-		clampWallet(w)
-	}
+	session.Wallets.Add(buyEx, quoteOf(buyEx), -(buyPrice*volume)*(1+p.takerFee(buyEx)))
+	session.Wallets.Add(buyEx, baseOf(buyEx), volume)
+	session.Wallets.Add(sellEx, baseOf(sellEx), -volume)
+	session.Wallets.Add(sellEx, quoteOf(sellEx), (sellPrice*volume)*(1-p.takerFee(sellEx)))
 
 	session.TotalWealth += netProfit
 	session.TotalNetProfit += netProfit
@@ -687,10 +707,10 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 
 	if session.Credit.Active && session.Credit.BorrowedUSD != nil {
 		for ex, amt := range session.Credit.BorrowedUSD {
-			session.Wallets[ex].USD -= amt
+			session.Wallets.Add(ex, quoteOf(ex), -amt)
 		}
 		for ex, amt := range session.Credit.BorrowedBTC {
-			session.Wallets[ex].BTC -= amt
+			session.Wallets.Add(ex, baseOf(ex), -amt)
 		}
 		session.Credit.Active = false
 		session.Credit.BorrowedUSD = nil
@@ -698,20 +718,30 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	}
 
 	btcPrice := getBTCPrice()
-	totalUSD, totalBTC := 0.0, 0.0
-	for _, w := range session.Wallets {
-		totalUSD += w.USD
-		totalBTC += w.BTC
+	// Solo se reequilibran los activos del PAR (quote + BTC); otros activos del
+	// usuario (p. ej. ETH de un ciclo triangular) se quedan donde están y se
+	// valoran a mercado para el patrimonio total.
+	totalUSD, totalBTC, otherUSD := 0.0, 0.0, 0.0
+	for _, v := range Venues {
+		totalUSD += session.Wallets.Get(v.Name, v.QuoteAsset)
+		totalBTC += session.Wallets.Get(v.Name, v.BaseAsset)
+		for asset, amt := range session.Wallets[v.Name] {
+			if asset != v.QuoteAsset && asset != v.BaseAsset {
+				otherUSD += amt * assetPriceUSD(asset)
+			}
+		}
 	}
-	totalWealthUSD := totalUSD + (totalBTC * btcPrice)
+	rebalancedUSD := totalUSD + (totalBTC * btcPrice)
+	totalWealthUSD := rebalancedUSD + otherUSD
 
-	// Reparto uniforme: mitad del patrimonio en USD y mitad en BTC, divididos por
-	// igual entre los venues del registro (con 2 venues: 4 cuartos, como siempre).
-	perVenueUSD := totalWealthUSD / (2.0 * float64(len(Venues)))
+	// Reparto uniforme: mitad del patrimonio del par en USD y mitad en BTC,
+	// divididos por igual entre los venues del registro.
+	perVenueUSD := rebalancedUSD / (2.0 * float64(len(Venues)))
 	perVenueBTC := perVenueUSD / btcPrice
 
 	for _, v := range Venues {
-		session.Wallets[v.Name] = &Wallet{USD: perVenueUSD, BTC: perVenueBTC}
+		session.Wallets.Set(v.Name, v.QuoteAsset, perVenueUSD)
+		session.Wallets.Set(v.Name, v.BaseAsset, perVenueBTC)
 	}
 	session.TotalWealth = totalWealthUSD
 	session.Mu.Unlock()
@@ -886,8 +916,8 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	s.Credit.BorrowedUSD = make(map[string]float64, len(Venues))
 	s.Credit.BorrowedBTC = make(map[string]float64, len(Venues))
 	for _, v := range Venues {
-		s.Wallets[v.Name].USD += perVenueUSD
-		s.Wallets[v.Name].BTC += perVenueBTC
+		s.Wallets.Add(v.Name, v.QuoteAsset, perVenueUSD)
+		s.Wallets.Add(v.Name, v.BaseAsset, perVenueBTC)
 		s.Credit.BorrowedUSD[v.Name] = perVenueUSD
 		s.Credit.BorrowedBTC[v.Name] = perVenueBTC
 	}
@@ -971,14 +1001,10 @@ func (e *HFTEngine) executeChunkMirrorSession(session *ClientSession, buyEx, sel
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
 
-	session.Wallets[buyEx].USD -= buyPrice * chunkSize * (1 + p.takerFee(buyEx))
-	session.Wallets[buyEx].BTC += chunkSize
-	session.Wallets[sellEx].BTC -= chunkSize
-	session.Wallets[sellEx].USD += sellPrice * chunkSize * (1 - p.takerFee(sellEx))
-
-	for _, w := range session.Wallets {
-		clampWallet(w)
-	}
+	session.Wallets.Add(buyEx, quoteOf(buyEx), -buyPrice*chunkSize*(1+p.takerFee(buyEx)))
+	session.Wallets.Add(buyEx, baseOf(buyEx), chunkSize)
+	session.Wallets.Add(sellEx, baseOf(sellEx), -chunkSize)
+	session.Wallets.Add(sellEx, quoteOf(sellEx), sellPrice*chunkSize*(1-p.takerFee(sellEx)))
 
 	session.TotalWealth += netProfit
 	session.TotalNetProfit += netProfit

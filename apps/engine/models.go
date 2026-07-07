@@ -8,17 +8,54 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Wallet representa los fondos en un exchange específico
-type Wallet struct {
-	USD float64 `json:"usd"`
-	BTC float64 `json:"btc"`
+// Balances es el estado de fondos MULTI-ACTIVO de una sesión: venue → asset →
+// cantidad (hito 3). Sustituye al antiguo Wallet{USD,BTC}: el mismo tipo viaja
+// al store (que ya persistía esta forma desde el Sprint A) y al radar. Un trade
+// triangular puede dejar ETH en Binance y aquí simplemente aparece una clave más.
+type Balances map[string]map[string]float64
+
+// Get devuelve el saldo de un activo en un venue (0 si no existe nada).
+func (b Balances) Get(venue, asset string) float64 {
+	if b == nil {
+		return 0
+	}
+	return b[venue][asset] // mapa interno nil → zero value, seguro
 }
 
-// DemoInjection define una simulación de liquidez para el order book
-type DemoInjection struct {
-	Exchange           string  `json:"exchange"`
-	TargetSpread       float64 `json:"target_spread"`
-	AvailableLiquidity float64 `json:"available_liquidity"`
+// Add suma (o resta) saldo, creando el venue si hace falta, y clampea el dust
+// negativo de redondeo flotante (mismo rol que el antiguo clampWallet).
+func (b Balances) Add(venue, asset string, delta float64) {
+	if b[venue] == nil {
+		b[venue] = make(map[string]float64)
+	}
+	b[venue][asset] += delta
+	if v := b[venue][asset]; v < 0 && v > -1e-8 {
+		b[venue][asset] = 0
+	}
+}
+
+// Set fija el saldo exacto de un activo.
+func (b Balances) Set(venue, asset string, v float64) {
+	if b[venue] == nil {
+		b[venue] = make(map[string]float64)
+	}
+	b[venue][asset] = v
+}
+
+// Clone devuelve una copia profunda (para snapshots fuera del lock de sesión).
+func (b Balances) Clone() Balances {
+	if b == nil {
+		return nil
+	}
+	out := make(Balances, len(b))
+	for venue, assets := range b {
+		inner := make(map[string]float64, len(assets))
+		for asset, v := range assets {
+			inner[asset] = v
+		}
+		out[venue] = inner
+	}
+	return out
 }
 
 const (
@@ -130,6 +167,48 @@ type TradingParameters struct {
 	// Conservador = alto (solo endeudarse si la ganancia cubre 5× el costo);
 	// agresivo = 1.0 (al límite del punto de equilibrio). Nunca < 1.
 	RiskMultiplier float64 `json:"risk_multiplier"`
+
+	// EnabledVenues / EnabledAssets son el UNIVERSO del usuario (hito 3): con qué
+	// exchanges y monedas quiere jugar. La detección de ciclos por sesión corre
+	// solo sobre el subgrafo permitido — la personalización es una poda del grafo.
+	// Vacío/nil = todos (default). Se persiste junto con el resto de la estrategia.
+	EnabledVenues []string `json:"enabled_venues,omitempty"`
+	EnabledAssets []string `json:"enabled_assets,omitempty"`
+
+	// RadarAutopilot (hito 3): cuando está ON, el radar deja de ser solo detección
+	// y EJECUTA el mejor ciclo de TU subgrafo con TUS fees — sustituyendo al
+	// ejecutor clásico del par BTC. Opt-in explícito del usuario.
+	RadarAutopilot bool `json:"radar_autopilot,omitempty"`
+}
+
+// universeAllows informa si un nodo del grafo pertenece al universo del usuario
+// (listas vacías = sin restricción).
+func (p TradingParameters) universeAllows(n MarketNode) bool {
+	if len(p.EnabledVenues) > 0 {
+		ok := false
+		for _, v := range p.EnabledVenues {
+			if v == n.Venue {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	if len(p.EnabledAssets) > 0 {
+		ok := false
+		for _, a := range p.EnabledAssets {
+			if a == string(n.Asset) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultTradingParameters devuelve los parámetros iniciales de una sesión,
@@ -176,11 +255,13 @@ type CreditState struct {
 }
 
 type ClientSession struct {
-	ID             string
-	Conn           *websocket.Conn
-	Mu             sync.Mutex
-	ConnMu         sync.Mutex
-	Wallets        map[string]*Wallet
+	ID     string
+	Conn   *websocket.Conn
+	Mu     sync.Mutex
+	ConnMu sync.Mutex
+	// Wallets es multi-activo (hito 3): venue → asset → cantidad. nil = sesión
+	// sin inicializar (IsInitialized).
+	Wallets        Balances
 	TotalWealth    float64
 	TotalNetProfit float64
 	Credit         CreditState
@@ -391,6 +472,10 @@ type ServerEvent struct {
 	// Resumed marca el state_update de una sesión RECUPERADA de la base de datos
 	// (el frontend salta el onboarding y no resetea la configuración local).
 	Resumed bool `json:"resumed,omitempty"`
+
+	// Balances es el estado multi-activo completo (venue → asset → cantidad);
+	// viaja en wallet_update junto al wire plano de compatibilidad.
+	Balances Balances `json:"balances,omitempty"`
 }
 
 // PriceTick representa un evento de mercado normalizado que un FeedAdapter publica

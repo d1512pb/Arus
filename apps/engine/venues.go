@@ -102,6 +102,48 @@ func primaryInstrument(venue string) (Instrument, bool) {
 	return Instrument{}, false
 }
 
+// quoteOf / baseOf devuelven los activos respaldados por wallet de un venue
+// (el par principal del registro); "" si el venue no existe.
+func quoteOf(venue string) string {
+	if v, ok := venueByName(venue); ok {
+		return v.QuoteAsset
+	}
+	return ""
+}
+
+func baseOf(venue string) string {
+	if v, ok := venueByName(venue); ok {
+		return v.BaseAsset
+	}
+	return ""
+}
+
+// knownAssets devuelve el catálogo de activos que aparecen en algún instrumento
+// (para validar el universo del usuario), en orden estable.
+func knownAssets() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, in := range Instruments {
+		for _, a := range []string{in.Quote, in.Base} {
+			if !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// isKnownAsset valida que un activo exista en el catálogo de instrumentos.
+func isKnownAsset(a string) bool {
+	for _, k := range knownAssets() {
+		if k == a {
+			return true
+		}
+	}
+	return false
+}
+
 // parityPairs declara qué activos distintos se tratan como equivalentes 1:1
 // (supuesto visible en el grafo como aristas EdgeParity). Hoy: USDT ≈ USD.
 var parityPairs = [][2]string{{"USDT", "USD"}}

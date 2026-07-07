@@ -131,10 +131,10 @@ func TestSnapshotSessionRecord_ExcludesBorrowed(t *testing.T) {
 	s.Credit.Active = true
 	s.Credit.BorrowedUSD = map[string]float64{"Binance": 25_000, "Bitso": 25_000}
 	s.Credit.BorrowedBTC = map[string]float64{"Binance": 0.5, "Bitso": 0.5}
-	s.Wallets["Binance"].USD += 25_000
-	s.Wallets["Bitso"].USD += 25_000
-	s.Wallets["Binance"].BTC += 0.5
-	s.Wallets["Bitso"].BTC += 0.5
+	s.Wallets.Add("Binance", "USDT", 25_000)
+	s.Wallets.Add("Bitso", "USD", 25_000)
+	s.Wallets.Add("Binance", "BTC", 0.5)
+	s.Wallets.Add("Bitso", "BTC", 0.5)
 	s.Mu.Unlock()
 
 	rec, ok := snapshotSessionRecord(s)
@@ -166,8 +166,8 @@ func TestApplySessionRecord_RestoresAndSanitizes(t *testing.T) {
 	applySessionRecord(s, rec)
 
 	s.Mu.Lock()
-	binUSD := s.Wallets["Binance"].USD
-	bitBTC := s.Wallets["Bitso"].BTC
+	binUSD := s.Wallets.Get("Binance", "USDT")
+	bitBTC := s.Wallets.Get("Bitso", "BTC")
 	wealth := s.TotalWealth
 	auto := s.Credit.AutoMode
 	creditActive := s.Credit.Active
@@ -192,7 +192,8 @@ func TestStore_RoundtripViaSessionHelpers(t *testing.T) {
 	orig := newClientSession("viaje-completo", nil)
 	initSession(orig, 20_000, 1.0)
 	orig.Mu.Lock()
-	orig.Wallets["Binance"].USD = 8_123.45
+	orig.Wallets.Set("Binance", "USDT", 8_123.45)
+	orig.Wallets.Set("Binance", "ETH", 2.5) // activo no-par: también debe viajar
 	orig.TotalNetProfit = 77.7
 	orig.TotalWealth += 77.7
 	orig.Mu.Unlock()
@@ -217,7 +218,8 @@ func TestStore_RoundtripViaSessionHelpers(t *testing.T) {
 
 	restored.Mu.Lock()
 	defer restored.Mu.Unlock()
-	if !almostEqual(restored.Wallets["Binance"].USD, 8_123.45) ||
+	if !almostEqual(restored.Wallets.Get("Binance", "USDT"), 8_123.45) ||
+		!almostEqual(restored.Wallets.Get("Binance", "ETH"), 2.5) ||
 		!almostEqual(restored.TotalNetProfit, 77.7) {
 		t.Fatalf("el viaje completo perdió estado: %+v (pnl %v)", restored.Wallets["Binance"], restored.TotalNetProfit)
 	}

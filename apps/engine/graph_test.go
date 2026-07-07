@@ -203,9 +203,9 @@ func TestSnapshotFor(t *testing.T) {
 	g.UpdateBook("Binance:ETH/USDT", TopOfBook{Ask: 3_001, Bid: 2_999, AskQty: 10, BidQty: 10, UpdatedAt: now})
 	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 1, BidQty: 0.4, UpdatedAt: now})
 
-	wallets := map[string]Wallet{
-		"Binance": {USD: 5_000, BTC: 0.5},
-		"Bitso":   {USD: 7_000, BTC: 0.25},
+	wallets := Balances{
+		"Binance": {"USDT": 5_000, "BTC": 0.5, "ETH": 1.5},
+		"Bitso":   {"USD": 7_000, "BTC": 0.25},
 	}
 	cycle := g.FindBestCycle(now)
 	snap := g.SnapshotFor(wallets, cycle, now)
@@ -230,8 +230,8 @@ func TestSnapshotFor(t *testing.T) {
 	if n := byID["USD@Bitso"]; n.Balance != 7_000 || n.Kind != "cash" {
 		t.Fatalf("USD@Bitso mal poblado: %+v", n)
 	}
-	// ETH: activo del radar sin wallet respaldada — saldo 0 pero precio real.
-	if n := byID["ETH@Binance"]; n.Balance != 0 || n.Kind != "crypto" || !closeTo(n.PriceUSD, 3_000, 1e-9) {
+	// ETH con saldo real (hito 3: wallets multi-activo) y precio de mercado.
+	if n := byID["ETH@Binance"]; n.Balance != 1.5 || n.Kind != "crypto" || !closeTo(n.PriceUSD, 3_000, 1e-9) || !closeTo(n.BalanceUSD, 4_500, 1e-6) {
 		t.Fatalf("ETH@Binance mal poblado: %+v", n)
 	}
 
