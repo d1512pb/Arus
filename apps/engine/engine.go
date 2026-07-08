@@ -602,25 +602,25 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 	// Dirección 1: comprar en Binance (ask) → vender en Bitso (bid).
 	// El volumen se dimensiona contra la liquidez REAL visible en ambas piernas.
 	vol1 := sizeOrder(p.MaxOrderSizeBTC, mkt.BinAskQty, mkt.BitBidQty)
-	gross1, fees1, _, netProfit1 := computeNetProfit(mkt.BinAsk, mkt.BitBid, vol1, binanceFee, bitsoFee, p.SlippageRate)
+	gross1, fees1, slip1, netProfit1 := computeNetProfit(mkt.BinAsk, mkt.BitBid, vol1, binanceFee, bitsoFee, p.SlippageRate)
 
 	// Dirección 2: comprar en Bitso (ask) → vender en Binance (bid).
 	vol2 := sizeOrder(p.MaxOrderSizeBTC, mkt.BitAskQty, mkt.BinBidQty)
-	gross2, fees2, _, netProfit2 := computeNetProfit(mkt.BitAsk, mkt.BinBid, vol2, bitsoFee, binanceFee, p.SlippageRate)
+	gross2, fees2, slip2, netProfit2 := computeNetProfit(mkt.BitAsk, mkt.BinBid, vol2, bitsoFee, binanceFee, p.SlippageRate)
 
 	viable1 := vol1 >= MinExecutableVolumeBTC && netProfit1 > p.MinNetProfitUSD
 	viable2 := vol2 >= MinExecutableVolumeBTC && netProfit2 > p.MinNetProfitUSD
 
 	// Se ejecuta la dirección de mayor NETO (no la de mayor bruto ni la primera).
 	var buyEx, sellEx string
-	var buyPrice, sellPrice, volume, gross, fees, net float64
+	var buyPrice, sellPrice, volume, gross, fees, friction, net float64
 	switch {
 	case viable1 && (!viable2 || netProfit1 >= netProfit2):
 		buyEx, sellEx = "Binance", "Bitso"
-		buyPrice, sellPrice, volume, gross, fees, net = mkt.BinAsk, mkt.BitBid, vol1, gross1, fees1, netProfit1
+		buyPrice, sellPrice, volume, gross, fees, friction, net = mkt.BinAsk, mkt.BitBid, vol1, gross1, fees1, fees1+slip1, netProfit1
 	case viable2:
 		buyEx, sellEx = "Bitso", "Binance"
-		buyPrice, sellPrice, volume, gross, fees, net = mkt.BitAsk, mkt.BinBid, vol2, gross2, fees2, netProfit2
+		buyPrice, sellPrice, volume, gross, fees, friction, net = mkt.BitAsk, mkt.BinBid, vol2, gross2, fees2, fees2+slip2, netProfit2
 	default:
 		return
 	}
@@ -636,10 +636,12 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 	}
 
 	sendLog(session, fmt.Sprintf("✅ [OPORTUNIDAD] Bruto Op: $%.2f | Fees Combinados: $%.2f | Ganancia Neta Limpia: +$%.2f | Ejecutando %.4f BTC...", gross, fees, net, volume))
-	e.executeTradeForSession(session, buyEx, sellEx, buyPrice, sellPrice, volume, net)
+	e.executeTradeForSession(session, buyEx, sellEx, buyPrice, sellPrice, volume, net, friction)
 }
 
-func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx string, buyPrice, sellPrice, volume, netProfit float64) {
+// executeTradeForSession ejecuta el par clásico; feesUSD es la fricción total
+// (fees + slippage estimado) ya calculada por computeNetProfit, para el ledger.
+func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx string, buyPrice, sellPrice, volume, netProfit, feesUSD float64) {
 	if !e.sessionHasFundsForTrade(session, buyEx, sellEx, volume, buyPrice) {
 		sendLog(session, fmt.Sprintf("🛑 [BLOQUEADO] Fondos insuficientes en %s/%s — operación rechazada (sin saldos negativos).", buyEx, sellEx))
 		e.handleLiquidityShortfall(session, netProfit)
@@ -691,6 +693,7 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 		SellExchange: sellEx,
 		VolumeBTC:    volume,
 		SpreadUSD:    sellPrice - buyPrice,
+		FeesUSD:      feesUSD,
 		NetProfitUSD: netProfit,
 	})
 }
@@ -718,15 +721,27 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	}
 
 	btcPrice := getBTCPrice()
-	// Solo se reequilibran los activos del PAR (quote + BTC); otros activos del
-	// usuario (p. ej. ETH de un ciclo triangular) se quedan donde están y se
-	// valoran a mercado para el patrimonio total.
+	// Solo se reequilibran los activos del PAR CLÁSICO (quote + BTC de
+	// Binance/Bitso); todo lo demás —otros activos (ETH de un triangular) y
+	// venues fuera del par (Kraken)— se queda donde está y se valora a mercado
+	// para el patrimonio total.
+	pair := classicVenues()
 	totalUSD, totalBTC, otherUSD := 0.0, 0.0, 0.0
-	for _, v := range Venues {
-		totalUSD += session.Wallets.Get(v.Name, v.QuoteAsset)
-		totalBTC += session.Wallets.Get(v.Name, v.BaseAsset)
-		for asset, amt := range session.Wallets[v.Name] {
-			if asset != v.QuoteAsset && asset != v.BaseAsset {
+	for venueName, assets := range session.Wallets {
+		if isClassicVenue(venueName) {
+			v, _ := venueByName(venueName)
+			for asset, amt := range assets {
+				switch asset {
+				case v.QuoteAsset:
+					totalUSD += amt
+				case v.BaseAsset:
+					totalBTC += amt
+				default:
+					otherUSD += amt * assetPriceUSD(asset)
+				}
+			}
+		} else {
+			for asset, amt := range assets {
 				otherUSD += amt * assetPriceUSD(asset)
 			}
 		}
@@ -735,11 +750,11 @@ func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
 	totalWealthUSD := rebalancedUSD + otherUSD
 
 	// Reparto uniforme: mitad del patrimonio del par en USD y mitad en BTC,
-	// divididos por igual entre los venues del registro.
-	perVenueUSD := rebalancedUSD / (2.0 * float64(len(Venues)))
+	// divididos por igual entre los dos venues del par clásico.
+	perVenueUSD := rebalancedUSD / (2.0 * float64(len(pair)))
 	perVenueBTC := perVenueUSD / btcPrice
 
-	for _, v := range Venues {
+	for _, v := range pair {
 		session.Wallets.Set(v.Name, v.QuoteAsset, perVenueUSD)
 		session.Wallets.Set(v.Name, v.BaseAsset, perVenueBTC)
 	}
@@ -909,13 +924,16 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	}
 	cost := calculateCreditCost(CreditLineUSD)
 
-	// La línea de crédito se reparte por igual entre los venues del registro.
-	perVenueUSD := CreditLineUSD / float64(len(Venues))
-	perVenueBTC := CreditLineBTC / float64(len(Venues))
+	// La línea de crédito se reparte por igual entre los venues del PAR CLÁSICO:
+	// es liquidez para seguir operando el par (y los ciclos que arrancan en sus
+	// nodos cash), no capital para exchanges que el crédito nunca respaldó.
+	pair := classicVenues()
+	perVenueUSD := CreditLineUSD / float64(len(pair))
+	perVenueBTC := CreditLineBTC / float64(len(pair))
 
-	s.Credit.BorrowedUSD = make(map[string]float64, len(Venues))
-	s.Credit.BorrowedBTC = make(map[string]float64, len(Venues))
-	for _, v := range Venues {
+	s.Credit.BorrowedUSD = make(map[string]float64, len(pair))
+	s.Credit.BorrowedBTC = make(map[string]float64, len(pair))
+	for _, v := range pair {
 		s.Wallets.Add(v.Name, v.QuoteAsset, perVenueUSD)
 		s.Wallets.Add(v.Name, v.BaseAsset, perVenueBTC)
 		s.Credit.BorrowedUSD[v.Name] = perVenueUSD
@@ -1108,7 +1126,7 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 		}
 
 		sellPrice := price + absSpread
-		_, _, _, netProfit := computeNetProfit(price, sellPrice, chunkSize, p.takerFee(buyEx), p.takerFee(sellEx), p.SlippageRate)
+		_, chunkFees, chunkSlip, netProfit := computeNetProfit(price, sellPrice, chunkSize, p.takerFee(buyEx), p.takerFee(sellEx), p.SlippageRate)
 
 		if netProfit <= 0 {
 			sendLog(session, fmt.Sprintf("⚠️ [DEMO] Spread insuficiente para chunk de %.4f BTC. Abortando.", chunkSize))
@@ -1150,6 +1168,7 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 			SellExchange: sellEx,
 			VolumeBTC:    chunkSize,
 			SpreadUSD:    absSpread,
+			FeesUSD:      chunkFees + chunkSlip,
 			NetProfitUSD: netProfit,
 		})
 

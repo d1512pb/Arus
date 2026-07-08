@@ -7,6 +7,7 @@ import { OnboardingModal } from "../components/OnboardingModal";
 import { LedgerPanel } from "../components/LedgerPanel";
 import { StrategyPanel } from "../components/StrategyPanel";
 import { GraphPanel } from "../components/GraphPanel";
+import { AnalyticsPanel } from "../components/AnalyticsPanel";
 import { TutorialModal } from "../components/TutorialModal";
 
 function logColor(level: string): string {
@@ -1194,6 +1195,9 @@ export default function Home() {
 
         {/* Ledger / Auditoría Institucional — demuestra la persistencia de datos */}
         <LedgerPanel sessionId={state.sessionId} />
+
+        {/* Analítica del ledger (Sprint D) — P&L acumulado, win rate y export CSV */}
+        <AnalyticsPanel sessionId={state.sessionId} />
       </main>
     </div>
   );

@@ -25,10 +25,17 @@ func initSession(s *ClientSession, usd, btc float64) {
 	half := usd / 2.0
 	halfBTC := btc / 2.0
 
-	// Saldos multi-activo creados desde el registro de venues: agregar un
-	// exchange o un activo nuevo no requiere tocar esta función.
+	// Saldos multi-activo creados desde el registro de venues. El capital inicial
+	// se reparte 50/50 SOLO entre el par clásico (Binance/Bitso): repartir usd/2
+	// a cada venue del registro inflaría el capital al agregar un tercero. Los
+	// demás venues (Kraken…) nacen en cero y se fondean por depósitos del usuario
+	// o por ciclos del autopiloto.
 	s.Wallets = make(Balances, len(Venues))
 	for _, v := range Venues {
+		s.Wallets.Set(v.Name, v.QuoteAsset, 0)
+		s.Wallets.Set(v.Name, v.BaseAsset, 0)
+	}
+	for _, v := range classicVenues() {
 		s.Wallets.Set(v.Name, v.QuoteAsset, half)
 		s.Wallets.Set(v.Name, v.BaseAsset, halfBTC)
 	}

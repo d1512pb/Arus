@@ -29,6 +29,9 @@ func main() {
 
 	http.HandleFunc("/ws", wsHandler(hub, engine))
 	http.HandleFunc("/api/ledger", ledgerHandler)
+	// Analítica derivada del ledger (Sprint D): resumen por sesión y export CSV.
+	http.HandleFunc("/api/stats", statsHandler)
+	http.HandleFunc("/api/ledger.csv", ledgerCSVHandler)
 
 	// El puerto se toma de la variable de entorno PORT (Railway, Render, Cloud Run
 	// la inyectan al desplegar); por defecto 8080 para desarrollo local.

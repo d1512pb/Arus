@@ -39,6 +39,34 @@ const AssumeUSDTParity = true
 var Venues = []Venue{
 	{Name: "Binance", DefaultTakerFee: 0.001, BaseAsset: "BTC", QuoteAsset: "USDT"},
 	{Name: "Bitso", DefaultTakerFee: 0.0065, BaseAsset: "BTC", QuoteAsset: "USD"},
+	// Kraken (Sprint C): taker 0.40 % = tier base de Kraken Pro. Tercer venue del
+	// radar; NO forma parte del par clásico (ver classicPair) — sus saldos llegan
+	// por depósitos del usuario o por ciclos del autopiloto, no por el 50/50.
+	{Name: "Kraken", DefaultTakerFee: 0.0040, BaseAsset: "BTC", QuoteAsset: "USD"},
+}
+
+// classicPair son los DOS venues del modo clásico: el ejecutor del par BTC
+// (executeForSession), el reparto inicial 50/50, la línea de crédito y el
+// reequilibrio operan SOLO sobre ellos. Los demás venues del registro (Kraken…)
+// participan en el radar y en el autopiloto, pero no reciben capital automático:
+// sin esta distinción, agregar un venue inflaría el capital inicial (usd/2 por
+// venue) y diluiría el crédito entre exchanges que el par clásico nunca opera.
+var classicPair = [2]string{"Binance", "Bitso"}
+
+// isClassicVenue informa si un venue pertenece al par clásico.
+func isClassicVenue(name string) bool {
+	return name == classicPair[0] || name == classicPair[1]
+}
+
+// classicVenues devuelve los Venue del par clásico, en orden estable.
+func classicVenues() []Venue {
+	out := make([]Venue, 0, len(classicPair))
+	for _, name := range classicPair {
+		if v, ok := venueByName(name); ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // Instrument es un libro de órdenes concreto de un venue (Fase 2 · hito 2: un
@@ -56,14 +84,23 @@ type Instrument struct {
 // Key es el identificador estable del instrumento ("Binance:ETH/BTC").
 func (i Instrument) Key() string { return i.Venue + ":" + i.Base + "/" + i.Quote }
 
-// Instruments registra los libros activos. Los tres de Binance forman el
-// TRIÁNGULO clásico (BTC/USDT · ETH/USDT · ETH/BTC): con ellos el radar puede
-// detectar arbitraje triangular DENTRO de un solo exchange, con datos reales.
+// Instruments registra los libros activos. Binance publica DOS triángulos
+// (BTC/USDT · ETH/USDT · ETH/BTC y BTC/USDT · SOL/USDT · SOL/BTC): con ellos el
+// radar detecta arbitraje triangular DENTRO de un solo exchange, con datos
+// reales. Kraken (Sprint C) aporta su propio triángulo BTC/USD · ETH/USD ·
+// ETH/BTC y habilita ciclos espaciales contra Bitso (mismo quote USD) y contra
+// Binance (vía la paridad USDT≈USD declarada).
 var Instruments = []Instrument{
 	{Venue: "Binance", Base: "BTC", Quote: "USDT", StreamID: "btcusdt"},
 	{Venue: "Binance", Base: "ETH", Quote: "USDT", StreamID: "ethusdt"},
 	{Venue: "Binance", Base: "ETH", Quote: "BTC", StreamID: "ethbtc"},
+	{Venue: "Binance", Base: "SOL", Quote: "USDT", StreamID: "solusdt"},
+	{Venue: "Binance", Base: "SOL", Quote: "BTC", StreamID: "solbtc"},
 	{Venue: "Bitso", Base: "BTC", Quote: "USD", StreamID: "btc_usd"},
+	// Kraken WS v2 identifica los libros por su símbolo normalizado ("BTC/USD").
+	{Venue: "Kraken", Base: "BTC", Quote: "USD", StreamID: "BTC/USD"},
+	{Venue: "Kraken", Base: "ETH", Quote: "USD", StreamID: "ETH/USD"},
+	{Venue: "Kraken", Base: "ETH", Quote: "BTC", StreamID: "ETH/BTC"},
 }
 
 // instrumentByKey busca un instrumento por su clave ("Binance:ETH/BTC").

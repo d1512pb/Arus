@@ -11,8 +11,15 @@ import { GraphSnapshot, GraphNode, GraphEdge } from "../hooks/useArusEngine";
 // (resaltado en verde). Es la información básica de tus exchanges y tus monedas
 // en cada uno — actualizada ~1 vez por segundo desde el backend.
 
-const W = 860;
-const H = 440;
+// El lienzo crece con el número de venues (Sprint C: 3 columnas con Kraken) y
+// deja aire vertical para columnas de hasta 4 activos (Binance con SOL).
+const COL_W = 300;
+const MIN_W = 860;
+const H = 480;
+
+function canvasWidth(venueCount: number): number {
+  return Math.max(MIN_W, venueCount * COL_W);
+}
 
 function fmtUSD(v: number): string {
   return "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -27,13 +34,13 @@ function fmtBalance(n: GraphNode): string {
 // Posiciones: una columna por venue (en orden de aparición); dentro de cada
 // columna, el efectivo (cash) arriba y las criptomonedas apiladas debajo en
 // orden estable. Funciona para cualquier número de activos por venue.
-function layout(nodes: GraphNode[]): Map<string, { x: number; y: number }> {
+function layout(nodes: GraphNode[], W: number): Map<string, { x: number; y: number }> {
   const venues: string[] = [];
   for (const n of nodes) if (!venues.includes(n.venue)) venues.push(n.venue);
 
   const pos = new Map<string, { x: number; y: number }>();
   const colW = W / Math.max(venues.length, 1);
-  const yTop = 130, yBot = 340;
+  const yTop = 130, yBot = H - 100;
 
   venues.forEach((venue, col) => {
     const inVenue = nodes
@@ -90,9 +97,12 @@ function EdgePath({ edge, pos, highlighted }: { edge: GraphEdge; pos: Map<string
       ? fmtUSD(price)
       : `${price.toFixed(5)} ${quoteAsset}`;
     label = `${isBuy ? "compra" : "venta"} ${priceTxt} · fee ${edge.fee_pct.toFixed(2)}%`;
-  } else if (edge.kind === "parity") {
+  } else if (edge.kind === "parity" && highlighted) {
+    // Con 3 venues las etiquetas de paridad/inventario se enciman entre
+    // columnas: solo se muestran cuando la arista participa del ciclo (la nota
+    // al pie del panel ya declara ambos supuestos en todo momento).
     label = "≈ paridad 1:1 (supuesto declarado)";
-  } else if (edge.kind === "inventory") {
+  } else if (edge.kind === "inventory" && highlighted) {
     label = "inventario pre-fondeado";
   }
 
@@ -154,12 +164,14 @@ export function GraphPanel({ graph }: { graph: GraphSnapshot | null }) {
 
   if (!graph || graph.nodes.length === 0) return null;
 
-  const pos = layout(graph.nodes);
+  const venues: string[] = [];
+  for (const n of graph.nodes) if (!venues.includes(n.venue)) venues.push(n.venue);
+
+  const W = canvasWidth(venues.length);
+  const pos = layout(graph.nodes, W);
   const cycle = graph.best_cycle;
   const cycleNodes = new Set(cycle?.path ?? []);
 
-  const venues: string[] = [];
-  for (const n of graph.nodes) if (!venues.includes(n.venue)) venues.push(n.venue);
   const staleVenues = venues.filter(v => graph.nodes.some(n => n.venue === v && n.feed_stale));
   const colW = W / Math.max(venues.length, 1);
 

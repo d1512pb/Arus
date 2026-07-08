@@ -60,6 +60,7 @@ const (
 	// de STREAMS COMBINADOS: un solo socket transporta N libros.
 	binanceCombinedURL = "wss://stream.binance.com:9443/stream?streams="
 	bitsoStreamURL     = "wss://ws.bitso.com"
+	krakenStreamURL    = "wss://ws.kraken.com/v2"
 
 	wsReadTimeout   = 70 * time.Second // si no llega nada en este tiempo, reconectamos
 	wsReconnectWait = 3 * time.Second  // espera entre intentos de reconexión
@@ -266,6 +267,104 @@ func (f bitsoFeed) Run(priceChan chan<- PriceTick) {
 
 		conn.Close()
 		log.Printf("[BITSO] Conexión cerrada — reconectando en %s", wsReconnectWait)
+		time.Sleep(wsReconnectWait)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Kraken — WebSocket v2 (canal ticker, N libros por un socket)
+// ---------------------------------------------------------------------------
+
+// krakenFeed implementa FeedAdapter sobre el canal "ticker" del WS v2 de Kraken
+// para todos los instrumentos del registro cuyo venue sea Kraken. Con
+// event_trigger="bbo" Kraken empuja cada cambio del mejor bid/ask (no solo
+// trades), que es exactamente el top-of-book que consume el motor.
+type krakenFeed struct{}
+
+func (krakenFeed) Name() string { return "Kraken" }
+
+// krakenTicker es una entrada del canal ticker v2. A diferencia de Binance y
+// Bitso (que serializan precios como strings), Kraken v2 envía NÚMEROS JSON —
+// verificado contra el stream real; ver también docs.kraken.com/api.
+type krakenTicker struct {
+	Symbol string  `json:"symbol"` // símbolo normalizado ("BTC/USD") = StreamID del registro
+	Bid    float64 `json:"bid"`
+	BidQty float64 `json:"bid_qty"`
+	Ask    float64 `json:"ask"`
+	AskQty float64 `json:"ask_qty"`
+}
+
+// krakenWSMessage cubre los mensajes del canal ticker (snapshot y update).
+// Los heartbeats, acks de suscripción y el canal status traen otro "channel"
+// y se ignoran sin error.
+type krakenWSMessage struct {
+	Channel string         `json:"channel"`
+	Type    string         `json:"type"`
+	Data    []krakenTicker `json:"data"`
+}
+
+// krakenSubscription es la petición de suscripción del WS v2.
+type krakenSubscription struct {
+	Method string `json:"method"`
+	Params struct {
+		Channel      string   `json:"channel"`
+		Symbol       []string `json:"symbol"`
+		EventTrigger string   `json:"event_trigger"`
+	} `json:"params"`
+}
+
+func (f krakenFeed) Run(priceChan chan<- PriceTick) {
+	instruments := instrumentsForVenue(f.Name())
+	if len(instruments) == 0 {
+		log.Printf("[KRAKEN] Sin instrumentos registrados — feed no iniciado")
+		return
+	}
+	symbols := make([]string, 0, len(instruments))
+	bySymbol := make(map[string]Instrument, len(instruments))
+	for _, in := range instruments {
+		symbols = append(symbols, in.StreamID)
+		bySymbol[in.StreamID] = in
+	}
+
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(krakenStreamURL, nil)
+		if err != nil {
+			log.Printf("[KRAKEN] Error de conexión WS: %v — reintentando en %s", err, wsReconnectWait)
+			time.Sleep(wsReconnectWait)
+			continue
+		}
+
+		sub := krakenSubscription{Method: "subscribe"}
+		sub.Params.Channel = "ticker"
+		sub.Params.Symbol = symbols
+		sub.Params.EventTrigger = "bbo"
+		if err := conn.WriteJSON(sub); err != nil {
+			log.Printf("[KRAKEN] Error al suscribirse: %v", err)
+			conn.Close()
+			time.Sleep(wsReconnectWait)
+			continue
+		}
+		log.Printf("✅ Kraken WebSocket conectado — %d libro(s) (canal ticker v2: %s)", len(instruments), strings.Join(symbols, ", "))
+
+		readWSLoop(conn, "KRAKEN", func(data []byte) {
+			var m krakenWSMessage
+			if err := json.Unmarshal(data, &m); err != nil {
+				return
+			}
+			if m.Channel != "ticker" {
+				return // heartbeat, status, ack de suscripción…
+			}
+			for _, t := range m.Data {
+				instr, ok := bySymbol[t.Symbol]
+				if !ok || !coherentBook(t.Ask, t.Bid) {
+					continue
+				}
+				publishTick(priceChan, instr, t.Ask, t.Bid, t.AskQty, t.BidQty)
+			}
+		})
+
+		conn.Close()
+		log.Printf("[KRAKEN] Conexión cerrada — reconectando en %s", wsReconnectWait)
 		time.Sleep(wsReconnectWait)
 	}
 }

@@ -43,6 +43,10 @@ type cyclePlan struct {
 	Legs        []cycleLeg
 	// NetProfit = lo que regresa al nodo de inicio menos StartAmount (≈ USD).
 	NetProfit float64
+	// FeesUSD es la fricción total del ciclo (fees + slippage estimado) en
+	// unidades de inicio (≈USD): StartAmount × (Π tasas brutas − Π tasas netas).
+	// Alimenta la analítica del ledger ("fees totales pagados").
+	FeesUSD float64
 	// VolumeBTCEquiv expresa el tamaño en BTC-equivalente (para el ledger/feed).
 	VolumeBTCEquiv float64
 }
@@ -67,29 +71,62 @@ var (
 // planCycle dimensiona y planifica un ciclo para una sesión (función PURA sobre
 // una copia de saldos). btcPrice traduce el tope MaxOrderSizeBTC del usuario a
 // unidades cash (tope BTC-equivalente) y el volumen del plan a BTC.
+//
+// Un ciclo puede tocar VARIOS nodos cash (USD@Bitso, USD@Kraken, USDT@Binance):
+// se intenta cada rotación y gana el plan de mayor neto. Así un ciclo que pasa
+// por un venue sin fondos (Kraken recién agregado) sigue siendo ejecutable si
+// alguno de sus otros nodos cash sí tiene saldo.
 func planCycle(c *Cycle, balances Balances, p TradingParameters, btcPrice float64) (*cyclePlan, error) {
 	if c == nil || len(c.Edges) == 0 || btcPrice <= 0 {
 		return nil, errNotProfitable
 	}
 
-	// Rotar el ciclo para empezar en un nodo CASH: el monto de entrada y el neto
-	// quedan expresados en ≈USD, consistentes con el PnL del dashboard.
-	startIdx := -1
+	var best *cyclePlan
+	hasCash, sawNoFunds, sawBelowMargin := false, false, false
 	for i, e := range c.Edges {
-		if isCashAsset(e.From.Asset) {
-			startIdx = i
-			break
+		if !isCashAsset(e.From.Asset) {
+			continue
+		}
+		hasCash = true
+		edges := append(append([]Edge{}, c.Edges[i:]...), c.Edges[:i]...)
+		plan, err := planRotation(edges, balances, p, btcPrice)
+		switch err {
+		case nil:
+			if best == nil || plan.NetProfit > best.NetProfit {
+				best = plan
+			}
+		case errNoFunds:
+			sawNoFunds = true
+		case errBelowMargin:
+			sawBelowMargin = true
 		}
 	}
-	if startIdx < 0 {
-		return nil, errNoCashStart
+	if best != nil {
+		return best, nil
 	}
-	edges := append(append([]Edge{}, c.Edges[startIdx:]...), c.Edges[:startIdx]...)
+	switch {
+	case !hasCash:
+		return nil, errNoCashStart
+	case sawBelowMargin:
+		return nil, errBelowMargin
+	case sawNoFunds:
+		return nil, errNoFunds
+	default:
+		return nil, errNotProfitable
+	}
+}
+
+// planRotation planifica UNA rotación concreta del ciclo (edges ya rotadas para
+// que edges[0].From sea el nodo cash de inicio). El monto de entrada y el neto
+// quedan expresados en ≈USD, consistentes con el PnL del dashboard.
+func planRotation(edges []Edge, balances Balances, p TradingParameters, btcPrice float64) (*cyclePlan, error) {
 	start := edges[0].From
 
 	// Tasa efectiva del ciclo y tope de entrada por liquidez de cada pierna,
 	// mapeado a unidades de inicio: en la pierna i entra X·Π(eff_j, j<i).
-	prod := 1.0
+	// prodGross acumula las tasas SIN fees: la diferencia contra prod es la
+	// fricción total (fees + slippage) que paga el ciclo.
+	prod, prodGross := 1.0, 1.0
 	maxStart := balances.Get(start.Venue, string(start.Asset))
 	if cap := p.MaxOrderSizeBTC * btcPrice; cap < maxStart {
 		maxStart = cap // tope del usuario, en BTC-equivalente
@@ -113,6 +150,7 @@ func planCycle(c *Cycle, balances Balances, p TradingParameters, btcPrice float6
 			}
 		}
 		prod *= eff
+		prodGross *= e.Rate
 	}
 
 	if prod <= 1 {
@@ -134,6 +172,7 @@ func planCycle(c *Cycle, balances Balances, p TradingParameters, btcPrice float6
 		Start:          start,
 		StartAmount:    x,
 		NetProfit:      net,
+		FeesUSD:        x * (prodGross - prod),
 		VolumeBTCEquiv: x / btcPrice,
 	}
 	amount := x
@@ -143,6 +182,31 @@ func planCycle(c *Cycle, balances Balances, p TradingParameters, btcPrice float6
 		amount = out
 	}
 	return plan, nil
+}
+
+// cycleCreditProjection responde: ¿la línea de crédito volvería ejecutable este
+// ciclo? Re-planifica sobre una copia de saldos con el préstamo HIPOTÉTICO
+// aplicado (mismo reparto que activateCreditSession: el par clásico) y devuelve
+// la ganancia proyectada si el plan resultante supera el margen del usuario.
+// Función pura: no activa nada — la decisión es de handleLiquidityShortfall.
+func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btcPrice float64) (float64, bool) {
+	hypo := balances.Clone()
+	if hypo == nil {
+		hypo = make(Balances)
+	}
+	pair := classicVenues()
+	if len(pair) == 0 {
+		return 0, false
+	}
+	for _, v := range pair {
+		hypo.Add(v.Name, v.QuoteAsset, CreditLineUSD/float64(len(pair)))
+		hypo.Add(v.Name, v.BaseAsset, CreditLineBTC/float64(len(pair)))
+	}
+	plan, err := planCycle(c, hypo, p, btcPrice)
+	if err != nil {
+		return 0, false
+	}
+	return plan.NetProfit, true
 }
 
 // commitCycle aplica el plan sobre la sesión: re-verifica el saldo de inicio
@@ -188,9 +252,22 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		session.Mu.Unlock()
 	}()
 
-	plan, err := planCycle(cycle, balances, p, getBTCPrice())
+	btcPrice := getBTCPrice()
+	plan, err := planCycle(cycle, balances, p, btcPrice)
 	if err != nil {
-		return // inviable para ESTE usuario (saldo, tope o margen): sin ruido
+		// Crédito para ciclos (Sprint D): si el plan murió por saldo (errNoFunds,
+		// o errBelowMargin cuando el saldo es lo que acota el tamaño), se evalúa
+		// si la línea de crédito lo volvería viable. La DECISIÓN es la misma del
+		// modo clásico (handleLiquidityShortfall): auto-crédito si la ganancia
+		// proyectada supera costo × RiskMultiplier, reequilibrio si no, o diálogo
+		// asistido con los números sobre la mesa si el préstamo automático está
+		// apagado. Si ni con crédito hay plan, se omite sin ruido (como antes).
+		if err == errNoFunds || err == errBelowMargin {
+			if projected, ok := cycleCreditProjection(cycle, balances, p, btcPrice); ok {
+				e.handleLiquidityShortfall(session, projected)
+			}
+		}
+		return
 	}
 
 	// Circuit breaker Fill-or-Kill, ANTES de tocar saldos (atomicidad idéntica
@@ -230,6 +307,7 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		SellExchange: plan.Route(),
 		VolumeBTC:    plan.VolumeBTCEquiv,
 		SpreadUSD:    0,
+		FeesUSD:      plan.FeesUSD,
 		NetProfitUSD: plan.NetProfit,
 	})
 }

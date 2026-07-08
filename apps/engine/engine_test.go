@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
 	"sync"
 	"testing"
@@ -282,7 +283,7 @@ func TestIsValidTick(t *testing.T) {
 
 // TestSanitizeDemoInject: validación/clamps del simulador.
 func TestSanitizeDemoInject(t *testing.T) {
-	if _, _, _, ok := sanitizeDemoInject("Kraken", 100, 1); ok {
+	if _, _, _, ok := sanitizeDemoInject("OKX", 100, 1); ok {
 		t.Error("venue no registrado debe rechazarse")
 	}
 	if _, _, _, ok := sanitizeDemoInject("Binance", math.Inf(1), 1); ok {
@@ -310,6 +311,130 @@ func TestTakerFee_FallbackToRegistry(t *testing.T) {
 	}
 	if got := p.takerFee("Desconocido"); got != 0 {
 		t.Errorf("venue desconocido=%v, esperado 0", got)
+	}
+}
+
+// TestKrakenTickerParsing: los structs del adaptador de Kraken contra un payload
+// REAL capturado del WS v2 (números JSON, no strings — a diferencia de Binance).
+func TestKrakenTickerParsing(t *testing.T) {
+	raw := `{"channel":"ticker","type":"snapshot","data":[{"symbol":"BTC/USD","bid":62703.4,"bid_qty":0.0318498,"ask":62710.3,"ask_qty":0.00191335,"last":62702.9,"volume":1947.83637005,"vwap":63392.2,"low":62476.1,"high":64196.6,"change":-239.4,"change_pct":-0.38,"timestamp":"2026-07-08T05:24:41.204829Z"}]}`
+
+	var m krakenWSMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("payload real de Kraken no parsea: %v", err)
+	}
+	if m.Channel != "ticker" || len(m.Data) != 1 {
+		t.Fatalf("mensaje mal mapeado: %+v", m)
+	}
+	d := m.Data[0]
+	if d.Symbol != "BTC/USD" || !almostEqual(d.Bid, 62703.4) || !almostEqual(d.Ask, 62710.3) ||
+		!almostEqual(d.BidQty, 0.0318498) || !almostEqual(d.AskQty, 0.00191335) {
+		t.Fatalf("ticker mal mapeado: %+v", d)
+	}
+	if !coherentBook(d.Ask, d.Bid) {
+		t.Fatal("el libro real de Kraken debe pasar la validación de coherencia")
+	}
+
+	// Heartbeats y acks de suscripción llegan por el mismo socket: se ignoran
+	// porque su channel no es "ticker" (el ack ni siquiera trae channel).
+	for _, other := range []string{
+		`{"channel":"heartbeat"}`,
+		`{"method":"subscribe","result":{"channel":"ticker","symbol":"BTC/USD"},"success":true}`,
+	} {
+		var o krakenWSMessage
+		if err := json.Unmarshal([]byte(other), &o); err != nil {
+			t.Fatalf("mensaje auxiliar no parsea: %v", err)
+		}
+		if o.Channel == "ticker" {
+			t.Fatalf("mensaje auxiliar clasificado como ticker: %s", other)
+		}
+	}
+}
+
+// TestInitSession_ClassicPairOnly: el capital inicial se reparte 50/50 SOLO en el
+// par clásico. Con 3 venues registrados la suma sigue siendo el capital EXACTO
+// (antes del Sprint C, usd/2 por venue habría inflado el capital 1.5×).
+func TestInitSession_ClassicPairOnly(t *testing.T) {
+	s := newClientSession("init-3-venues", nil)
+	initSession(s, 10_000, 0.5)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	sumQuote, sumBase := 0.0, 0.0
+	for _, v := range Venues {
+		sumQuote += s.Wallets.Get(v.Name, v.QuoteAsset)
+		sumBase += s.Wallets.Get(v.Name, v.BaseAsset)
+	}
+	if !almostEqual(sumQuote, 10_000) || !almostEqual(sumBase, 0.5) {
+		t.Fatalf("capital total=%v USD / %v BTC, esperado 10000 / 0.5 exactos", sumQuote, sumBase)
+	}
+	if !almostEqual(s.Wallets.Get("Binance", "USDT"), 5_000) || !almostEqual(s.Wallets.Get("Bitso", "USD"), 5_000) {
+		t.Fatalf("el par clásico no recibió el 50/50: %+v", s.Wallets)
+	}
+	if s.Wallets.Get("Kraken", "USD") != 0 || s.Wallets.Get("Kraken", "BTC") != 0 {
+		t.Fatalf("Kraken debe nacer en cero: %+v", s.Wallets["Kraken"])
+	}
+}
+
+// TestRebalance_PreservesNonClassicVenues: el reequilibrio 50/50 opera SOLO sobre
+// el par clásico; los saldos en Kraken (u otros activos) se quedan donde están.
+func TestRebalance_PreservesNonClassicVenues(t *testing.T) {
+	e := &HFTEngine{Tracker: NewSpreadTracker()}
+	s := newClientSession("rebal-3-venues", nil)
+	initSession(s, 10_000, 0.5)
+
+	s.Mu.Lock()
+	s.Wallets.Set("Binance", "USDT", 9_000) // par desbalanceado a propósito
+	s.Wallets.Set("Bitso", "USD", 100)
+	s.Wallets.Set("Kraken", "USD", 1_234.5) // fuera del par: intocable
+	s.Wallets.Set("Kraken", "ETH", 2.0)
+	s.Mu.Unlock()
+
+	e.rebalanceWallets50_50(s)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if !almostEqual(s.Wallets.Get("Kraken", "USD"), 1_234.5) || !almostEqual(s.Wallets.Get("Kraken", "ETH"), 2.0) {
+		t.Fatalf("el reequilibrio tocó un venue fuera del par: %+v", s.Wallets["Kraken"])
+	}
+	if !almostEqual(s.Wallets.Get("Binance", "USDT"), s.Wallets.Get("Bitso", "USD")) ||
+		!almostEqual(s.Wallets.Get("Binance", "BTC"), s.Wallets.Get("Bitso", "BTC")) {
+		t.Fatalf("el par clásico no quedó simétrico: %+v", s.Wallets)
+	}
+	// El patrimonio del PAR se conserva: quote + base×precio antes == después.
+	btcPrice := getBTCPrice()
+	pairWealth := s.Wallets.Get("Binance", "USDT") + s.Wallets.Get("Bitso", "USD") +
+		(s.Wallets.Get("Binance", "BTC")+s.Wallets.Get("Bitso", "BTC"))*btcPrice
+	wantPair := 9_000.0 + 100.0 + 0.5*btcPrice
+	if !closeTo(pairWealth, wantPair, 1e-6) {
+		t.Fatalf("patrimonio del par=%v, esperado %v", pairWealth, wantPair)
+	}
+}
+
+// TestActivateCredit_ClassicPairOnly: la línea de crédito llega SOLO al par
+// clásico (Kraken no recibe fondos prestados) y se devuelve completa al vencer.
+func TestActivateCredit_ClassicPairOnly(t *testing.T) {
+	e := &HFTEngine{Tracker: NewSpreadTracker()}
+	s := newClientSession("credito-3-venues", nil)
+	initSession(s, 10_000, 0.5)
+
+	e.activateCreditSession(s)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if !s.Credit.Active {
+		t.Fatal("crédito no activado")
+	}
+	if got := s.Credit.BorrowedUSD["Kraken"]; got != 0 {
+		t.Fatalf("Kraken recibió préstamo: %v", got)
+	}
+	if !almostEqual(s.Credit.BorrowedUSD["Binance"], CreditLineUSD/2) ||
+		!almostEqual(s.Credit.BorrowedUSD["Bitso"], CreditLineUSD/2) ||
+		!almostEqual(s.Credit.BorrowedBTC["Binance"], CreditLineBTC/2) {
+		t.Fatalf("préstamo mal repartido: USD=%+v BTC=%+v", s.Credit.BorrowedUSD, s.Credit.BorrowedBTC)
+	}
+	if s.Wallets.Get("Kraken", "USD") != 0 {
+		t.Fatalf("el préstamo tocó la wallet de Kraken: %v", s.Wallets.Get("Kraken", "USD"))
 	}
 }
 

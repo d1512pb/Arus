@@ -14,33 +14,62 @@ func closeTo(a, b, tol float64) bool { return math.Abs(a-b) <= tol }
 func TestGraphTopology(t *testing.T) {
 	g := NewLiquidityGraph()
 
-	// Con el registro actual: Binance {USDT, BTC, ETH} + Bitso {USD, BTC} = 5 nodos.
-	if len(g.nodes) != 5 {
-		t.Fatalf("nodos=%d, esperado 5", len(g.nodes))
+	// Con el registro actual (Sprint C): Binance {USDT, BTC, ETH, SOL} + Bitso
+	// {USD, BTC} + Kraken {USD, BTC, ETH} = 9 nodos.
+	if len(g.nodes) != 9 {
+		t.Fatalf("nodos=%d, esperado 9", len(g.nodes))
 	}
-	// Aristas: 4 instrumentos × 2 (libro) + BTC↔BTC (2 swap) + USDT↔USD (2 paridad) = 12.
-	if len(g.edges) != 12 {
-		t.Fatalf("aristas=%d, esperado 12", len(g.edges))
+	// Aristas: 9 instrumentos × 2 (libro) = 18 + swaps de inventario (BTC entre
+	// los 3 venues = 6, ETH Binance↔Kraken = 2, USD Bitso↔Kraken = 2) + paridad
+	// USDT@Binance↔{USD@Bitso, USD@Kraken} = 4. Total 32.
+	if len(g.edges) != 32 {
+		t.Fatalf("aristas=%d, esperado 32", len(g.edges))
 	}
 
 	usdtBin := MarketNode{Asset: "USDT", Venue: "Binance"}
 	usdBit := MarketNode{Asset: "USD", Venue: "Bitso"}
+	usdKrk := MarketNode{Asset: "USD", Venue: "Kraken"}
 	if e := g.edges[edgeKey(usdtBin, usdBit)]; e == nil || e.Kind != EdgeParity || e.Rate != 1 {
 		t.Fatal("falta la arista de paridad USDT@Binance→USD@Bitso (tasa 1)")
 	}
+	if e := g.edges[edgeKey(usdtBin, usdKrk)]; e == nil || e.Kind != EdgeParity || e.Rate != 1 {
+		t.Fatal("falta la arista de paridad USDT@Binance→USD@Kraken (tasa 1)")
+	}
+	// USD es el MISMO activo en Bitso y Kraken: swap de inventario, no paridad.
+	if e := g.edges[edgeKey(usdBit, usdKrk)]; e == nil || e.Kind != EdgeInventorySwap {
+		t.Fatal("falta el swap de inventario USD@Bitso→USD@Kraken")
+	}
 	btcBin := MarketNode{Asset: "BTC", Venue: "Binance"}
 	btcBit := MarketNode{Asset: "BTC", Venue: "Bitso"}
+	btcKrk := MarketNode{Asset: "BTC", Venue: "Kraken"}
 	if e := g.edges[edgeKey(btcBin, btcBit)]; e == nil || e.Kind != EdgeInventorySwap {
 		t.Fatal("falta el swap de inventario BTC@Binance→BTC@Bitso")
+	}
+	if e := g.edges[edgeKey(btcBin, btcKrk)]; e == nil || e.Kind != EdgeInventorySwap {
+		t.Fatal("falta el swap de inventario BTC@Binance→BTC@Kraken")
 	}
 	// El triángulo de Binance: aristas de libro ETH/BTC dentro del mismo venue.
 	ethBin := MarketNode{Asset: "ETH", Venue: "Binance"}
 	if e := g.edges[edgeKey(btcBin, ethBin)]; e == nil || e.Kind != EdgeOrderBook || e.BaseAsset != "ETH" {
 		t.Fatal("falta la arista de libro BTC@Binance→ETH@Binance (comprar ETH/BTC)")
 	}
-	// ETH no existe en Bitso: no debe haber swap ETH cross-venue.
+	// El segundo triángulo de Binance (Sprint C): SOL/USDT y SOL/BTC.
+	solBin := MarketNode{Asset: "SOL", Venue: "Binance"}
+	if e := g.edges[edgeKey(btcBin, solBin)]; e == nil || e.Kind != EdgeOrderBook || e.BaseAsset != "SOL" {
+		t.Fatal("falta la arista de libro BTC@Binance→SOL@Binance (comprar SOL/BTC)")
+	}
+	// El triángulo de Kraken: ETH/BTC dentro de Kraken.
+	ethKrk := MarketNode{Asset: "ETH", Venue: "Kraken"}
+	if e := g.edges[edgeKey(btcKrk, ethKrk)]; e == nil || e.Kind != EdgeOrderBook || e.BaseAsset != "ETH" {
+		t.Fatal("falta la arista de libro BTC@Kraken→ETH@Kraken (comprar ETH/BTC)")
+	}
+	// ETH no existe en Bitso: no debe haber swap ETH hacia allá.
 	if _, ok := g.edges[edgeKey(ethBin, MarketNode{Asset: "ETH", Venue: "Bitso"})]; ok {
 		t.Fatal("swap de inventario hacia un nodo inexistente (ETH@Bitso)")
+	}
+	// SOL solo existe en Binance: sin aristas cross-venue.
+	if _, ok := g.edges[edgeKey(solBin, MarketNode{Asset: "SOL", Venue: "Kraken"})]; ok {
+		t.Fatal("swap de inventario hacia un nodo inexistente (SOL@Kraken)")
 	}
 }
 
@@ -73,7 +102,7 @@ func TestGraphUpdateBook(t *testing.T) {
 	}
 
 	// Clave desconocida: no debe tocar nada ni hacer panic.
-	g.UpdateBook("Kraken:BTC/USD", TopOfBook{Ask: 1, Bid: 1, UpdatedAt: now})
+	g.UpdateBook("OKX:BTC/USD", TopOfBook{Ask: 1, Bid: 1, UpdatedAt: now})
 }
 
 // DefaultBinanceFeeForTest evita acoplarse a literales: lee el registro.
@@ -124,8 +153,20 @@ func TestFindBestCycle_Profitable(t *testing.T) {
 		t.Fatalf("volumen máx=%v, esperado 0.4", c.MaxVolumeBTC)
 	}
 
-	if len(c.Edges) != 4 {
-		t.Fatalf("longitud del ciclo=%d aristas, esperado 4 (%s)", len(c.Edges), DescribeCycle(c))
+	// Con Kraken en el grafo, Bellman-Ford puede rutear el swap BTC por un venue
+	// de tránsito (BTC@Binance→BTC@Kraken→BTC@Bitso, ambas a costo cero): el neto
+	// y el volumen no cambian. Exigimos las DOS piernas de libro del arbitraje y
+	// que cualquier pierna extra sea de tránsito gratuito (tasa 1, fee 0).
+	books := 0
+	for _, e := range c.Edges {
+		if e.Kind == EdgeOrderBook {
+			books++
+		} else if e.Rate != 1 || e.Fee != 0 {
+			t.Fatalf("pierna de tránsito con costo: %+v (%s)", e, DescribeCycle(c))
+		}
+	}
+	if books != 2 {
+		t.Fatalf("piernas de libro=%d, esperado 2 (%s)", books, DescribeCycle(c))
 	}
 	seen := map[string]bool{}
 	for _, e := range c.Edges {
@@ -213,8 +254,8 @@ func TestSnapshotFor(t *testing.T) {
 	if !snap.ParityAssumed {
 		t.Fatal("el snapshot debe declarar el supuesto de paridad USDT≈USD")
 	}
-	if len(snap.Nodes) != 5 {
-		t.Fatalf("nodos en snapshot=%d, esperado 5", len(snap.Nodes))
+	if len(snap.Nodes) != 9 {
+		t.Fatalf("nodos en snapshot=%d, esperado 9 (3 venues)", len(snap.Nodes))
 	}
 
 	byID := map[string]GraphNodeWire{}

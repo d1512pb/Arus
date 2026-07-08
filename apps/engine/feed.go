@@ -29,6 +29,7 @@ type FeedAdapter interface {
 var feedAdapters = []FeedAdapter{
 	binanceFeed{},
 	bitsoFeed{},
+	krakenFeed{},
 }
 
 // StartFeeds lanza todos los adaptadores registrados, cada uno en su goroutine.

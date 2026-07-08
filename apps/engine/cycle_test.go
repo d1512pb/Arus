@@ -114,6 +114,97 @@ func TestPlanCycle_Inviable(t *testing.T) {
 	}
 }
 
+// TestPlanCycle_PicksFundedCashStart (Sprint C): un ciclo puede tocar varios
+// nodos cash; si el "primero" no tiene saldo pero otro sí, el plan debe rotar
+// al nodo FUNDADO en vez de rendirse — así los ciclos que pasan por Kraken son
+// ejecutables sin haber depositado nunca en Kraken.
+func TestPlanCycle_PicksFundedCashStart(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo de partida")
+	}
+
+	// Fondos ÚNICAMENTE en USD@Bitso: cualquier otra rotación cash está en cero.
+	balances := Balances{"Bitso": {"USD": 5_000}}
+	p := DefaultTradingParameters()
+
+	plan, err := planCycle(cycle, balances, p, 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado con un nodo cash fundado: %v", err)
+	}
+	if plan.Start.ID() != "USD@Bitso" {
+		t.Fatalf("inicio=%s, esperado USD@Bitso (el único con saldo)", plan.Start.ID())
+	}
+	if plan.NetProfit <= 0 {
+		t.Fatalf("neto=%v, esperado positivo", plan.NetProfit)
+	}
+}
+
+// TestPlanCycle_FeesUSD: la fricción del plan es exactamente
+// entrada × (Π tasas brutas − Π tasas netas) — el costo total de fees+slippage.
+func TestPlanCycle_FeesUSD(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+
+	balances := Balances{"Binance": {"USDT": 5_000}, "Bitso": {"USD": 5_000, "BTC": 1}}
+	plan, err := planCycle(cycle, balances, DefaultTradingParameters(), 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+
+	prodGross, prodNet := 1.0, 1.0
+	for _, e := range cycle.Edges {
+		prodGross *= e.Rate
+		prodNet *= e.Rate * (1 - e.Fee)
+	}
+	want := plan.StartAmount * (prodGross - prodNet)
+	if !closeTo(plan.FeesUSD, want, 1e-9) || plan.FeesUSD <= 0 {
+		t.Fatalf("fricción=%v, esperado %v (>0)", plan.FeesUSD, want)
+	}
+	// Coherencia: bruto − fricción = neto (misma identidad que computeNetProfit).
+	gross := plan.StartAmount * (prodGross - 1)
+	if !closeTo(gross-plan.FeesUSD, plan.NetProfit, 1e-9) {
+		t.Fatalf("bruto−fricción=%v ≠ neto=%v", gross-plan.FeesUSD, plan.NetProfit)
+	}
+}
+
+// TestCycleCreditProjection (Sprint D): sin fondos el ciclo no planifica, pero la
+// proyección con la línea de crédito hipotética responde cuánto ganaría — y si ni
+// el crédito lo salva (margen imposible), responde que no.
+func TestCycleCreditProjection(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo de partida")
+	}
+
+	empty := Balances{}
+	p := DefaultTradingParameters()
+	if _, err := planCycle(cycle, empty, p, 60_000); err == nil {
+		t.Fatal("plan aceptado sin fondos")
+	}
+
+	projected, ok := cycleCreditProjection(cycle, empty, p, 60_000)
+	if !ok || projected <= p.MinNetProfitUSD {
+		t.Fatalf("la línea de crédito debería volver viable el ciclo: ok=%v proyección=%v", ok, projected)
+	}
+	// La proyección NO muta los saldos reales (función pura sobre una copia).
+	if len(empty) != 0 {
+		t.Fatalf("la proyección mutó los saldos reales: %+v", empty)
+	}
+
+	// Margen imposible: ni con crédito hay plan → sin proyección (y sin ruido).
+	greedy := DefaultTradingParameters()
+	greedy.MinNetProfitUSD = 1e6
+	if _, ok := cycleCreditProjection(cycle, empty, greedy, 60_000); ok {
+		t.Fatal("proyección aceptada con margen inalcanzable")
+	}
+}
+
 // TestCommitCycle_ConservesBalances: tras ejecutar, el nodo de inicio gana
 // exactamente el neto; los nodos intermedios quedan como estaban (todo lo que
 // entra sale) y el PnL de la sesión sube por el neto.
@@ -146,14 +237,18 @@ func TestCommitCycle_ConservesBalances(t *testing.T) {
 	if !closeTo(gotStart, wantStart, 1e-6) {
 		t.Fatalf("inicio: %v, esperado %v (+neto)", gotStart, wantStart)
 	}
-	// Nodos intermedios sin residuo (BTC en ambos venues, USD en Bitso).
-	for _, check := range []struct{ venue, asset string }{
-		{"Binance", "BTC"}, {"Bitso", "BTC"}, {"Bitso", "USD"},
-	} {
-		got := s.Wallets.Get(check.venue, check.asset)
-		want := before.Get(check.venue, check.asset)
-		if !closeTo(got, want, 1e-9) {
-			t.Fatalf("residuo en %s@%s: %v, esperado %v", check.asset, check.venue, got, want)
+	// TODO nodo que no sea el de inicio queda sin residuo (lo que entra sale) —
+	// incluidos los venues de tránsito de los swaps de inventario (Kraken).
+	for venue, assets := range s.Wallets {
+		for asset := range assets {
+			if venue == start.Venue && asset == string(start.Asset) {
+				continue
+			}
+			got := s.Wallets.Get(venue, asset)
+			want := before.Get(venue, asset)
+			if !closeTo(got, want, 1e-9) {
+				t.Fatalf("residuo en %s@%s: %v, esperado %v", asset, venue, got, want)
+			}
 		}
 	}
 	if !closeTo(s.TotalWealth, wealthBefore+plan.NetProfit, 1e-9) {
