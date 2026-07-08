@@ -1,6 +1,6 @@
 # Fase 2 — Motor de arbitraje omnidireccional (grafo de liquidez)
 
-> **Estado: HITOS 1, 2 Y 3 IMPLEMENTADOS.** El grafo de liquidez
+> **Estado: HITOS 1, 2 Y 3 IMPLEMENTADOS + SPRINTS C Y D.** El grafo de liquidez
 > (`apps/engine/graph.go`) nace del registro de INSTRUMENTOS, se actualiza con
 > cada tick real y detecta ciclos negativos (espaciales y triangulares) con
 > Bellman-Ford. Desde el **hito 3** el radar además EJECUTA: wallets
@@ -9,7 +9,13 @@
 > Fill-or-Kill antes de tocar saldos), **Universe por sesión** (poda del grafo a
 > los venues/monedas del usuario), **fees del usuario en los pesos**
 > (`FindBestCycleFor`) y el **autopiloto opt-in** (`RadarAutopilot`) que
-> sustituye al ejecutor clásico del par cuando está activo.
+> sustituye al ejecutor clásico del par cuando está activo. El **Sprint C** sumó
+> Kraken (tercer venue, WS v2) y los pares SOL de Binance — 9 nodos / 32
+> aristas — con el **par clásico** explícito (`classicPair`: capital inicial,
+> crédito y rebalanceo solo en Binance+Bitso) y rotación multi-cash en
+> `planCycle`. El **Sprint D** integró el **crédito a los ciclos**
+> (`cycleCreditProjection` → `handleLiquidityShortfall`) y la **analítica del
+> ledger** (`analytics.go`: /api/stats y /api/ledger.csv).
 
 ## 1. Idea central
 
@@ -48,8 +54,9 @@ formalismo que usan los desks institucionales de arbitraje cross-venue.
 
 - **Instrumentos como datos:** `Instruments` en venues.go registra N libros por
   venue; agregar un par = 1 entrada (el FeedAdapter se suscribe solo, el grafo
-  gana nodos/aristas, el radar lo cubre). Binance corre 3 libros por un único
-  socket de streams combinados; Bitso 1.
+  gana nodos/aristas, el radar lo cubre). Binance corre 5 libros por un único
+  socket de streams combinados (dos triángulos: BTC/ETH y BTC/SOL); Bitso 1;
+  Kraken 3 por el canal `ticker` del WS v2 (su propio triángulo BTC/ETH).
 - **Topología desde instrumentos:** 1 nodo por (venue, activo); 2 aristas de
   libro por instrumento; paridad entre activos declarados equivalentes
   (USDT≈USD **visible y etiquetada**) y swap de inventario pre-fondeado entre el
@@ -68,14 +75,21 @@ formalismo que usan los desks institucionales de arbitraje cross-venue.
 - **Volumen de ciclo:** homogéneo (min de liquidez) solo si todas las piernas de
   libro comparten activo base; en triangulares (bases mixtas) se reporta "no
   homogéneo" hasta el ejecutor del hito 3.
-- **Hito 3 (hecho):** ejecución de ciclos vía autopiloto opt-in — el plan rota
-  el ciclo a un inicio CASH, dimensiona contra saldo + tope del usuario +
-  liquidez por pierna (mapeada a unidades de inicio) y solo ejecuta si el neto
-  supera el margen DEL usuario; commit atómico bajo el lock de sesión con
-  re-verificación de fondos (hard block) y Fill-or-Kill previo (cero exposición).
-- **Aún NO:** crédito automático para ciclos (el shortfall de ciclos se omite en
-  silencio, sin ofrecer préstamo), liquidez compartida entre sesiones, y el wire
-  plano 2-venue convive con el campo `balances` multi-activo (la UI de wallets
+- **Hito 3 (hecho):** ejecución de ciclos vía autopiloto opt-in — el plan prueba
+  TODAS las rotaciones que arrancan en un nodo CASH (Sprint C: un ciclo vía
+  Kraken puede arrancar desde USD@Bitso o USDT@Binance) y ejecuta la de mayor
+  neto viable, dimensionada contra saldo + tope del usuario + liquidez por
+  pierna (mapeada a unidades de inicio); commit atómico bajo el lock de sesión
+  con re-verificación de fondos (hard block) y Fill-or-Kill previo (cero
+  exposición).
+- **Crédito para ciclos (Sprint D, hecho):** si el plan muere por saldo,
+  `cycleCreditProjection` re-planifica con la línea hipotética y
+  `handleLiquidityShortfall` decide con la inecuación `ganancia > costo × k`
+  (auto-crédito / reequilibrio / diálogo asistido) — mismo comportamiento que el
+  par clásico.
+- **Aún NO:** liquidez compartida entre sesiones, préstamo dimensionado a la
+  oportunidad (la línea sigue fija y llega al par clásico), y el wire plano
+  2-venue convive con el campo `balances` multi-activo (la UI de wallets
   clásicas sigue leyendo el plano).
 
 ## 3. Primer hito demostrable (el más barato)
