@@ -2,20 +2,24 @@
 
 # ⬡ ARUS
 
-### Motor de arbitraje cross-exchange de alta frecuencia · Binance ↔ Bitso
+### Motor de arbitraje omnidireccional de alta frecuencia · multi-exchange · multi-activo
 
-*Detecta divergencias de precio de BTC entre dos mercados, descuenta cada fricción real (fees + slippage) y ejecuta solo cuando la ganancia neta es positiva — con gestión de inventario respaldada por crédito.*
+> ### 🚧 TRABAJO EN CURSO — pendiente a continuación
+> Rama `feat/arbitraje-omnidireccional`. Este README es la **referencia completa del proyecto**: qué hay construido, cómo funciona y qué sigue. Ver [Estado de la rama](#-estado-de-la-rama-bitácora) y [Qué sigue](#-qué-sigue--plan-de-evolución).
+
+*Un grafo de liquidez en vivo detecta ciclos de arbitraje —espaciales entre exchanges y triangulares dentro de uno— con datos 100 % reales, descuenta cada fricción (fees + slippage) y ejecuta solo cuando la ganancia neta supera el margen que **cada usuario** define. Sesiones completas persistidas: el bot te recuerda.*
 
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
-![SQLite](https://img.shields.io/badge/SQLite-embebido%20·%20CGO--free-003B57?logo=sqlite&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-sesiones%20completas%20·%20CGO--free-003B57?logo=sqlite&logoColor=white)
 ![Detección](https://img.shields.io/badge/detección-~50ns%2Ftick-brightgreen)
+![Tests](https://img.shields.io/badge/tests-40%2B%20·%20CI%20con%20--race-blue)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
 
 **Autor:** Daniel Peredo Borgonio · **Reto:** CODING_CHALLENGE_MEXICO
 
-🔗 **Demo en vivo:** **[arus-snowy.vercel.app](https://arus-snowy.vercel.app)**  ·  ⚙️ Motor (API): [arus-engine.fly.dev/api/ledger](https://arus-engine.fly.dev/api/ledger)
+🔗 **Demo en vivo:** **[arus-snowy.vercel.app](https://arus-snowy.vercel.app)** *(⚠️ el deploy corre la versión de `main`; esta rama aún no se despliega)* · ⚙️ Motor (API): [arus-engine.fly.dev/api/ledger](https://arus-engine.fly.dev/api/ledger)
 
 </div>
 
@@ -23,28 +27,62 @@
 
 ## 📑 Índice
 
-1. [Resumen ejecutivo](#-resumen-ejecutivo)
-2. [El problema y la solución](#-el-problema-y-la-solución)
-3. [Estrategia e inteligencia del bot](#-estrategia-e-inteligencia-del-bot)
-4. [Velocidad y eficiencia](#-velocidad-y-eficiencia-detección-de-oportunidades)
-5. [Precisión del cálculo de rentabilidad neta](#-precisión-del-cálculo-de-rentabilidad-neta)
-6. [Robustez y gestión de riesgo](#-robustez-y-gestión-de-riesgo-circuit-breakers)
-7. [Persistencia de datos](#-persistencia-de-datos-trade-ledger)
-8. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
-9. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
-10. [Instalación y ejecución local](#-instalación-y-ejecución-local)
-11. [Despliegue](#-despliegue)
-12. [Roadmap](#-roadmap)
-13. [Capturas de pantalla](#-capturas-de-pantalla)
-14. [Licencia](#-licencia)
+1. [Estado de la rama (bitácora)](#-estado-de-la-rama-bitácora)
+2. [Resumen ejecutivo](#-resumen-ejecutivo)
+3. [El problema y la solución](#-el-problema-y-la-solución)
+4. [Estrategia e inteligencia del bot](#-estrategia-e-inteligencia-del-bot)
+5. [El Radar Omnidireccional (grafo de liquidez)](#-el-radar-omnidireccional-grafo-de-liquidez)
+6. [Velocidad y eficiencia](#-velocidad-y-eficiencia-detección-de-oportunidades)
+7. [Precisión del cálculo de rentabilidad neta](#-precisión-del-cálculo-de-rentabilidad-neta)
+8. [Robustez y gestión de riesgo](#-robustez-y-gestión-de-riesgo-circuit-breakers)
+9. [Persistencia y continuidad](#-persistencia-y-continuidad-sesiones-completas--trade-ledger)
+10. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
+11. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
+12. [Instalación y ejecución local](#-instalación-y-ejecución-local)
+13. [Despliegue](#-despliegue)
+14. [Qué sigue — plan de evolución](#-qué-sigue--plan-de-evolución)
+15. [Capturas de pantalla](#-capturas-de-pantalla)
+16. [Licencia](#-licencia)
+
+---
+
+## 🚧 Estado de la rama (bitácora)
+
+> Esta sección existe para retomar el proyecto **sin más contexto que este README**. Resume qué se construyó en esta rama, en qué orden y por qué. El diseño detallado del grafo vive en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
+
+El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (rama `main`, lo que muestra el deploy actual) y evolucionó en esta rama hacia una **plataforma omnidireccional personalizable**. Todo lo siguiente está implementado, testeado (40+ tests unitarios, CI en GitHub Actions con `go test -race`) y verificado end-to-end contra feeds reales:
+
+| Etapa | Qué se construyó | Piezas clave |
+|---|---|---|
+| **Fase 0 — Estandarización y personalización** | Fórmula institucional única de rentabilidad; parámetros de estrategia editables **en vivo** por el usuario con validación de backend; multiplicador de riesgo en la decisión de crédito | `computeNetProfit` (engine.go) · acción `set_params` + `sanitizeTradingParams` (server.go) · `StrategyPanel.tsx` · `creditWorthIt` |
+| **Fase 1 — Arquitectura para expansión** | Exchanges e instrumentos como **datos** (registro); adaptadores de feed con liquidez y timestamp por tick; volumen dimensionado contra liquidez real; detección de feeds congelados (staleness >10 s); ledger por sesión | `venues.go` (Venues/Instruments) · `feed.go` (interface FeedAdapter) · `ws_real_market.go` · `sizeOrder` |
+| **Fase 2 · hito 1 — Radar** | Grafo de liquidez en vivo: nodos activo@venue, aristas de libro/paridad/inventario con pesos `−log(tasa·(1−fee))`, Bellman-Ford detecta ciclos automáticamente, visualización SVG por sesión (~1/s) | `graph.go` · `GraphPanel.tsx` · evento `graph_update` |
+| **Fase 2 · hito 2 — Multi-instrumento** | N libros por venue: Binance emite el **triángulo BTC/USDT · ETH/USDT · ETH/BTC** por un solo socket de streams combinados → el radar detecta arbitraje **triangular** además del espacial, con datos reales | `Instruments` en venues.go · streams combinados en ws_real_market.go · CI (`.github/workflows/ci.yml`) |
+| **Sprint A — Continuidad** | Sesiones **completas** persistidas en SQLite (interfaz `SessionStore`, esquema `balances` multi-activo): saldos, estrategia, PnL y preferencias sobreviven a reinicios del motor y del navegador; token en `localStorage` + `resume_session` con takeover entre pestañas; la reconexión ya no resetea el progreso | `store.go` · tablas `sessions`/`balances` · flujo resume en `useArusEngine.ts` |
+| **Sprint B / hito 3 — Ejecución omnidireccional** | Wallets **multi-activo en memoria** (`Balances`: venue→asset→cantidad, mismo esquema que persiste el store); **ejecutor de ciclos** (planificación pura + commit atómico con Fill-or-Kill antes de tocar saldos); **Universe por sesión** (el usuario elige exchanges/monedas = poda del grafo); **fees del usuario en los pesos** (`FindBestCycleFor`); **autopiloto del radar** opt-in que sustituye al ejecutor clásico del par | `cycle.go` (planCycle/commitCycle) · `Balances` (models.go) · `RadarAutopilot`/`EnabledVenues`/`EnabledAssets` en TradingParameters |
+
+**Decisiones de diseño que hay que conocer para seguir trabajando:**
+
+- **Dos modos de ejecución conviven.** Modo clásico: el par BTC entre Binance↔Bitso (`executeForSession`, el camino original probado). Modo radar (autopiloto ON): ejecuta el mejor ciclo del subgrafo del usuario (`executeCycleForSession`) y **apaga** el clásico para esa sesión — nunca operan los dos a la vez.
+- **El wire motor↔UI es doble.** Los campos planos (`binance_usd`, `bitso_btc`…) se mantienen por compatibilidad con el dashboard desplegado; `wallet_update` además lleva `balances` (multi-activo completo) y `graph_update` lleva el radar. La UI de wallets clásicas todavía lee el plano.
+- **USDT ≠ USD, declarado.** Binance opera BTC/USDT y Bitso BTC/USD; la equivalencia 1:1 es una arista `EdgeParity` **visible** en el grafo (`AssumeUSDTParity`, `parityPairs` en venues.go), no un supuesto escondido.
+- **El crédito no aplica a ciclos del radar (pendiente).** El autopiloto omite en silencio oportunidades sin fondos; la línea de crédito solo integra con el modo clásico.
+- **Todo lo simulado sigue simulado.** Las órdenes no tocan APIs privadas de exchanges: los fills son instantáneos al top-of-book con slippage estimado, y el Fill-or-Kill es probabilístico (5 %). El puente a ejecución real (testnet) está en el plan (ver [Qué sigue](#-qué-sigue--plan-de-evolución)).
+
+**Notas de entorno de desarrollo (gotchas reales):**
+
+- `go test -race` **no corre en la máquina de desarrollo Windows** (requiere gcc de 64 bits); el CI de GitHub Actions lo cubre en cada push.
+- En pruebas locales pueden quedar **procesos zombi en el puerto 8080** (el bind falla en silencio y te conectas a un motor viejo). Liberar con PowerShell: `Get-NetTCPConnection -LocalPort 8080 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`.
+- Smoke E2E por WebSocket: Node ≥ 21 trae `WebSocket` global — un script `.mjs` de ~40 líneas conecta a `ws://localhost:8080/ws`, envía acciones y valida eventos (patrón usado para verificar cada sprint).
+- El esquema SQLite **se auto-crea/migra al arrancar** (`InitLedger` → `initSessionStore`); en Fly.io el volumen montado en `data/` conserva la base entre deploys sin pasos manuales.
 
 ---
 
 ## 🎯 Resumen ejecutivo
 
-**Arus** es un motor de *arbitraje espacial* (cross-exchange) que opera el par **BTC/USD** simultáneamente en **Binance** y **Bitso**. Compra donde el bitcoin está más barato y vende donde está más caro en el mismo instante, con capital pre-posicionado en ambos exchanges para no depender de los tiempos de transferencia on-chain.
+**Arus** es un motor de **arbitraje omnidireccional**: modela el mercado como un **grafo de liquidez** donde cada nodo es un activo en un exchange (`BTC@Binance`, `USD@Bitso`, `ETH@Binance`…) y cada arista una forma de convertirlo (libros de órdenes reales, paridad USDT≈USD, inventario pre-fondeado). Una oportunidad de arbitraje es un **ciclo rentable** en ese grafo — comprar barato y vender caro entre exchanges (espacial) o rotar tres pares dentro de uno (triangular) son el mismo problema matemático, y el motor los detecta con el mismo algoritmo (Bellman-Ford sobre pesos `−log(tasa·(1−fee))`), cada segundo, con datos 100 % reales de Binance y Bitso.
 
-Su diferenciador no es detectar el spread —eso es trivial—, sino **modelar la física real del dinero**: descuenta las comisiones de cada plataforma y el slippage estimado *antes* de decidir, rechaza las "trampas de liquidez" (operaciones rentables en bruto pero negativas en neto) y, cuando un exchange se queda sin fondos, decide de forma autónoma si pedir un préstamo —solo si los intereses no se comen la ganancia— o reequilibrar el inventario.
+Su diferenciador es doble. Primero, **modela la física real del dinero**: descuenta comisiones y slippage *antes* de decidir, rechaza las "trampas de liquidez" (rentables en bruto, negativas en neto) y dimensiona cada orden contra la liquidez visible del libro. Segundo, **el usuario tiene el control**: margen mínimo, tamaño de orden, fees, apetito de riesgo del crédito, con qué exchanges y monedas jugar, y si el radar solo detecta o también **ejecuta** (autopiloto) — todo editable en vivo, validado por el backend, y **persistido**: cierras el navegador, reinicia el servidor, y tu sesión (saldos, estrategia, historial) sigue ahí.
 
 ---
 
@@ -54,12 +92,14 @@ El error clásico del arbitraje novato es operar sobre el **spread bruto** (`Ask
 
 | | Arbitraje ingenuo | **Arus** |
 |---|---|---|
-| Señal de entrada | Spread bruto positivo | Spread **neto** > umbral tras fees + slippage |
-| Comisiones | Se asumen "despreciables" | Modeladas por exchange (Binance 0.10 % / Bitso 0.65 %) |
-| Slippage | Ignorado | Estimado (5 bps por pierna) y descontado antes de decidir |
-| Anomalías de precio | Se opera sobre ellas | **Spike Filter** las bloquea (protección de capital) |
+| Señal de entrada | Spread bruto positivo | Ciclo con tasa **neta** > margen del usuario, tras fees + slippage |
+| Comisiones | Se asumen "despreciables" | Modeladas por exchange y **personalizables** (cuentas VIP pagan menos) |
+| Slippage | Ignorado | Estimado por pierna (configurable) y descontado antes de decidir |
+| Alcance | Un par fijo | **Grafo omnidireccional**: espacial + triangular con el mismo detector |
+| Volumen | Fijo | `min(tope del usuario, liquidez real del libro en cada pierna)` |
+| Anomalías de precio | Se opera sobre ellas | **Spike Filter** + staleness + compuertas de divergencia |
 | Falta de fondos | Se detiene o falla | Decisión crédito-vs-reequilibrio con análisis de rentabilidad |
-| Auditoría | Volátil / en memoria | **Ledger inmutable** persistido en disco |
+| Estado | Volátil / en memoria | **Sesiones completas persistidas** + ledger inmutable de auditoría |
 
 ---
 
@@ -67,46 +107,67 @@ El error clásico del arbitraje novato es operar sobre el **spread bruto** (`Ask
 
 > **¿El bot detecta la primera oportunidad que aparece, o las prioriza y razona con una estrategia más sofisticada?**
 
-Arus implementa **arbitraje cross-exchange (espacial)** sobre BTC/USD en Binance y Bitso: el modelo más directo y de menor riesgo de ejecución. Nuestra apuesta es deliberada: **la inteligencia no está en la *cantidad* de mercados, sino en la *calidad* de cada decisión.** El reto no es "ver" un spread —eso lo hace cualquiera—, sino resolver los sub-problemas que convierten un arbitraje *aparentemente obvio* en una pérdida real. Cada uno de ellos es una pieza de lógica de negocio que un bot ingenuo se salta.
+El motor opera con **dos estrategias conmutables por el usuario**:
 
-**El modelo base:**
+- **Modo clásico (default):** arbitraje espacial del par BTC entre Binance y Bitso con fondos pre-posicionados en ambos lados — compra y venta **simultáneas**, sin esperar confirmaciones on-chain. Evalúa las **dos** direcciones cada tick y ejecuta la de **mayor neto**, no la primera que aparece.
+- **Modo radar / autopiloto (opt-in):** el grafo de liquidez completo. El motor busca cada segundo el mejor **ciclo** dentro del universo del usuario — espacial (2 libros + swap de inventario + paridad) o **triangular** (3 libros dentro de Binance) — con los fees de ESE usuario en los pesos, y lo ejecuta atómicamente si supera SU margen. Ver [El Radar Omnidireccional](#-el-radar-omnidireccional-grafo-de-liquidez).
 
-- **Un par, dos mercados:** BTC/USD en Binance (global) y Bitso (México). No es triangular (no usa tres pares), no es estadístico (no usa correlaciones ni modelos predictivos) y no toca derivados — es **precio A vs precio B en tiempo real**, honesto sobre lo que sí y lo que no hace.
-- **Fondos pre-posicionados:** ambos lados mantienen USD y BTC, de modo que la compra y la venta son **simultáneas**; la ganancia se realiza sin esperar confirmaciones de la red Bitcoin.
-
-**Los cuatro sub-problemas que resolvemos dentro del problema principal:**
-
-1. **«¿En qué dirección?»** — En cada tick evalúa las **dos** direcciones (`Binance→Bitso` *y* `Bitso→Binance`) y ejecuta la de **mayor neto**, no la primera que aparece ni la de mayor spread *bruto*. Es priorización, no reacción.
-2. **«¿Es rentable de verdad?»** — Decide sobre el **neto estricto** (fees de ambas piernas + slippage), descartando las "trampas de liquidez" rentables en bruto pero negativas en neto → ver [Precisión](#-precisión-del-cálculo-de-rentabilidad-neta).
-3. **«¿Y si el dato está roto?»** — Spike Filter + compuerta de divergencia >20 % protegen el capital ante feeds corruptos y *flash crashes* → ver [Robustez](#-robustez-y-gestión-de-riesgo-circuit-breakers).
-4. **«¿Qué hago cuando un exchange se queda sin inventario?»** — Aquí está nuestro **diferenciador** ⤵️
+En ambos modos, la inteligencia está en resolver los sub-problemas que convierten un arbitraje *aparentemente obvio* en una pérdida real: ¿es rentable de verdad? (neto estricto), ¿el dato está roto? (spike filter + staleness), ¿alcanza la liquidez? (dimensionado por pierna), ¿qué hacer sin inventario? (crédito vs. reequilibrio).
 
 ### 🎛️ Personalización de estrategia: el usuario tiene el control
 
-Desde la rama *arbitraje omnidireccional*, los parámetros que gobiernan al bot son **del usuario, no del sistema** — editables **en vivo** desde el panel de Estrategia, por sesión:
+Los parámetros que gobiernan al bot son **del usuario, no del sistema** — editables **en vivo** desde el panel de Estrategia, por sesión, y **persistidos** con ella:
 
 | Parámetro | Qué controla | Ejemplo de personalización |
 |---|---|---|
 | **Margen mínimo (USD)** | Umbral de ganancia neta para ejecutar | El usuario A exige $10; el usuario B opera desde $1 y captura las oportunidades pequeñas que A ignora |
 | **Orden máxima (BTC)** | Tope de volumen por operación | Si el mercado ofrece 0.05 BTC de ineficiencia, quien configuró 0.01 entra; quien exige bloques de 1.0 la deja pasar |
-| **Slippage estimado (bps)** | Tolerancia de deslizamiento asumida por pierna | Un perfil agresivo asume menos fricción y ejecuta más |
-| **Comisiones por exchange** | Taker fee de cada casa (cuentas VIP pagan menos) | Ajustable por venue desde el registro |
+| **Slippage estimado (bps)** | Deslizamiento asumido por pierna | Un perfil agresivo asume menos fricción y ejecuta más |
+| **Comisiones por exchange** | Taker fee de cada casa | La misma oportunidad existe para quien paga 0.1 % y desaparece para quien paga 2 % — con sus fees en los pesos del grafo |
 | **Multiplicador de riesgo** | Inecuación del crédito: `ganancia > costo × k` | Conservador `k=5` (solo endeudarse si cubre 5× el costo); agresivo `k=1` |
 | **Tu universo** | Con qué exchanges y monedas juega el bot (poda del grafo) | Solo Binance → el radar busca únicamente ciclos triangulares internos |
-| **Autopiloto del radar** | Detección → ejecución del mejor ciclo del universo | ON: ejecuta ciclos espaciales o triangulares con TUS fees; OFF: modo clásico del par |
+| **Autopiloto del radar** | Detección → ejecución del mejor ciclo del universo | ON: ejecuta ciclos espaciales o triangulares; OFF: modo clásico del par |
 
-El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`) y responde con lo realmente aplicado: un mensaje malicioso no puede corromper una sesión. Los cambios son atómicos (snapshot por operación): si editas a mitad de un trade, ese trade termina con los parámetros con los que empezó.
+El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`) y responde con lo realmente aplicado: un mensaje malicioso no puede corromper una sesión (ni siquiera una fila de la base de datos manipulada a mano — la reanudación también sanea). Los cambios son atómicos (snapshot por operación): si editas a mitad de un trade, ese trade termina con los parámetros con los que empezó.
 
-### ⭐ El diferenciador: capa de inteligencia financiera (crédito vs. reequilibrio)
+### ⭐ La capa de inteligencia financiera (crédito vs. reequilibrio)
 
 En el arbitraje real existe un enemigo silencioso: el **tiempo muerto**. Cuando un exchange agota su inventario, reponerlo exige una transferencia on-chain de **~30+ minutos**, y durante esa espera el capital queda ocioso mientras las oportunidades —que viven milisegundos— se evaporan. La mayoría de los bots simplemente **se detienen**.
 
-Arus no se detiene: **razona**. Modela una línea de crédito instantánea (`$50 000 USD` + `1 BTC`, con comisión de originación `$25` y APR `10 %` prorrateado al plazo, vía `calculateCreditCost`) y decide de forma autónoma según un interruptor de negocio configurable:
+Arus no se detiene: **razona**. Modela una línea de crédito instantánea (`$50 000 USD` + `1 BTC`, con comisión de originación `$25` y APR `10 %` prorrateado al plazo, vía `calculateCreditCost`) y decide según la **inecuación de dominancia** con el apetito de riesgo del usuario:
 
-- **Préstamo automático ON:** si la **ganancia proyectada supera el costo del crédito** (originación + intereses), pide la línea al instante y sigue operando *mientras* se reequilibra el inventario en segundo plano; si **no** lo supera, pausa y reequilibra 50/50 — **nunca se endeuda a pérdida**.
-- **Préstamo automático OFF:** el bot cede la decisión al usuario con un diálogo informado: *pedir el préstamo* (habilitado **solo** si es rentable), *esperar el reequilibrio* (~1 min en demo, ~30+ min en producción, con cuenta regresiva) o *detener el bot*.
+```
+pedir préstamo ⇔ ganancia proyectada > costo del crédito × RiskMultiplier
+```
 
-El préstamo es **siempre temporal**: al vencer el plazo se devuelve y el inventario vuelve a 50/50 (ver [Robustez](#-robustez-y-gestión-de-riesgo-circuit-breakers)). En la práctica, esto convierte los minutos muertos de la competencia en **minutos productivos**, sin asumir nunca apalancamiento que erosione la ganancia.
+- **Préstamo automático ON:** si la desigualdad se cumple, pide la línea al instante y sigue operando *mientras* se reequilibra el inventario en segundo plano; si no, pausa y reequilibra 50/50 — **nunca se endeuda a pérdida** (el multiplicador nunca baja de 1).
+- **Préstamo automático OFF:** el bot cede la decisión al usuario con los números sobre la mesa: ganancia posible, costo del crédito, el umbral personal (costo × k) y el resultado neto.
+
+El préstamo es **siempre temporal**: al vencer el plazo se devuelve y el inventario del par vuelve a 50/50. Un préstamo activo **jamás se persiste como capital del usuario**: si el motor se reinicia a mitad de un crédito, la sesión reanuda con sus fondos propios, sin apalancamiento fantasma.
+
+---
+
+## 📡 El Radar Omnidireccional (grafo de liquidez)
+
+> El corazón de la Fase 2 — diseño completo en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
+
+El mercado se modela como un **grafo dirigido**:
+
+| Concepto | En el grafo |
+|---|---|
+| Un activo en un venue (`BTC@Binance`, `USD@Bitso`, `ETH@Binance`) | **Nodo** — con el saldo real del usuario superpuesto |
+| Comprar/vender en un libro de órdenes | **Arista de libro** (tasa = top-of-book real, fee = taker del usuario + slippage, liquidez = cantidad visible) |
+| USDT ≈ USD (supuesto declarado) | **Arista de paridad** a tasa 1 — visible y etiquetada, no escondida |
+| Mismo activo en dos exchanges pre-fondeados | **Arista de inventario** (compra y venta simultáneas; el traslado real se difiere al reequilibrio) |
+| Oportunidad de arbitraje | **Ciclo de peso negativo** con `w = −log(tasa × (1 − fee))` — detectado por Bellman-Ford |
+
+**Lo que hace hoy, con datos 100 % reales:**
+
+- **Topología desde datos:** los registros `Venues` e `Instruments` (venues.go) generan nodos y aristas; hoy: 5 nodos (USDT/BTC/ETH en Binance + USD/BTC en Bitso) y 12 aristas (8 de libro: el triángulo de Binance + el par de Bitso). Agregar un exchange o un par = entradas en el registro + adaptador de feed, **cero cambios en la lógica**.
+- **Actualización O(1) por tick** y detección cada ~1 s: la vista global usa fees de referencia; la del usuario (`FindBestCycleFor`) usa SUS fees y SU universo — dos usuarios ven ciclos distintos en el mismo mercado.
+- **Ejecución (autopiloto):** el ciclo se planifica en una función pura — rota a un inicio en efectivo, dimensiona contra saldo + tope del usuario + liquidez de **cada** pierna (mapeada a unidades de inicio) y exige que el neto supere el margen del usuario — y se ejecuta con **commit atómico**: re-verificación de fondos bajo lock (hard block) y Fill-or-Kill evaluado *antes* de tocar saldos (cero exposición direccional, sin necesidad de deshacer).
+- **Visualización:** el `GraphPanel` dibuja el grafo en vivo (SVG): saldos y precios por nodo, aristas etiquetadas, chip de feed congelado, y el ciclo detectado resaltado en verde con su narración ("+0.13 % neto por vuelta, hasta 0.4 BTC"). Cuando no hay ciclo, lo dice honestamente: *"mercado eficiente — los fees superan al spread"*.
+- **Honestidad del modelo:** el radar rara vez encuentra ciclos netos positivos en el mercado real — y eso es lo esperado. No maquilla: muestra el desglose de por qué cada ruta es (in)viable.
 
 ---
 
@@ -118,29 +179,29 @@ El préstamo es **siempre temporal**: al vencer el plazo se devuelve y el invent
 
 ```
 BenchmarkOpportunityDetection-12   ~50 ns/op   16 B/op   0 allocs/op
-(Intel i5-12450H · go test -bench · tracker del Spike Filter ya thread-safe)
+(Intel i5-12450H · go test -bench · tracker del Spike Filter thread-safe)
 ```
 
-≈ **20 millones de evaluaciones por segundo y por núcleo**, con **cero asignaciones** en el camino crítico. (El número anterior de ~21 ns/op correspondía al tracker sin sincronizar; el actual incluye el mutex que lo hace seguro entre el bucle de detección y el simulador — preferimos un número honesto a uno bonito.) Reproducible con:
+≈ **20 millones de evaluaciones por segundo y por núcleo**. (El número anterior de ~21 ns/op correspondía al tracker sin sincronizar; el actual incluye el mutex que lo hace seguro entre goroutines — preferimos un número honesto a uno bonito.) Reproducible con:
 
 ```bash
 cd apps/engine && go test -bench=Detection -benchmem -run=^$
 ```
 
-**Ingesta de datos — 100 % WebSocket nativo, sin polling.** El motor abre una conexión *push* directa a cada exchange y reacciona en el instante en que cambia el libro:
+**Ingesta de datos — 100 % WebSocket nativo, sin polling.** Cada venue tiene su `FeedAdapter`; Binance transporta sus **3 libros por un solo socket** de streams combinados:
 
 | Plano | Mecanismo | Endpoint / canal | Latencia |
 |---|---|---|---|
-| Exchanges → motor | **WebSocket nativo** | Binance `wss://stream.binance.com:9443/ws/btcusdt@bookTicker` · Bitso `wss://ws.bitso.com` (canal `orders`) | Tiempo de red — push en cada cambio del *top-of-book* |
-| Motor → navegador | **WebSocket** | `/ws` (gorilla) | Operaciones y alertas: **inmediatas**. Precio de mercado: coalescido a ~1/s para no saturar la UI |
+| Exchanges → motor | **WebSocket nativo** | Binance `wss://stream.binance.com:9443/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/ethbtc@bookTicker` · Bitso `wss://ws.bitso.com` (canal `orders`) | Push en cada cambio del *top-of-book* |
+| Motor → navegador | **WebSocket** | `/ws` (gorilla) | Operaciones y alertas: **inmediatas**. Precio y radar: coalescidos a ~1/s |
 
-> Cada cambio en el mejor bid/ask llega en cuanto ocurre, sin ningún intervalo de sondeo. Las conexiones se **reconectan solas** (espera de 3 s entre intentos, *read-deadline* de 70 s para detectar conexiones muertas) y **validan la coherencia del libro** —ambos lados positivos, no cruzado (`ask ≥ bid`) y spread interno < 5 %— *antes* de alimentar la detección, descartando ticks corruptos en el origen (`coherentBook` en `ws_real_market.go`).
+> Cada tick trae **precio, cantidad y timestamp**. Las conexiones se reconectan solas (3 s entre intentos, *read-deadline* de 70 s) y validan la coherencia del libro (`coherentBook`: lados positivos, no cruzado, spread interno < 5 %) *antes* de alimentar la detección.
 
 **Optimizaciones de tiempo real (verificables en el código):**
-- **Canal con búfer (1 000 eventos)** entre la ingesta y el procesamiento (`main.go`) → *zero-sampling-loss* en picos de volatilidad.
-- **Media móvil del Spike Filter O(1)** sobre ventana fija de 20 muestras (`SpreadTracker`): sin recorrer históricos en el *hot path*.
-- **Una goroutine por sesión** para la ejecución (`go e.executeForSession`), sin bloquear el bucle global de evaluación.
-- **Escritura del ledger "write-behind"** (asíncrona, `recordTradeAsync`): persistir en disco nunca frena la siguiente operación.
+- **Canal con búfer (1 000 eventos)** entre ingesta y procesamiento → *zero-sampling-loss* en picos de volatilidad.
+- **Media móvil del Spike Filter O(1)** sobre ventana fija de 20 muestras, protegida con mutex.
+- **Una goroutine por sesión** para la ejecución; un solo Bellman-Ford por barrido del radar (el snapshot por sesión solo superpone saldos).
+- **Todo lo que toca disco es *write-behind*** (ledger y fotografías de sesión): persistir nunca frena la siguiente operación.
 
 ---
 
@@ -148,21 +209,18 @@ cd apps/engine && go test -bench=Detection -benchmem -run=^$
 
 > **¿Consideras los fees, el slippage y el riesgo de ejecución antes de decidir? ¿Evitas operaciones rentables en bruto pero negativas en neto?**
 
-La decisión de ejecutar se toma sobre el **neto estricto**, nunca sobre el bruto:
+Una única fórmula gobierna TODAS las decisiones (detección de referencia, ejecución del par, ciclos del radar, simulador y benchmark) — `computeNetProfit` en engine.go, con tests que verifican equivalencia exacta con la forma institucional:
 
 ```
-Neto = (Spread × Volumen) − Fees(ambos exchanges) − Slippage estimado
+Neto = (P_venta × V × (1 − fee_venta)) − (P_compra × V × (1 + fee_compra)) − Slippage
 ```
 
-- **Fees por exchange, en las dos piernas:** taker de Binance `0.10 %` y de Bitso `0.65 %`. No se asumen "simétricos": la pierna de **compra** encarece el costo (`precio × volumen × (1 + fee)`) y la de **venta** reduce el ingreso (`precio × volumen × (1 − fee)`), tal como cobra cada exchange.
-- **Slippage estimado:** `5 bps por pierna` por defecto sobre el notional ejecutado (`estimateSlippage`), **configurable por el usuario** desde el panel de Estrategia. Modela que una orden de mercado no se llena íntegra en el *top-of-book*, sino que consume varios niveles y empeora el precio promedio. Se **descuenta antes de decidir** — incluso en la proyección que dispara la solicitud de préstamo.
-- **Volumen dimensionado contra liquidez real:** el motor lee la **cantidad** ofrecida en el top-of-book de ambos exchanges (no solo el precio) y ejecuta `min(tope del usuario, liquidez de ambas piernas)`. Si el mercado solo ofrece 0.003 BTC, no se pretende operar 0.005.
-- **Las dos direcciones, cada tick:** el motor calcula el neto de `Binance→Bitso` **y** de `Bitso→Binance` y solo opera la de mayor neto (`netProfit1` vs `netProfit2`), nunca la primera que aparece.
-- **Umbral de viabilidad:** una operación se ejecuta solo si su neto supera `$0.10`. Una divergencia con spread bruto de, p. ej., `$2.81` pero `$2.78` de fricciones se clasifica `[EN ESPERA] (Inviable)` y **se bloquea**, evitando el *fee bleeding*.
-- **Cálculo auditable, no caja negra:** cada evaluación se emite al feed en vivo con su **desglose completo** —`Bruto | Fees | Slippage | Neto`— de modo que el jurado (o cualquier usuario) ve *por qué* una oportunidad se ejecutó o se descartó, en el instante en que ocurre.
-- **P&L limpio:** la *Ganancia Neta* refleja **solo el resultado del trading**. La base de cálculo (`InitialWealth`) es un escalar en USD que se mueve junto con los depósitos/retiros, por lo que agregar o quitar capital **no distorsiona** el rendimiento mostrado (que el dashboard muestra con 4 decimales de precisión).
-
-¿Es buena idea ejecutar? La respuesta del motor es sí **únicamente** cuando `Neto > umbral`; y para apalancarse con crédito, solo cuando `Ganancia proyectada > Costo del crédito (intereses incluidos)`.
+- **Fees por exchange, en las dos piernas, personalizables:** la pierna de **compra** encarece el costo y la de **venta** reduce el ingreso, tal como cobra cada exchange. En ciclos de N piernas, cada una descuenta su fee.
+- **Slippage estimado:** `5 bps por pierna` por defecto, **configurable por el usuario**. Se descuenta antes de decidir — incluso en la proyección que dispara la solicitud de préstamo.
+- **Volumen dimensionado contra liquidez real:** `min(tope del usuario, cantidad del top-of-book en cada pierna)`. En ciclos, la restricción de cada pierna se mapea matemáticamente a unidades del nodo de inicio.
+- **Umbral de viabilidad personal:** cada usuario define su margen; el motor clasifica `[EN ESPERA] (Inviable)` todo lo que no lo supere, evitando el *fee bleeding*.
+- **Cálculo auditable, no caja negra:** cada evaluación se emite al feed con su desglose `Bruto | Fees | Slippage | Neto`; cada ciclo ejecutado registra su ruta completa en el ledger.
+- **P&L limpio:** la base (`InitialWealth`) se mueve junto con depósitos/retiros — agregar o quitar capital no distorsiona el rendimiento.
 
 ---
 
@@ -170,38 +228,29 @@ Neto = (Spread × Volumen) − Fees(ambos exchanges) − Slippage estimado
 
 > **¿Cómo manejas baja liquidez, órdenes parciales y movimientos bruscos? ¿Hay circuit breaker?**
 
-- **Detección de feed congelado (staleness):** si un exchange lleva **>10 s** sin publicar, su último precio se considera **dato muerto** y la evaluación se pausa (`[FEED CONGELADO]`) — comparar un libro viejo contra uno fresco produciría spreads fantasma. El motor prefiere no operar a operar contra precios muertos.
-- **Spike Filter (circuit breaker de precio):** un tick cuya variación supere el **5 %** respecto al anterior se descarta como dato corrupto. Además, se mide el spread contra su **media móvil**:
-  - factor **> 15×** → `[SPIKE ALERTA]` (evento extremo, se opera con aviso).
-  - factor **> 50×** → `[SPIKE BLOQUEADO]` (probable error de API / flash crash → **se rechaza** para proteger el capital y evitar exchanges insolventes).
-- **Doble compuerta de cordura de precio:** más allá del factor contra la media móvil, antes de ejecutar el motor descarta cualquier par de precios cuya divergencia entre exchanges supere el **20 %** (`bitAsk > binAsk*1.20`). Es la segunda barrera: si el feed de un exchange se rompe por completo, la operación se aborta **antes** de tocar las wallets, no después.
-- **Baja liquidez y órdenes parciales:** la liquidez disponible se consume en **chunks** pequeños; antes de *cada* chunk se valida el saldo real (*hard block*), de modo que el motor nunca ejecuta lo que no puede fondear. Si el inventario se agota a mitad de una oportunidad, entra la lógica de crédito/reequilibrio.
-- **Validación de fondos en profundidad (doble *hard block*):** el saldo se comprueba al evaluar la oportunidad y **otra vez** justo antes de mover las wallets (`sessionHasFundsForTrade`). Si en ese microinstante el inventario ya no alcanza, la operación se marca `[BLOQUEADO]` y se deriva a la lógica de crédito/reequilibrio — el motor jamás permite un saldo negativo.
-- **Ritmo de ejecución (anti-*overtrading*):** un *cooldown* de **3 s** entre operaciones por sesión evita martillar el mismo spread persistente y vaciar el inventario en una ráfaga sobre una señal que quizá ya caducó.
-- **Protección contra apalancamiento perdedor:** no se pide ningún préstamo cuyo costo (intereses incluidos) supere la ganancia esperada.
-- **Recuperación tras agotar el crédito:** si el bot consume los fondos prestados, entra en estado `[CRÉDITO AGOTADO]` y **pausa** hasta que vence el plazo; entonces devuelve el préstamo y reequilibra el inventario 50/50 (`rebalanceWallets50_50`). El apalancamiento es siempre temporal y se cierra solo, nunca queda abierto indefinidamente.
-- **Concurrencia segura:** estado por sesión protegido con mutex; correcciones de punto flotante (`clampWallet`) para evitar saldos negativos espurios por *dust* de redondeo.
+- **Detección de feed congelado (staleness):** si un libro lleva **>10 s** sin publicar, es **dato muerto**: la evaluación del par se pausa (`[FEED CONGELADO]`) y sus aristas salen de la búsqueda de ciclos. El motor prefiere no operar a operar contra precios fantasma.
+- **Spike Filter (circuit breaker de precio), POR LIBRO:** un tick cuya variación supere el **5 %** respecto al anterior se descarta como corrupto. Además, el spread se mide contra su media móvil: factor **>15×** → `[SPIKE ALERTA]` (opera con aviso); **>50×** → `[SPIKE BLOQUEADO]` (probable error de API → se rechaza).
+- **Doble compuerta de cordura:** divergencia entre exchanges >20 % → se aborta antes de tocar saldos.
+- **Fill-or-Kill atómico (5 % simulado):** tanto en el par como en cada ciclo, el fallo de orden se evalúa **antes** de mover saldos — abortar es atómico, cero exposición direccional, y la sesión pausa 2 s para no martillar un libro roto.
+- **Doble *hard block* de fondos:** el saldo se valida al planificar y **otra vez** bajo el lock justo antes del commit; si el mundo cambió en ese microinstante, la operación se rechaza. El motor jamás permite saldos negativos (clamp de *dust* de redondeo en `Balances.Add`).
+- **Ritmo anti-*overtrading*:** cooldown de **3 s** por sesión + flag `IsExecuting` que serializa (cierra la ventana TOCTOU de doble ejecución en el mismo tick).
+- **Apalancamiento disciplinado:** nunca se pide un préstamo que no cubra `costo × RiskMultiplier`; el crédito agotado pausa hasta el vencimiento y se devuelve solo.
+- **Validación de entradas SIEMPRE en backend:** capital inicial, inyecciones del simulador, parámetros de estrategia y universo — todo se sanea contra NaN/Inf, rangos y registros conocidos, aunque el frontend ya valide.
 
 ---
 
-## 💾 Persistencia de datos (sesiones completas + Trade Ledger)
+## 💾 Persistencia y continuidad (sesiones completas + Trade Ledger)
 
 Arus persiste en SQLite **la sesión completa de cada usuario**, no solo sus trades: el demo dejó de ser volátil.
 
-- **Continuidad real:** saldos, parámetros de estrategia, base del PnL y preferencias sobreviven a reinicios del motor **y** del navegador. El token de sesión (UUID v4 no enumerable) vive en `localStorage`: al volver, la acción `resume_session` recupera todo — sin login, sin fricción.
-- **Esquema multi-activo por diseño:** la tabla `balances` es `(session_id, venue, asset, amount)` — cuando lleguen las wallets multi-activo (ETH y más), los datos ya estarán en la forma correcta, sin migración.
-- **Patrón repositorio:** el motor habla con la interfaz `SessionStore`, no con SQLite. Migrar a Postgres (si algún día hay múltiples instancias o cuentas reales) es escribir otro driver, cero cambios de lógica.
-- **Reconexión sin pérdidas:** un parpadeo de red ya no reinicia el progreso — el cliente reanuda la sesión persistida en lugar de re-inicializarla. Si otra pestaña reclama el mismo token, la vieja se desconecta limpiamente (takeover).
-- **Sin préstamos fantasma:** la fotografía persiste solo los fondos PROPIOS; un crédito activo no sobrevive a un reinicio como si fuera capital del usuario.
-- **Write-behind siempre:** persistir jamás frena el trading (mismo patrón que el ledger); si el disco falla, el motor sigue operando en memoria.
+- **Continuidad real:** saldos **multi-activo**, parámetros de estrategia (incluidos universo y autopiloto), base del PnL y preferencias sobreviven a reinicios del motor **y** del navegador. El token de sesión (UUID v4 no enumerable) vive en `localStorage`: al volver, `resume_session` recupera todo — sin login, sin fricción. Verificado E2E: *kill* del motor → restart → resume → saldos al centavo.
+- **Esquema multi-activo end-to-end:** la tabla `balances` es `(session_id, venue, asset, amount)` y el tipo en memoria (`Balances`) tiene la misma forma — el ETH que deja un ciclo triangular se persiste y restaura igual que el BTC.
+- **Patrón repositorio:** el motor habla con la interfaz `SessionStore`, no con SQLite. Migrar a Postgres (si algún día hay múltiples instancias del motor o cuentas con login) es escribir otro driver, cero cambios de lógica.
+- **Reconexión sin pérdidas:** un parpadeo de red reanuda la sesión persistida (antes ¡re-inicializaba y borraba el progreso!). Si otra pestaña reclama el mismo token, la vieja se desconecta limpiamente (takeover identity-aware en el Hub).
+- **Sin préstamos fantasma:** la fotografía persiste solo fondos PROPIOS (préstamo activo excluido).
+- **Write-behind siempre:** cada mutación de saldos dispara la fotografía asíncrona (el punto de paso es `sendWalletUpdate`); si el disco falla, el motor sigue operando en memoria.
 
-Además, el **Trade Ledger** sigue siendo el registro de auditoría **inmutable** de cada operación:
-
-- **Motor de almacenamiento:** **SQLite** vía `modernc.org/sqlite` — **Go puro, sin CGO**, por lo que el despliegue no requiere contenedores ni toolchain de C. La base vive en `apps/engine/data/ledger.db` (modo WAL).
-- **Escritura asíncrona (write-behind):** tras emitir cada operación por WebSocket, una goroutine inserta el `TradeRecord` sin bloquear la ejecución del siguiente chunk.
-- **Qué se audita:** id, sesión, timestamp, exchanges de compra/venta, volumen, spread, neto y un flag `is_credit_injection` (distingue trades reales de préstamos/reequilibrios).
-- **Endpoint de consulta:** `GET /api/ledger` devuelve los últimos 100 registros en JSON.
-- **Verificado:** los registros **sobreviven al reinicio del motor y del navegador**. El dashboard los muestra en el panel *Historial / Auditoría*.
+El **Trade Ledger** sigue siendo el registro de auditoría **inmutable**: cada operación (del par o ciclo completo con su ruta) con timestamp, volumen, neto y flag de préstamo/reequilibrio. `GET /api/ledger?session_id=<uuid>` devuelve los últimos 100 registros de TU sesión (privacidad por sesión; sin el parámetro responde `[]`).
 
 ---
 
@@ -209,127 +258,126 @@ Además, el **Trade Ledger** sigue siendo el registro de auditoría **inmutable*
 
 > **¿El sistema está bien estructurado, es mantenible y escalable? ¿El código es legible y sigue buenas prácticas?**
 
-El motor sigue una **separación de responsabilidades por archivo** (cada uno hace una cosa) y un **pipeline orientado a eventos**: las goroutines de ingesta empujan a un canal con búfer, un único bucle de detección evalúa cada tick, y la ejecución se reparte por sesión. Nada de lógica de negocio mezclada con transporte ni con persistencia.
+Separación de responsabilidades por archivo y **pipeline orientado a eventos**: adaptadores de ingesta → canal con búfer → bucle de detección (par + radar) → ejecución por sesión → persistencia write-behind.
 
 ```mermaid
 flowchart LR
     subgraph EXT["Mercados externos"]
-        BIN["Binance<br/>WebSocket bookTicker"]
-        BIT["Bitso<br/>WebSocket orders"]
+        BIN["Binance · 3 libros<br/>streams combinados"]
+        BIT["Bitso · 1 libro<br/>canal orders"]
     end
 
-    subgraph ENGINE["Motor HFT · Go"]
-        WS["Ingesta WebSocket<br/>(ws_real_market.go)<br/>reconexión + validación de libro"]
+    subgraph ENGINE["Motor · Go"]
+        WS["FeedAdapters<br/>(reconexión + coherentBook<br/>precio + cantidad + timestamp)"]
         CH["Canal con búfer<br/>1000 eventos"]
-        EVAL["Evaluación O(1)<br/>spread · Spike Filter<br/>fees · slippage · neto"]
-        EXEC["Ejecución por sesión<br/>(goroutine + mutex)"]
-        LEDGER[("SQLite<br/>ledger.db")]
+        EVAL["Detección del PAR<br/>O(1) · Spike Filter · staleness"]
+        GRAPH["RADAR: grafo de liquidez<br/>Bellman-Ford ~1/s<br/>global + por usuario (fees/universo)"]
+        EXEC["Ejecutores por sesión<br/>clásico (par) ⊕ autopiloto (ciclos)"]
+        DB[("SQLite · WAL<br/>sessions + balances + ledger")]
     end
 
     subgraph WEB["Dashboard · Next.js"]
-        UI["UI tiempo real<br/>P&L · feed · wallets"]
-        AUDIT["Panel Auditoría"]
+        UI["P&L · wallets · feed"]
+        RADAR["GraphPanel (radar SVG)"]
+        STRAT["StrategyPanel<br/>(params + universo + autopiloto)"]
+        AUDIT["Historial / Auditoría"]
     end
 
     BIN & BIT -->|WebSocket push| WS --> CH --> EVAL --> EXEC
-    EXEC -->|WebSocket push| UI
-    EXEC -.->|write-behind async| LEDGER
-    AUDIT -->|GET /api/ledger| LEDGER
+    CH --> GRAPH --> EXEC
+    EXEC -->|WebSocket push| UI & RADAR
+    STRAT -->|set_params| ENGINE
+    EXEC -.->|write-behind| DB
+    AUDIT -->|GET /api/ledger?session_id| DB
 ```
 
 **¿Por qué este stack?**
 
 | Capa | Tecnología | Justificación |
 |---|---|---|
-| Motor | **Go 1.26** | Concurrencia nativa (goroutines + channels) ideal para un bucle de eventos sin bloqueos; binarios estáticos triviales de desplegar. |
-| Comunicación | **WebSocket** (`gorilla/websocket`) | Tiempo real en ambos extremos: ingesta de precios de los exchanges (Binance/Bitso) y push al navegador, sin polling. |
-| Persistencia | **SQLite** (`modernc.org/sqlite`) | Driver **CGO-free**: persistencia real sin Postgres ni contenedores, despliegue de un solo binario. |
-| Frontend | **Next.js 16 / React 19** | App Router, renderizado del lado del servidor y DX moderna. |
-| Estilos | **Tailwind CSS 4** + `lucide-react` | UI consistente, responsive y con modo oscuro. |
-| Tipado | **TypeScript** | Contratos de datos seguros entre motor y UI. |
+| Motor | **Go 1.26** | Concurrencia nativa (goroutines + channels) para un bucle de eventos sin bloqueos; binarios estáticos triviales de desplegar. |
+| Comunicación | **WebSocket** (`gorilla/websocket`) | Tiempo real en ambos extremos, sin polling. |
+| Persistencia | **SQLite** (`modernc.org/sqlite`) | Driver **CGO-free**: sesiones completas + ledger sin Postgres ni contenedores; detrás de la interfaz `SessionStore` para migrar sin reescribir. |
+| Frontend | **Next.js 16 / React 19** | App Router, SSR y DX moderna. |
+| Estilos | **Tailwind CSS 4** + `lucide-react` | UI consistente, responsive, modo oscuro. |
+| Tipado | **TypeScript** | Contratos motor↔UI espejados (interfaces de `useArusEngine.ts`). |
+| CI | **GitHub Actions** | `go vet` + `go test -race` + builds en cada push (el `-race` no corre en la máquina de desarrollo). |
 
 **Organización del repositorio:**
 
 ```
 Arus/
+├─ .github/workflows/ci.yml   # CI: vet + test -race + build (motor y web)
 ├─ apps/
-│  ├─ engine/                 # Motor HFT en Go — capas separadas por archivo
-│  │  ├─ main.go              # Composition root: crea el canal, el Hub y el motor, cablea rutas /ws y /api/ledger, lee PORT y arranca las goroutines
-│  │  ├─ engine.go            # DOMINIO: fórmula única computeNetProfit, bucle de detección (Start), ejecución por sesión, Spike Filter, staleness y lógica de crédito/reequilibrio
-│  │  ├─ venues.go            # REGISTRO: exchanges e INSTRUMENTOS como DATOS (N libros por venue, paridades declaradas) — agregar venue/par no toca la lógica
-│  │  ├─ feed.go              # CONTRATO DE INGESTA: interface FeedAdapter (1 adaptador por exchange, ticks normalizados)
-│  │  ├─ ws_real_market.go    # ADAPTADORES: implementaciones Binance/Bitso (reconexión, coherentBook, precio+cantidad+timestamp)
-│  │  ├─ server.go            # TRANSPORTE: upgrade WS, init de sesión, set_params con clamps, router de acciones y handler HTTP del ledger (CORS)
-│  │  ├─ ledger.go            # PERSISTENCIA: esquema SQLite del ledger, write-behind (recordTradeAsync) y consulta por sesión
-│  │  ├─ store.go             # PERSISTENCIA: sesiones completas (interfaz SessionStore + SQLite) — saldos multi-activo, estrategia, PnL, resume
-│  │  ├─ models.go            # CONTRATOS y ESTADO: TradingParameters (editable en vivo, snapshot atómico), wire types, ClientSession, Hub y constantes
-│  │  ├─ graph.go             # FASE 2 · RADAR: grafo de liquidez en vivo (nodos activo@venue, aristas con pesos -log, Bellman-Ford, snapshot por sesión)
-│  │  ├─ cycle.go             # FASE 2 · EJECUTOR: autopiloto del radar — planificación pura de ciclos + commit atómico multi-activo
-│  │  ├─ engine_test.go       # Tests unitarios: fórmula institucional, clamps, crédito, sizing, concurrencia del tracker
-│  │  └─ engine_bench_test.go # Benchmark de latencia del núcleo de detección
-│  └─ web/                    # Dashboard en Next.js
-│     └─ src/
-│        ├─ app/              # page.tsx (dashboard, presentacional) + layout
-│        ├─ components/       # OnboardingModal · TutorialModal · LedgerPanel · StrategyPanel · GraphPanel (radar)
-│        │                    #   (StrategyGuide/Funds/InsufficientFunds Modals viven en page.tsx)
-│        ├─ hooks/            # useArusEngine: única fuente de verdad (dueño del WebSocket + reducer de eventos → estado)
-│        └─ lib/              # config.ts (endpoints del motor por variable de entorno)
-├─ docs/
-│  └─ FASE2-GRAFO.md          # Diseño del motor omnidireccional (ciclos negativos sobre grafo de liquidez)
+│  ├─ engine/                 # Motor en Go — capas separadas por archivo
+│  │  ├─ main.go              # Composition root: canal, Hub, motor+grafo, rutas /ws y /api/ledger
+│  │  ├─ venues.go            # REGISTRO (datos): Venues, Instruments (N libros/venue), parityPairs, catálogos
+│  │  ├─ feed.go              # CONTRATO de ingesta: interface FeedAdapter
+│  │  ├─ ws_real_market.go    # ADAPTADORES: Binance (streams combinados) y Bitso; LiveMarket por instrumento
+│  │  ├─ engine.go            # DOMINIO: computeNetProfit, bucle Start (par + emisión radar), ejecutor clásico, crédito/reequilibrio
+│  │  ├─ graph.go             # RADAR: LiquidityGraph, Bellman-Ford (global y por usuario), snapshot para la UI
+│  │  ├─ cycle.go             # EJECUTOR omnidireccional: planCycle (puro) + commitCycle (atómico) + autopiloto
+│  │  ├─ server.go            # TRANSPORTE: wsHandler (init/resume/set_params/…), sanitizadores, ledger HTTP
+│  │  ├─ store.go             # PERSISTENCIA de sesiones: interfaz SessionStore + SQLite (sessions/balances)
+│  │  ├─ ledger.go            # PERSISTENCIA del ledger: esquema, write-behind, consulta por sesión
+│  │  ├─ models.go            # ESTADO y WIRE: Balances multi-activo, TradingParameters, ClientSession, Hub, eventos
+│  │  └─ *_test.go            # 40+ tests: fórmula, grafo, ciclos, store, clamps, concurrencia + benchmark
+│  └─ web/src/
+│     ├─ app/page.tsx         # Dashboard (presentacional) + modales de crédito/fondos/guía
+│     ├─ components/          # GraphPanel (radar SVG) · StrategyPanel (params+universo+autopiloto)
+│     │                       #   · LedgerPanel · OnboardingModal · TutorialModal
+│     ├─ hooks/useArusEngine.ts  # Única fuente de verdad: WebSocket + resume + reducer de eventos
+│     └─ lib/config.ts        # Endpoints del motor por variable de entorno
+├─ docs/FASE2-GRAFO.md        # Diseño del motor omnidireccional + estado por hitos
 └─ README.md
 ```
 
-**Principios de diseño y convenciones que seguimos:**
+**Principios de diseño y convenciones:**
 
-- **Separación por capas, no por conveniencia.** El dominio (`engine.go`) no sabe nada de HTTP; el transporte (`server.go`, `ws_real_market.go`) no toma decisiones de negocio; la persistencia (`ledger.go`) es auxiliar y su fallo **nunca** detiene el trading. Los tipos de wire y el estado viven aislados en `models.go`, de modo que el contrato motor↔UI es un único punto de verdad.
-- **Multi-tenant desde el diseño.** Un `Hub` (protegido por `RWMutex`) mantiene una `ClientSession` por navegador, cada una con sus propias wallets y estado de crédito. El bucle de detección evalúa el mercado **una sola vez por tick** y luego ejecuta **por sesión** en goroutines independientes — el costo de detección no escala con el número de clientes.
-- **Disciplina de concurrencia explícita.** Estado de sesión bajo `session.Mu`, escrituras al socket serializadas con `ConnMu` (evita el *interleaving* que corrompe frames de Gorilla), y persistencia *write-behind* para no bloquear el *hot path*.
-- **Contratos tipados de extremo a extremo.** Las acciones entrantes (`ClientMessage`) y los eventos salientes (`ServerEvent`/`LogEvent`) están tipados en Go y reflejados en las `interface`s de TypeScript (`EngineState`, `Trade`, `LogEntry`), de modo que un cambio en el protocolo se nota en compilación, no en runtime.
-- **Frontend con una única fuente de verdad.** Todo el estado vive en el hook `useArusEngine`: es dueño del ciclo de vida del WebSocket (con **reconexión automática a 3 s**) y despacha cada evento del servidor a un *patch* inmutable de estado, al estilo *reducer*. `page.tsx` y los modales son puramente presentacionales.
-- **Comentarios que explican el *por qué*, no el *qué*.** Las funciones y tipos exportados llevan doc-comments en español que documentan decisiones y *gotchas* reales —por ejemplo, por qué se declaran los 4 campos del `bookTicker` de Binance (el matching JSON de Go es *case-insensitive* y las cantidades sobreescribían los precios), o por qué SQLite se limita a `SetMaxOpenConns(1)` con `busy_timeout`.
-- **Observabilidad por convención de *tags*.** Cada evento relevante se registra con una etiqueta consistente (`[OPORTUNIDAD]`, `[ARBITRAJE]`, `[SPIKE BLOQUEADO]`, `[CRÉDITO ACTIVADO]`…) que `getLevel()` traduce a niveles de color para el feed de la UI — los mismos logs sirven para depurar en consola y para narrar al usuario lo que ocurre.
+- **Separación por capas, no por conveniencia.** El dominio no sabe de HTTP; el transporte no toma decisiones de negocio; la persistencia es auxiliar y su fallo **nunca** detiene el trading.
+- **Los mercados son datos.** Exchanges, instrumentos y paridades viven en registros (`venues.go`); agregar un venue/par no toca la lógica — el grafo, los feeds y las wallets se adaptan solos.
+- **Multi-tenant desde el diseño.** El bucle de detección evalúa el mercado una vez por tick; la ejecución es por sesión en goroutines independientes, cada una con sus `Balances` y su estrategia.
+- **Disciplina de concurrencia explícita.** Estado de sesión bajo `session.Mu`; sockets serializados con `ConnMu`; parámetros como snapshot atómico (`atomic.Pointer` — lectores sin lock, sin estados a medias); grafo bajo su propio mutex; verificado con `-race` en CI.
+- **Funciones puras donde importa.** `computeNetProfit`, `planCycle`, `sanitizeTradingParams`, `findNegativeCycle` — la matemática financiera es testeable sin red, sin reloj y sin aleatoriedad.
+- **Contratos tipados de extremo a extremo** y **comentarios que explican el porqué** (gotchas reales documentados en el código: el JSON case-insensitive de Binance, el `SetMaxOpenConns(1)` de SQLite, el happens-before de los params).
+- **Observabilidad por tags:** `[OPORTUNIDAD]`, `[ARBITRAJE]`, `[RADAR]`, `[CICLO EJECUTADO]`, `[SPIKE BLOQUEADO]`, `[FEED CONGELADO]`, `[CRÉDITO ACTIVADO]`… — los mismos logs narran al usuario y sirven para depurar.
 
 ---
 
 ## 🖥️ Interfaz y experiencia de usuario
 
-Web app accesible desde el navegador, pensada para que **cualquiera** entienda lo que ocurre (textos en lenguaje claro, no solo para expertos):
+Web app pensada para que **cualquiera** entienda lo que ocurre (lenguaje claro, no solo para expertos):
 
-- **P&L acumulado en tiempo real:** dinero total, ganancia neta y rendimiento (%).
-- **Estado del mercado en vivo:** precios de Binance/Bitso y spread, con indicador de *ping*.
-- **Feed de operaciones ejecutadas:** ruta (compra → venta), volumen y ganancia neta de cada trade.
-- **Salud de inventario por exchange** y distribución del capital (USD/BTC).
-- **Editar fondos (depósito / retiro):** botón en cada exchange para agregar o retirar USD o BTC. El ajuste mueve la base del PnL por igual, de modo que **un depósito/retiro nunca se cuenta como ganancia ni pérdida**.
-- **Tutorial guiado (8 pasos):** en el primer ingreso (y desde el botón «Tutorial») un recorrido en **lenguaje sencillo** —sin jerga— que señala con un chip *📍 dónde está* cada elemento (saldos, «Editar fondos», «Probar el bot», feed, auditoría). Se recuerda en `localStorage` para no repetirse.
-- **Guía de estrategia (botón «?»):** explica el arbitraje con un **ejemplo visual** (comprar barato en una casa, vender caro en la otra *al mismo tiempo*) y desglosa las **3 condiciones de rentabilidad** (spread real · superar comisiones · liquidez en ambas casas), además de la *ventaja del bot* (crédito instantáneo vs. los ~30 min de un traslado on-chain, y el filtro anti–precio-falso).
-- **Configuración inicial guiada:** al entrar, un modal pide el capital de arranque (mín. `$1 000` y `0.1 BTC`) y muestra en vivo cómo se repartirá 50/50 entre Binance y Bitso antes de confirmar.
-- **📡 Radar Omnidireccional (Fase 2):** el grafo de liquidez en vivo — tus monedas en cada exchange (saldo + valor), por dónde puede fluir el dinero (5 nodos y 8 libros reales: el triángulo BTC/USDT · ETH/USDT · ETH/BTC de Binance más BTC/USD de Bitso, paridad USDT≈USD declarada e inventario pre-fondeado) y el ciclo rentable —espacial o triangular— que el motor detecta automáticamente cada segundo (Bellman-Ford sobre pesos `−log(tasa·(1−fee))`), resaltado en verde cuando existe.
-- **Panel de Estrategia (personalización en vivo):** margen mínimo de ganancia, orden máxima, slippage estimado, comisiones por exchange y multiplicador de riesgo del crédito — cada usuario define sus reglas y el bot decide con ellas al instante.
-- **Panel de Historial / Auditoría:** lee el ledger persistido de TU sesión (`/api/ledger?session_id=`).
-- **Modo de pruebas (Simulador):** inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver al Spike Filter y a la lógica de crédito en acción — sin dinero real.
-- **Decisión asistida al quedarse sin fondos:** un diálogo ofrece *pedir préstamo* (solo si es rentable), *esperar el reequilibrio* (1 min en demo, ~30+ min en producción, con cuenta regresiva) o *detener el bot*.
-- **Modo oscuro, diseño responsive** y banner de préstamo activo con cuenta regresiva.
+- **📡 Radar Omnidireccional:** el grafo de liquidez en vivo — tus monedas en cada exchange (saldo real + valor + precio), por dónde puede fluir el dinero, y el ciclo rentable detectado resaltado en verde con su narración. Los supuestos del modelo (paridad USDT≈USD, inventario pre-fondeado) se declaran en pantalla.
+- **Panel de Estrategia:** margen mínimo, orden máxima, slippage, comisiones por exchange, multiplicador de riesgo, **tu universo** (chips de exchanges/monedas) y el **toggle del autopiloto**. Lo que ves tras aplicar es lo que el backend realmente dejó vigente.
+- **Continuidad sin fricción:** al volver, "Recuperando tu sesión…" y tus fondos/estrategia/historial aparecen solos (token en `localStorage`; botón de escape para empezar de cero).
+- **P&L acumulado en tiempo real**, precios en vivo con ping, feed de operaciones (ruta compra→venta o ciclo completo), salud de inventario por exchange y distribución del capital.
+- **Editar fondos** (depósito/retiro que no distorsiona el PnL), **tutorial guiado de 8 pasos**, **guía de estrategia** con ejemplo visual, **configuración inicial guiada**.
+- **Panel de Historial / Auditoría:** el ledger persistido de TU sesión.
+- **Modo de pruebas (Simulador):** inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver el Spike Filter y la lógica de crédito en acción.
+- **Decisión asistida sin fondos:** diálogo con ganancia posible, costo del crédito y tu umbral de riesgo (costo × k).
+- **Modo oscuro, responsive**, banners de crédito/reequilibrio con cuenta regresiva.
 
 ---
 
 ## 🚀 Instalación y ejecución local
 
-> Objetivo: sistema funcional en **menos de 2 minutos**. No se requiere Docker ni base de datos externa — la persistencia es SQLite embebido.
+> Objetivo: sistema funcional en **menos de 2 minutos**. Sin Docker ni base de datos externa — SQLite embebido se auto-crea al arrancar.
 
 ### Prerrequisitos
 
 | Software | Versión | Verificar |
 |---|---|---|
 | **Go** | 1.26+ | `go version` |
-| **Node.js** | 18+ (probado en 24) | `node -v` |
+| **Node.js** | 18+ (WebSocket global para smokes: 21+) | `node -v` |
 | **npm** | 9+ | `npm -v` |
 
-### 1) Motor HFT (backend en Go)
+### 1) Motor (backend en Go)
 
 ```bash
 cd apps/engine
 go run .
-# Servidor en :8080 — crea automáticamente data/ledger.db
+# Servidor en :8080 — crea data/ledger.db con las tablas de sesiones y ledger
 ```
 
 ### 2) Dashboard (frontend en Next.js)
@@ -341,79 +389,93 @@ npm run dev
 # Abre http://localhost:3000
 ```
 
-### 3) Probar la persistencia (opcional)
+### 3) Probar la continuidad (opcional)
 
-1. En la UI, abre **Probar el bot → Oportunidad normal** para generar trades.
-2. Despliega el panel **Historial / Auditoría**.
-3. Reinicia el motor (`Ctrl+C` y `go run .` de nuevo) y vuelve a abrir el panel: **los registros siguen ahí**.
+1. Configura capital, cambia la estrategia y genera trades (**Probar el bot**).
+2. Mata el motor (`Ctrl+C`), reinícialo (`go run .`) y recarga el navegador: **"Recuperando tu sesión…" → todo sigue ahí** (saldos, estrategia, historial).
 
-### Reproducir el benchmark de latencia
+### Tests y benchmark
 
 ```bash
-cd apps/engine && go test -bench=Detection -benchmem -run=^$
+cd apps/engine
+go test ./...                                  # 40+ tests unitarios
+go test -bench=Detection -benchmem -run=^$     # benchmark del hot path
+# go test -race corre en el CI (requiere gcc de 64 bits, ausente en la máquina de desarrollo)
 ```
 
 ---
 
 ## ☁️ Despliegue
 
-Arquitectura de dos servicios, ambos en tiers gratuitos:
+Arquitectura de dos servicios, ambos en tiers gratuitos (la infraestructura del proyecto es **Fly.io + Vercel** — decisión fija):
 
 | Componente | Plataforma | Por qué |
 |---|---|---|
-| **Frontend** (Next.js) | **Vercel** | Soporte nativo de Next.js, CI/CD desde Git, HTTPS automático, free tier amplio. |
-| **Motor** (Go + SQLite) | **Fly.io** | Proceso de larga vida ideal para WebSocket, dominio `*.fly.dev` con TLS (habilita `wss://` y `https://`) y **volumen persistente** para conservar `ledger.db`. |
+| **Frontend** (Next.js) | **Vercel** | Soporte nativo de Next.js, CI/CD desde Git, HTTPS automático. |
+| **Motor** (Go + SQLite) | **Fly.io** | Proceso de larga vida ideal para WebSocket, TLS (`wss://`) y **volumen persistente** para `data/` (sesiones + ledger sobreviven deploys). |
 
-> ⚠️ Para que SQLite persista entre reinicios en la nube hay que montar un **volumen** en la ruta `data/` del motor. Por eso se usa Fly.io (con volumen) y no Render free / Cloud Run, que no ofrecen disco persistente gratuito.
-
-El motor se despliega con contenedor: un `Dockerfile` multi-etapa compila un binario **estático** (`CGO_ENABLED=0`, gracias al SQLite en Go puro) y lo coloca sobre una imagen `distroless/static` de ~5 MB. La configuración vive en [`apps/engine/fly.toml`](apps/engine/fly.toml) (puerto interno, `force_https`, máquina siempre encendida y el volumen montado en `/app/data`).
+El motor se despliega con un `Dockerfile` multi-etapa que compila un binario **estático** (`CGO_ENABLED=0`, gracias al SQLite en Go puro) sobre `distroless/static` (~5 MB). Config en [`apps/engine/fly.toml`](apps/engine/fly.toml). El esquema de base de datos **se auto-crea/migra al arrancar** — no hay pasos manuales de migración.
 
 ### 1) Motor en Fly.io
 
 ```bash
-# Instalar la CLI (Windows PowerShell):  iwr https://fly.io/install.ps1 -useb | iex
 flyctl auth login
 cd apps/engine
 flyctl apps create arus-engine                              # nombre único global
-flyctl volumes create arus_data --size 1 --region dfw --yes # volumen del ledger
-flyctl deploy                                               # build Docker + arranque
+flyctl volumes create arus_data --size 1 --region dfw --yes # volumen de data/
+flyctl deploy
 ```
 
-Verifica que está vivo abriendo `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`.
+Verifica: `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`.
 
 ### 2) Frontend en Vercel
 
-1. *Add New → Project* → importar el repo de GitHub.
-2. **Root Directory → `apps/web`** (paso crítico por ser monorepo).
-3. *Environment Variables* (ver [`apps/web/.env.example`](apps/web/.env.example)), apuntando al dominio del motor:
+1. *Add New → Project* → importar el repo. **Root Directory → `apps/web`** (crítico: monorepo).
+2. Variables de entorno (ver [`apps/web/.env.example`](apps/web/.env.example)):
    ```
    NEXT_PUBLIC_ENGINE_WS_URL=wss://arus-engine.fly.dev/ws
    NEXT_PUBLIC_ENGINE_HTTP_URL=https://arus-engine.fly.dev
    ```
-4. **Deploy**. Al abrir la URL de Vercel, el dashboard se conecta al motor por `wss://` y lee el ledger por `https://`.
+3. **Deploy**.
+
+> ⚠️ **Pendiente de esta rama:** el deploy actual corre `main`. Al desplegar esta rama, validar end-to-end en producción: panel de estrategia, radar, autopiloto y `resume_session` (el volumen conserva la base; el esquema nuevo se crea solo).
 
 ---
 
-## 🗺️ Roadmap
+## 🧭 Qué sigue — plan de evolución
 
-- [x] ~~Migrar la ingesta de precios a WebSockets nativos~~ — **hecho**: streams `bookTicker` (Binance) y `orders` (Bitso) por WebSocket, con reconexión y validación de libro.
-- [x] ~~Parámetros de estrategia personalizables por el usuario~~ — **hecho**: panel de Estrategia con margen mínimo, orden máxima, slippage, fees y multiplicador de riesgo, editables en vivo con validación de backend.
-- [x] ~~Ledger por sesión~~ — **hecho**: `/api/ledger?session_id=` con UUID no enumerable; el panel de auditoría consulta solo sus propias operaciones.
-- [x] ~~Suite de tests unitarios además del benchmark de latencia~~ — **hecho**: fórmula institucional, clamps, crédito, dimensionado y concurrencia (`go test ./...`).
-- [x] ~~Dimensionado de órdenes contra liquidez real~~ — **hecho**: el volumen ejecutado es `min(tope del usuario, cantidad del top-of-book de ambas piernas)`.
-- [x] ~~Fase 2 · hito 1 — Radar Omnidireccional~~ — **hecho**: grafo de liquidez en vivo con detección automática de ciclos negativos (Bellman-Ford) y visualización por sesión (`GraphPanel`). Diseño completo en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
-- [x] ~~Fase 2 · hito 2 — radar triangular multi-instrumento~~ — **hecho**: instrumentos como datos (N libros por venue), Binance emite el triángulo BTC/USDT · ETH/USDT · ETH/BTC por un solo socket de streams combinados, y el mismo Bellman-Ford detecta ciclos espaciales **y triangulares** con datos reales.
-- [x] ~~CI en GitHub Actions~~ — **hecho**: cada push corre `go vet` + `go test -race` (detector de data races) + build del motor y del dashboard.
-- [x] ~~Persistencia del estado de sesión (Sprint A)~~ — **hecho**: sesiones completas en SQLite (saldos multi-activo, estrategia, PnL), token en el navegador y `resume_session`; el demo sobrevive a reinicios del motor y del navegador.
-- [x] ~~Fase 2 · hito 3 — ejecución de ciclos~~ — **hecho**: wallets multi-activo en memoria (`Balances`), ejecutor de ciclos con planificación pura + commit atómico (`cycle.go`), Universe por sesión (elige tus exchanges y monedas), fees del usuario en los pesos del grafo y **autopiloto del radar** opt-in que sustituye al modo clásico.
-- [ ] Crédito automático para ciclos del radar (hoy el autopiloto omite oportunidades sin fondos, sin ofrecer préstamo).
-- [ ] Kraken como tercer venue (Sprint C) — con el ejecutor de ciclos ya llega operable, no solo visible.
-- [ ] Modelo de slippage por **profundidad de order book** real (hoy es una estimación configurable en bps; pasará a ser una tolerancia máxima).
-- [ ] Persistencia del estado de sesión (wallets sobreviven reinicios del motor).
+> El orden importa: cada sprint desbloquea el siguiente. Los sprints A y B ya están hechos (ver [bitácora](#-estado-de-la-rama-bitácora)).
+
+### Sprint C — Más exchanges y monedas (siguiente)
+
+Con el ejecutor de ciclos y las wallets multi-activo, cada venue nuevo llega **operable**, no solo visible en el radar:
+
+1. **Kraken como tercer venue:** WebSocket público v2 (`wss://ws.kraken.com/v2`, canal `ticker`/`book`), sin API key para datos. Trabajo: 1 entrada en `Venues`, N en `Instruments`, 1 `FeedAdapter` (~150 líneas siguiendo el patrón de Binance/Bitso). El grafo, el radar, el ejecutor y la persistencia se adaptan solos.
+2. **Más pares baratos:** SOL/USDT o similar en Binance = 1 línea en `Instruments` (cero código). Cada par son 2 aristas más y nuevos triángulos posibles.
+3. **Cuidado conocido:** el rebalanceo 50/50 y la línea de crédito siguen siendo del PAR clásico (quote+BTC); con 3 venues revisar el reparto per-venue del crédito.
+
+### Sprint D — Producto y cierre
+
+4. **Crédito para ciclos del radar:** hoy el autopiloto omite en silencio oportunidades sin fondos; integrar la inecuación `ganancia > costo × k` al planificador de ciclos.
+5. **Analítica desde el ledger:** gráfica de P&L acumulado, win rate, fees totales pagados, ops/hora, export CSV — los datos ya se persisten, falta la vista.
+6. **Desplegar esta rama** (Fly + Vercel) y validar en producción; actualizar capturas del README.
+7. **Sesión de revisión profunda:** correr la revisión adversarial multi-agente sobre la rama completa (los 2 intentos previos murieron por límites de tokens del plan — el dueño dedicará una sesión aparte).
+
+### Backlog (diseño listo, sin fecha)
+
+- **Slippage por profundidad real** (streams `depth`): el `SlippageRate` del usuario pasa de estimación a **tolerancia máxima**.
+- **Liquidez compartida entre sesiones** (la oportunidad se la lleva quien llega primero — decisión de producto pendiente del dueño).
+- **Préstamo dimensionado a la oportunidad** (hoy la línea es fija $50k + 1 BTC).
+- **Puente a ejecución real:** interface `ExchangeAdapter` (libro/órdenes/balances) con implementación simulada actual + Binance **Testnet** — el paso de demo a sistema real.
+- **Postgres** solo si aparecen múltiples instancias del motor o cuentas con login (la interfaz `SessionStore` ya lo permite sin reescribir).
+- Wire multi-venue completo en la UI de wallets clásicas (hoy leen el plano 2-venue; el radar ya usa `balances`).
 
 ---
 
 ## 📸 Capturas de pantalla
+
+> ### ⚠️ PENDIENTE: ACTUALIZAR CUANDO SE TERMINE DE TRABAJAR Y TESTEAR EL PROYECTO
+> Las capturas siguientes corresponden a la **versión anterior** (rama `main`). Faltan: Radar Omnidireccional (GraphPanel), panel de Estrategia con universo y autopiloto, y la pantalla "Recuperando tu sesión…".
 
 ### Panel principal en tiempo real
 
@@ -425,13 +487,13 @@ El dashboard reúne el P&L acumulado (dinero total, ganancia neta y rendimiento)
 
 ![Dashboard de Arus en modo claro](assets/Pantalla_inicial_modo_luminoso.png)
 
-### ⭐ El diferenciador en acción: crédito vs. tiempo muerto
+### ⭐ Crédito vs. tiempo muerto
 
-Con la línea de crédito activa, el bot **sigue operando** (banner superior con cuenta regresiva) mientras el inventario se reequilibra en segundo plano. En la captura acumula **+$175.71 netos en 6 operaciones**, y cada wallet muestra cuánto capital es propio y cuánto prestado.
+Con la línea de crédito activa, el bot **sigue operando** (banner superior con cuenta regresiva) mientras el inventario se reequilibra en segundo plano; cada wallet muestra cuánto capital es propio y cuánto prestado.
 
 ![Préstamo activo: el bot opera con fondos prestados mientras se reequilibra](assets/Prestamo_activo_operando_con_fondos_prestados.png)
 
-Cuando un exchange se queda sin saldo y el préstamo automático está apagado, el bot **cede la decisión al usuario** con los números sobre la mesa: ganancia posible, costo del crédito y resultado neto si se pide.
+Cuando un exchange se queda sin saldo y el préstamo automático está apagado, el bot **cede la decisión al usuario** con los números sobre la mesa.
 
 <p align="center">
   <img src="assets/Interfaz_Bot_en_pausa_por_fondos_insuficientes.png" alt="Diálogo de decisión al quedarse sin fondos" width="60%">
@@ -466,5 +528,7 @@ Este proyecto se distribuye bajo la **licencia MIT** — eres libre de usar, cop
 <div align="center">
 
 **Arus** · CODING_CHALLENGE_MEXICO · Daniel Peredo Borgonio · Licencia MIT
+
+🚧 *Rama `feat/arbitraje-omnidireccional` — trabajo en curso; ver [Qué sigue](#-qué-sigue--plan-de-evolución)*
 
 </div>
