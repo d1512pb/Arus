@@ -16,6 +16,9 @@ interface Props {
   // para pintar el universo del usuario.
   graph: GraphSnapshot | null;
   onApply: (p: TradingParams) => void;
+  // embedded (rediseño Radar-first): sin tarjeta colapsable propia — el
+  // contenido se monta directo dentro del StrategyDrawer, siempre visible.
+  embedded?: boolean;
 }
 
 // Campos numéricos editables como strings (permiten borrar/escribir libremente);
@@ -54,7 +57,7 @@ const num = (s: string) => {
   return Number.isFinite(v) ? v : 0;
 };
 
-export function StrategyPanel({ params, graph, onApply }: Props) {
+export function StrategyPanel({ params, graph, onApply, embedded = false }: Props) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<FormState | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -119,39 +122,10 @@ export function StrategyPanel({ params, graph, onApply }: Props) {
   const labelCls = "text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 uppercase";
   const hintCls = "text-[10px] text-gray-400 dark:text-gray-500 mt-1 leading-relaxed";
 
-  return (
-    <div className="mt-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden animate-fade-in-up" style={{ animationDelay: "0.45s" }}>
-      {/* Cabecera / botón para colapsar */}
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between gap-3 px-4 sm:px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors"
-      >
-        <div className="flex items-center gap-3 text-left">
-          <div className="w-9 h-9 rounded-lg bg-violet-600/10 flex items-center justify-center flex-shrink-0">
-            <SlidersHorizontal className="w-4 h-4 text-violet-600" />
-          </div>
-          <div>
-            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100 tracking-widest uppercase">Estrategia / Tu configuración</h2>
-            <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
-              Define tus propios umbrales: el bot decide con TUS reglas, no con las de otros
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-3 flex-shrink-0">
-          <span className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-bold text-violet-600 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 px-2.5 py-1 rounded-full">
-            mín. ${params.min_net_profit_usd.toFixed(2)} · máx. {params.max_order_size_btc} BTC · riesgo {params.risk_multiplier}x
-          </span>
-          {params.radar_autopilot && (
-            <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 px-2.5 py-1 rounded-full">
-              <Radar className="w-3 h-3" /> Autopiloto
-            </span>
-          )}
-          {open ? <ChevronDown className="w-5 h-5 text-gray-400" /> : <ChevronRight className="w-5 h-5 text-gray-400" />}
-        </div>
-      </button>
-
-      {open && (
-        <div className="border-t border-gray-100 dark:border-gray-800 px-4 sm:px-6 py-5">
+  // Cuerpo del formulario — compartido entre la tarjeta clásica del dashboard
+  // y el StrategyDrawer del radar (embedded).
+  const body = (
+    <div className={embedded ? "" : "border-t border-gray-100 dark:border-gray-800 px-4 sm:px-6 py-5"}>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className={labelCls}>Margen mínimo de ganancia (USD)</label>
@@ -267,8 +241,44 @@ export function StrategyPanel({ params, graph, onApply }: Props) {
               {justApplied ? (<><Check className="w-4 h-4" /> Aplicado</>) : "Aplicar estrategia"}
             </button>
           </div>
+    </div>
+  );
+
+  // Modo drawer (rediseño Radar-first): el contenido va directo, sin tarjeta.
+  if (embedded) return body;
+
+  return (
+    <div className="mt-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden animate-fade-in-up" style={{ animationDelay: "0.45s" }}>
+      {/* Cabecera / botón para colapsar */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between gap-3 px-4 sm:px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors"
+      >
+        <div className="flex items-center gap-3 text-left">
+          <div className="w-9 h-9 rounded-lg bg-violet-600/10 flex items-center justify-center flex-shrink-0">
+            <SlidersHorizontal className="w-4 h-4 text-violet-600" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100 tracking-widest uppercase">Estrategia / Tu configuración</h2>
+            <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+              Define tus propios umbrales: el bot decide con TUS reglas, no con las de otros
+            </p>
+          </div>
         </div>
-      )}
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <span className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-bold text-violet-600 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 px-2.5 py-1 rounded-full">
+            mín. ${params.min_net_profit_usd.toFixed(2)} · máx. {params.max_order_size_btc} BTC · riesgo {params.risk_multiplier}x
+          </span>
+          {params.radar_autopilot && (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 px-2.5 py-1 rounded-full">
+              <Radar className="w-3 h-3" /> Autopiloto
+            </span>
+          )}
+          {open ? <ChevronDown className="w-5 h-5 text-gray-400" /> : <ChevronRight className="w-5 h-5 text-gray-400" />}
+        </div>
+      </button>
+
+      {open && body}
     </div>
   );
 }

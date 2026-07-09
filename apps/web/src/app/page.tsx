@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { ShieldAlert, CheckCircle, Moon, Sun, Loader2, ArrowRight, HelpCircle, X, ArrowDown, Pencil, BookOpen } from "lucide-react";
-import { useArusEngine, LogEntry } from "../hooks/useArusEngine";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
+import { ShieldAlert, CheckCircle, Loader2, ArrowRight, HelpCircle, X, Pencil } from "lucide-react";
+import { useArusEngine } from "../hooks/useArusEngine";
 import { OnboardingModal } from "../components/OnboardingModal";
 import { LedgerPanel } from "../components/LedgerPanel";
-import { StrategyPanel } from "../components/StrategyPanel";
-import { GraphPanel } from "../components/GraphPanel";
 import { AnalyticsPanel } from "../components/AnalyticsPanel";
 import { TutorialModal } from "../components/TutorialModal";
+import { HeaderBar, AppView } from "../components/HeaderBar";
+import { RadarView } from "../components/RadarView";
+import { StrategyDrawer } from "../components/StrategyDrawer";
 
 function logColor(level: string): string {
     switch(level) {
@@ -447,6 +448,20 @@ export default function Home() {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [fundsModal, setFundsModal] = useState<string | null>(null);
   const [showTutorial, setShowTutorial] = useState(false);
+  // Rediseño Radar-first: el radar es la vista principal; el dashboard clásico
+  // vive en su propia pestaña. La estrategia se abre como drawer SOBRE el radar.
+  const [view, setView] = useState<AppView>("radar");
+  const [strategyOpen, setStrategyOpen] = useState(false);
+
+  // Props estables para el RadarView memorizado: el lienzo no debe
+  // re-renderizarse con cada log del feed (decenas por segundo).
+  const lastSpike = useMemo(() => {
+    for (let i = state.logs.length - 1; i >= 0; i--) {
+      if (state.logs[i].level === "spike_block") return state.logs[i];
+    }
+    return null;
+  }, [state.logs]);
+  const openFundsModal = useCallback((venue: string) => setFundsModal(venue), []);
 
   // Tutorial automático en la primera visita (se recuerda con localStorage).
   useEffect(() => {
@@ -591,8 +606,14 @@ export default function Home() {
       {fundsModal && (
         <FundsModal
           exchange={fundsModal}
-          usd={fundsModal === "Binance" ? wallets.binance.usd : wallets.bitso.usd}
-          btc={fundsModal === "Binance" ? wallets.binance.btc : wallets.bitso.btc}
+          // Venues fuera del par clásico (Kraken) no viajan en el wire plano:
+          // sus saldos se leen de los nodos del radar (balances multi-activo).
+          usd={fundsModal === "Binance" ? wallets.binance.usd
+            : fundsModal === "Bitso" ? wallets.bitso.usd
+            : state.graph?.nodes.find(n => n.venue === fundsModal && n.kind === "cash")?.balance ?? 0}
+          btc={fundsModal === "Binance" ? wallets.binance.btc
+            : fundsModal === "Bitso" ? wallets.bitso.btc
+            : state.graph?.nodes.find(n => n.venue === fundsModal && n.asset === "BTC")?.balance ?? 0}
           onClose={() => setFundsModal(null)}
           onSubmit={(currency, amount) => adjustFunds(fundsModal, currency, amount)}
         />
@@ -818,73 +839,49 @@ export default function Home() {
         </div>
       )}
 
-      {/* Header Institucional Unificado */}
-      <header className="relative z-50 px-4 sm:px-6 lg:px-8 py-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col sm:flex-row justify-between items-center sticky top-0 shadow-sm gap-4 sm:gap-0">
-        <div className="flex items-center gap-4">
-          <img src="/Logo-Arus.jpeg" alt="Logo Arus" className="w-8 h-8 rounded object-cover shadow-sm" />
-          <h1 className="text-xl font-black text-gray-900 dark:text-gray-100 tracking-widest uppercase">ARUS</h1>
-          <div className="ml-4 sm:ml-6 flex items-center gap-4 sm:gap-6 text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 border-l border-gray-200 dark:border-gray-800 pl-4 sm:pl-6 h-6">
-            <span className="hidden sm:inline">UP {formatUptime(state.uptimeSeconds)}</span>
-            <span className="text-gray-700 dark:text-gray-300 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span> EN LÍNEA</span>
-          </div>
-        </div>
+      {/* Header compacto (Radar-first): tabs, patrimonio animado y acciones
+          globales — Probar el bot vive aquí, disponible desde AMBAS vistas.
+          El préstamo automático se movió al drawer de Estrategia. */}
+      <HeaderBar
+        view={view}
+        onViewChange={setView}
+        totalWealth={totalWealth}
+        pnl={actualPnl}
+        uptime={formatUptime(state.uptimeSeconds)}
+        autopilot={state.params?.radar_autopilot === true}
+        onProbar={() => setShowInjectionModal(true)}
+        onEstrategia={() => setStrategyOpen(true)}
+        onTutorial={() => setShowTutorial(true)}
+        onReset={resetSession}
+        isDarkMode={isDarkMode}
+        onToggleDark={() => setIsDarkMode(!isDarkMode)}
+      />
 
-        <div className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-3">
-          {/* Botón de regla de negocio: préstamo automático al quedarse sin fondos */}
-          <button
-            onClick={toggleAutoCredit}
-            role="switch"
-            aria-checked={state.autoCreditMode}
-            title={state.autoCreditMode
-              ? "Préstamo automático ACTIVADO: evita pausas de >30 min pidiendo crédito si la ganancia supera el costo."
-              : "Préstamo automático DESACTIVADO: al quedarse sin fondos, reequilibrar tarda >30 min al mover capital entre exchanges."}
-            className={`px-3 py-2 rounded-md border font-bold text-[10px] sm:text-xs uppercase tracking-widest flex items-center gap-2 shadow-sm transition-all duration-300 hover:-translate-y-0.5 active:scale-95 ${state.autoCreditMode ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 dark:hover:bg-emerald-500/20' : 'bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
-          >
-            <div className={`w-6 h-3.5 sm:w-8 sm:h-4 rounded-full p-0.5 transition-colors duration-300 flex items-center ${state.autoCreditMode ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600'}`}>
-              <div className={`w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-white transform transition-transform duration-300 ${state.autoCreditMode ? 'translate-x-2.5 sm:translate-x-4 shadow-sm' : 'translate-x-0'}`}></div>
-            </div>
-            <span className="hidden sm:inline">Préstamo Automático</span>
-            <span className="sm:hidden">Préstamo</span>
-          </button>
+      {/* Estrategia como drawer SOBRE el radar: la poda del universo se ve en vivo */}
+      <StrategyDrawer
+        open={strategyOpen}
+        onClose={() => setStrategyOpen(false)}
+        params={state.params}
+        graph={state.graph}
+        onApply={setParams}
+        autoCreditMode={state.autoCreditMode}
+        onToggleAutoCredit={toggleAutoCredit}
+      />
 
-          <button 
-            onClick={() => setShowInjectionModal(true)}
-            className="px-4 py-2 bg-red-600 text-white rounded-md font-black text-[10px] sm:text-xs uppercase tracking-widest flex items-center gap-2 shadow-sm hover:bg-red-500 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-red-500/30 active:scale-95 border border-transparent"
-          >
-            <ShieldAlert className="w-4 h-4" />
-            <span className="hidden sm:inline">Probar el bot</span>
-            <span className="sm:hidden">Probar</span>
-          </button>
+      {/* Vista principal: el RADAR a pantalla completa */}
+      {view === "radar" && (
+        <RadarView
+          graph={state.graph}
+          trades={state.trades}
+          spike={lastSpike}
+          enabledVenues={state.params?.enabled_venues}
+          enabledAssets={state.params?.enabled_assets}
+          onEditFunds={openFundsModal}
+        />
+      )}
 
-          <button
-            onClick={() => setShowTutorial(true)}
-            className="px-3 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-all duration-300 hover:-translate-y-0.5 active:scale-95 font-bold text-[10px] sm:text-xs uppercase tracking-widest flex items-center gap-1.5 shadow-sm"
-            title="Ver el tutorial de uso"
-          >
-            <BookOpen className="w-4 h-4" />
-            <span className="hidden sm:inline">Tutorial</span>
-          </button>
-
-          <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            className="p-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-all duration-300 hover:scale-110 active:scale-90 shadow-sm border border-gray-200 dark:border-gray-700"
-            aria-label="Alternar modo oscuro"
-          >
-            {isDarkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
-          </button>
-
-          <button
-            onClick={resetSession}
-            className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md active:scale-95 font-bold text-[10px] sm:text-xs uppercase tracking-widest shadow-sm flex items-center gap-1.5"
-            title="Borrar todo y volver al inicio"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5 sm:w-4 sm:h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            RESET
-          </button>
-        </div>
-      </header>
-
-      {/* Main Container Fluido y Centrado */}
+      {/* Vista Dashboard: KPIs, wallets, feed de operaciones, ledger y analítica */}
+      {view === "dashboard" && (
       <main className="relative z-10 flex-1 w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 flex flex-col">
         
         {/* Encabezado (Top) - Tarjetas de KPIs */}
@@ -1187,11 +1184,8 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Radar omnidireccional (Fase 2) — el grafo de liquidez en vivo */}
-        <GraphPanel graph={state.graph} />
-
-        {/* Estrategia — umbrales, fees, apetito de riesgo, universo y autopiloto */}
-        <StrategyPanel params={state.params} graph={state.graph} onApply={setParams} />
+        {/* El radar vive ahora en su propia vista (tab RADAR); la estrategia,
+            en el drawer global — aquí queda el resto del panel completo. */}
 
         {/* Ledger / Auditoría Institucional — demuestra la persistencia de datos */}
         <LedgerPanel sessionId={state.sessionId} />
@@ -1199,6 +1193,7 @@ export default function Home() {
         {/* Analítica del ledger (Sprint D) — P&L acumulado, win rate y export CSV */}
         <AnalyticsPanel sessionId={state.sessionId} />
       </main>
+      )}
     </div>
   );
 }

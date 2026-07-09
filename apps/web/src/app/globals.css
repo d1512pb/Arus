@@ -36,3 +36,42 @@
 .animate-pulse-border {
   animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* ── Radar-first (rediseño): animaciones del lienzo ─────────────────────── */
+
+/* Barrido tipo sonar cuando el mercado está eficiente (sin ciclo).
+   --sweep-dist la fija el componente al ancho real del lienzo; la animación es
+   solo transform → el compositor la corre en su propia capa. */
+@keyframes radar-sweep {
+  0%   { transform: translateX(-140px); opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { transform: translateX(var(--sweep-dist, 110vw)); opacity: 0; }
+}
+.animate-radar-sweep {
+  animation: radar-sweep 4.6s linear infinite;
+}
+
+/* El "+$X" que flota desde el nodo de inicio al ejecutarse un ciclo. */
+@keyframes profit-rise {
+  0%   { opacity: 0; transform: translate(-50%, 8px); }
+  18%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -72px); }
+}
+.animate-profit-rise {
+  animation: profit-rise 2.4s ease-out forwards;
+}
+
+/* Entrada de la card de nodo. */
+@keyframes card-pop {
+  0%   { opacity: 0; transform: scale(0.96) translateY(4px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-card-pop {
+  animation: card-pop 0.18s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-radar-sweep { animation: none; opacity: 0; }
+  .animate-profit-rise { animation: none; opacity: 0; }
+}

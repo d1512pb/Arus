@@ -1,10 +1,18 @@
 # Rediseño "Radar primero" — plan de implementación
 
-> **Estado: APROBADO POR DISEÑO, PENDIENTE DE IMPLEMENTAR.** El mockup interactivo
-> validado por el dueño vive en [`docs/mockups/arus-radar-mockup.html`](mockups/arus-radar-mockup.html)
-> (ábrelo directo en el navegador). Este documento es el contrato de la
-> implementación: qué se construye, en qué orden y con qué criterios de listo.
-> Todo es **frontend puro** (`apps/web`): el motor y su wire no se tocan.
+> **Estado: IMPLEMENTADO (fases R0–R4).** El mockup de referencia vive en
+> [`docs/mockups/arus-radar-mockup.html`](mockups/arus-radar-mockup.html). La
+> implementación real: `lib/radarLayout.ts` (+13 tests), `HeaderBar.tsx`,
+> `RadarView.tsx`, `StrategyDrawer.tsx` (con StrategyPanel `embedded`), y
+> `page.tsx` dividido en vistas Radar/Dashboard. Verificado E2E con el motor y
+> feeds reales. Todo fue **frontend puro**: el motor y su wire no se tocaron.
+>
+> Notas de implementación que difieren del plan (por rendimiento, descubiertas
+> en verificación): el barrido del sonar es un overlay HTML (no SVG) para que
+> el compositor lo anime sin repintar el lienzo; `RadarView` está memoizado y
+> recibe solo el último log de spike (el feed completo re-renderizaba el canvas
+> decenas de veces por segundo); el contador del patrimonio pinta SIEMPRE el
+> valor real y anima por mutación imperativa encima (correcto por construcción).
 
 ## La tesis
 
