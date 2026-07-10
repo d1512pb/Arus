@@ -7,6 +7,9 @@ apps/engine/tmp
 # Persistencia local (SQLite) — no versionar la base de datos
 apps/engine/data/
 
+# Catálogo externo local (venues.example.json SÍ se versiona como plantilla)
+apps/engine/venues.json
+
 # Node / Next.js
 node_modules/
 apps/web/.next/

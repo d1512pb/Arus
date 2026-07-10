@@ -9,6 +9,11 @@ import (
 func main() {
 	log.Println("Iniciando Arus HFT Engine - Fase 1 (Arbitraje Simultáneo Pre-fondeado) [Multi-Tenant]")
 
+	// Catálogo externo (ARUS_CATALOG / ./venues.json): puebla los registros de
+	// venues/instrumentos/paridades ANTES de construir el grafo y los feeds, que
+	// los leen al arrancar. Sin archivo (o inválido) quedan los compilados.
+	LoadCatalog()
+
 	// Persistencia: Trade Ledger en SQLite (registro de auditoría inmutable).
 	if err := InitLedger(); err != nil {
 		log.Printf("⚠️ [LEDGER] No se pudo inicializar SQLite, el trading continúa sin persistencia: %v", err)
@@ -32,6 +37,9 @@ func main() {
 	// Analítica derivada del ledger (Sprint D): resumen por sesión y export CSV.
 	http.HandleFunc("/api/stats", statsHandler)
 	http.HandleFunc("/api/ledger.csv", ledgerCSVHandler)
+	// El motor declara TODO lo que controla: defaults, rangos de clamp, catálogo,
+	// términos del crédito, guardrails y env vars (ver config.go).
+	http.HandleFunc("/api/config", configHandler)
 
 	// El puerto se toma de la variable de entorno PORT (Railway, Render, Cloud Run
 	// la inyectan al desplegar); por defecto 8080 para desarrollo local.

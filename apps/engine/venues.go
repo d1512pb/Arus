@@ -8,21 +8,22 @@ package main
 // Es el prerequisito del motor de grafos de la Fase 2, donde cada venue aporta nodos
 // (activo@venue) y aristas (libros de órdenes) al grafo global.
 
-// Venue describe una casa de cambio soportada por el motor.
+// Venue describe una casa de cambio soportada por el motor. Los tags JSON son el
+// contrato del catálogo externo (ARUS_CATALOG, ver config.go) y de GET /api/config.
 type Venue struct {
-	Name string // identificador único, usado como clave de wallets/fees ("Binance")
+	Name string `json:"name"` // identificador único, usado como clave de wallets/fees ("Binance")
 
 	// DefaultTakerFee es la comisión taker por defecto del venue. El usuario puede
 	// sobrescribirla por sesión desde el panel de estrategia (TradingParameters.TakerFees).
-	DefaultTakerFee float64
+	DefaultTakerFee float64 `json:"default_taker_fee"`
 
 	// BaseAsset / QuoteAsset del instrumento que el feed de este venue publica hoy.
 	// NOTA IMPORTANTE (basis USDT/USD): Binance opera BTC/USDT y Bitso BTC/USD.
 	// USDT y USD NO son el mismo activo; hoy el motor los trata como equivalentes
 	// (AssumeUSDTParity) para el arbitraje de demo, y lo documenta en vez de ocultarlo.
 	// En la Fase 2 serán nodos distintos del grafo y el basis será una arista más.
-	BaseAsset  string
-	QuoteAsset string
+	BaseAsset  string `json:"base_asset"`
+	QuoteAsset string `json:"quote_asset"`
 }
 
 // AssumeUSDTParity documenta la simplificación vigente: tratamos 1 USDT = 1 USD al
@@ -73,12 +74,13 @@ func classicVenues() []Venue {
 // venue puede publicar N libros). Agregar un instrumento = 1 entrada aquí; el
 // FeedAdapter del venue se suscribe solo y el grafo gana sus nodos y aristas.
 type Instrument struct {
-	Venue string
-	Base  string // activo que se compra/vende ("BTC", "ETH")
-	Quote string // activo con el que se paga ("USDT", "USD", "BTC")
+	Venue string `json:"venue"`
+	Base  string `json:"base"`  // activo que se compra/vende ("BTC", "ETH")
+	Quote string `json:"quote"` // activo con el que se paga ("USDT", "USD", "BTC")
 	// StreamID identifica el libro dentro del venue (Binance: símbolo del stream
-	// combinado en minúsculas; Bitso: nombre del book del canal orders).
-	StreamID string
+	// combinado en minúsculas; Bitso: nombre del book del canal orders; Kraken:
+	// símbolo normalizado del WS v2, "BTC/USD").
+	StreamID string `json:"stream_id"`
 }
 
 // Key es el identificador estable del instrumento ("Binance:ETH/BTC").

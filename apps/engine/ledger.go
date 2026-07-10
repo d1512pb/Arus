@@ -39,12 +39,15 @@ var ledgerWG sync.WaitGroup
 // InitLedger abre/crea el archivo SQLite y asegura el esquema de la tabla.
 // Se llama una sola vez al arrancar el motor.
 func InitLedger() error {
-	// Guardamos la BD en data/ledger.db (se crea la carpeta si no existe).
-	dataDir := "data"
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	// Ruta de la BD: data/ledger.db por defecto; ARUS_DB_PATH la sobrescribe
+	// (necesario en despliegues con volumen montado en otra ruta, p. ej. Fly.io).
+	dbPath := os.Getenv("ARUS_DB_PATH")
+	if dbPath == "" {
+		dbPath = filepath.Join("data", "ledger.db")
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return err
 	}
-	dbPath := filepath.Join(dataDir, "ledger.db")
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
