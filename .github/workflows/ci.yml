@@ -26,7 +26,7 @@ jobs:
       - run: go test -race ./...
 
   web:
-    name: Dashboard Next.js (build + tipos)
+    name: Dashboard Next.js (build + tipos + tests)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,4 +39,5 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
+      - run: npm test # vitest: layout paramétrico del radar (rediseño Radar-first)
       - run: npm run build

@@ -5,7 +5,7 @@
 ### Motor de arbitraje omnidireccional de alta frecuencia · multi-exchange · multi-activo
 
 > ### 🚧 TRABAJO EN CURSO — pendiente a continuación
-> Rama `feat/arbitraje-omnidireccional`. Este README es la **referencia completa del proyecto**: qué hay construido, cómo funciona y qué sigue. Los Sprints C y D (Kraken, SOL, crédito para ciclos, analítica) ya están integrados; queda desplegar la rama y actualizar capturas. Ver [Estado de la rama](#-estado-de-la-rama-bitácora) y [Qué sigue](#-qué-sigue--plan-de-evolución).
+> Rama `feat/arbitraje-omnidireccional`. Este README es la **referencia completa del proyecto** (documento de handoff: se puede retomar el trabajo leyendo solo esto): qué hay construido, cómo funciona y qué sigue. Los Sprints C y D (Kraken, SOL, crédito para ciclos, analítica) **y el rediseño Radar-first de la UI** (el grafo es ahora la pantalla principal) ya están integrados y verificados. Queda: desplegar la rama, **actualizar las capturas** (las actuales son de la versión anterior) y la sesión de revisión multi-agente. Ver [Estado de la rama](#-estado-de-la-rama-bitácora) y [Qué sigue](#-qué-sigue--plan-de-evolución).
 
 *Un grafo de liquidez en vivo detecta ciclos de arbitraje —espaciales entre exchanges y triangulares dentro de uno— con datos 100 % reales de **Binance, Bitso y Kraken**, descuenta cada fricción (fees + slippage) y ejecuta solo cuando la ganancia neta supera el margen que **cada usuario** define. Sesiones completas persistidas: el bot te recuerda.*
 
@@ -14,7 +14,7 @@
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![SQLite](https://img.shields.io/badge/SQLite-sesiones%20completas%20·%20CGO--free-003B57?logo=sqlite&logoColor=white)
 ![Detección](https://img.shields.io/badge/detección-~50ns%2Ftick-brightgreen)
-![Tests](https://img.shields.io/badge/tests-50%2B%20·%20CI%20con%20--race-blue)
+![Tests](https://img.shields.io/badge/tests-60%2B%20·%20CI%20con%20--race-blue)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
 
 **Autor:** Daniel Peredo Borgonio · **Reto:** CODING_CHALLENGE_MEXICO
@@ -48,9 +48,9 @@
 
 ## 🚧 Estado de la rama (bitácora)
 
-> Esta sección existe para retomar el proyecto **sin más contexto que este README**. Resume qué se construyó en esta rama, en qué orden y por qué. El diseño detallado del grafo vive en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md).
+> Esta sección existe para retomar el proyecto **sin más contexto que este README**. Resume qué se construyó en esta rama, en qué orden y por qué. El diseño detallado del grafo vive en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md); el del rediseño de la UI (decisiones, mockup aprobado y notas de rendimiento), en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md).
 
-El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (rama `main`, lo que muestra el deploy actual) y evolucionó en esta rama hacia una **plataforma omnidireccional personalizable**. Todo lo siguiente está implementado, testeado (40+ tests unitarios, CI en GitHub Actions con `go test -race`) y verificado end-to-end contra feeds reales:
+El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (rama `main`, lo que muestra el deploy actual) y evolucionó en esta rama hacia una **plataforma omnidireccional personalizable** con el radar como pantalla principal. Todo lo siguiente está implementado, testeado (50+ tests de Go y 13 de frontend; CI en GitHub Actions con `go test -race` + `vitest` + builds) y verificado end-to-end contra feeds reales:
 
 | Etapa | Qué se construyó | Piezas clave |
 |---|---|---|
@@ -72,6 +72,8 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 - **El wire motor↔UI es doble.** Los campos planos (`binance_usd`, `bitso_btc`…) se mantienen por compatibilidad con el dashboard desplegado; `wallet_update` además lleva `balances` (multi-activo completo) y `graph_update` lleva el radar. La UI de wallets clásicas todavía lee el plano.
 - **USDT ≠ USD, declarado.** Binance opera BTC/USDT; Bitso y Kraken operan BTC/USD; la equivalencia 1:1 es una arista `EdgeParity` **visible** en el grafo (`AssumeUSDTParity`, `parityPairs` en venues.go), no un supuesto escondido.
 - **El crédito TAMBIÉN aplica a ciclos del radar (Sprint D).** Cuando el plan de un ciclo muere por saldo, `cycleCreditProjection` calcula si la línea de crédito lo volvería viable y la decisión pasa por `handleLiquidityShortfall` — la misma inecuación `ganancia > costo × k`, el mismo diálogo asistido. La línea sigue llegando al par clásico (los ciclos arrancan desde sus nodos cash).
+- **La UI es Radar-first (rediseño).** Dos vistas conmutadas por tabs: `RADAR` (principal, el grafo a pantalla completa con revelación progresiva) y `DASHBOARD` (todo lo clásico). La **Estrategia es un drawer sobre el grafo** (incluye el préstamo automático) y **Probar el bot vive en el header**, accesible desde ambas vistas — es la demo central para un juez. El plan de diseño con TODAS las decisiones (y el mockup aprobado) vive en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md).
+- **El lienzo del radar está comprometido al modo oscuro** (es un terminal; colores explícitos, no tematiza), mientras header/cards/drawer sí siguen el tema claro/oscuro de la app. Validar esa decisión con el dueño mirando el modo claro sigue abierto (backlog).
 - **Todo lo simulado sigue simulado.** Las órdenes no tocan APIs privadas de exchanges: los fills son instantáneos al top-of-book con slippage estimado, y el Fill-or-Kill es probabilístico (5 %). El puente a ejecución real (testnet) está en el plan (ver [Qué sigue](#-qué-sigue--plan-de-evolución)).
 
 **Notas de entorno de desarrollo (gotchas reales):**
@@ -80,6 +82,9 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 - En pruebas locales pueden quedar **procesos zombi en el puerto 8080** (el bind falla en silencio y te conectas a un motor viejo). Liberar con PowerShell: `Get-NetTCPConnection -LocalPort 8080 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`.
 - Smoke E2E por WebSocket: Node ≥ 21 trae `WebSocket` global — un script `.mjs` de ~40 líneas conecta a `ws://localhost:8080/ws`, envía acciones y valida eventos (patrón usado para verificar cada sprint).
 - El esquema SQLite **se auto-crea/migra al arrancar** (`InitLedger` → `initSessionStore`); en Fly.io el volumen montado en `data/` conserva la base entre deploys sin pasos manuales.
+- **Rendimiento del radar (aprendido en la verificación E2E, no regresionar):** `RadarView` está **memoizado** y recibe solo el último log de spike — pasarle el feed de logs completo re-renderiza TODO el lienzo con cada log (decenas por segundo con feeds reales). Las animaciones continuas (barrido) van en **overlays HTML**, no dentro del SVG (animar un `<g>` repinta el canvas entero por frame). El contador del patrimonio pinta SIEMPRE el valor real de React y anima por mutación imperativa encima.
+- Frontend: `npm test` corre los tests de **vitest** (layout paramétrico del radar); el CI también los corre.
+- Nota para sesiones con Claude Code: en la sesión del rediseño, la herramienta de screenshots del preview **no pudo capturar esta app** (timeouts con la página sana) — verificar por snapshot de accesibilidad + `eval` sobre el DOM, y dejar la validación visual al dueño en su navegador.
 
 ---
 
@@ -172,7 +177,7 @@ El mercado se modela como un **grafo dirigido**:
 - **Topología desde datos:** los registros `Venues` e `Instruments` (venues.go) generan nodos y aristas; hoy: **9 nodos** (USDT/BTC/ETH/SOL en Binance + USD/BTC en Bitso + USD/BTC/ETH en Kraken) y **32 aristas** (18 de libro: dos triángulos de Binance + el par de Bitso + el triángulo de Kraken; 10 swaps de inventario; 4 de paridad). Agregar un exchange o un par = entradas en el registro + adaptador de feed, **cero cambios en la lógica** — Kraken entró exactamente así.
 - **Actualización O(1) por tick** y detección cada ~1 s: la vista global usa fees de referencia; la del usuario (`FindBestCycleFor`) usa SUS fees y SU universo — dos usuarios ven ciclos distintos en el mismo mercado.
 - **Ejecución (autopiloto):** el ciclo se planifica en una función pura — rota a un inicio en efectivo, dimensiona contra saldo + tope del usuario + liquidez de **cada** pierna (mapeada a unidades de inicio) y exige que el neto supere el margen del usuario — y se ejecuta con **commit atómico**: re-verificación de fondos bajo lock (hard block) y Fill-or-Kill evaluado *antes* de tocar saldos (cero exposición direccional, sin necesidad de deshacer).
-- **Visualización:** el `GraphPanel` dibuja el grafo en vivo (SVG): saldos y precios por nodo, aristas etiquetadas, chip de feed congelado, y el ciclo detectado resaltado en verde con su narración ("+0.13 % neto por vuelta, hasta 0.4 BTC"). Cuando no hay ciclo, lo dice honestamente: *"mercado eficiente — los fees superan al spread"*.
+- **Visualización (rediseño Radar-first):** el radar ES la pantalla principal (`RadarView`, SVG a pantalla completa) con **revelación progresiva**: los nodos muestran solo activo + saldo (+≈USD); el precio/fee/liquidez de cada libro aparece al **hover** de su arista; el detalle completo de un nodo (sus libros, frescura del feed, editar fondos) al **click**. El ciclo detectado se resalta en verde con partículas recorriéndolo y su narración vive en una línea al pie; cuando no hay ciclo, lo dice honestamente: *"mercado eficiente — los fees superan al spread"*, con un barrido de sonar que comunica "sigo buscando". El layout es **paramétrico** (`lib/radarLayout.ts`): 1 venue o 5, el lienzo se deriva de los datos.
 - **Honestidad del modelo:** el radar rara vez encuentra ciclos netos positivos en el mercado real — y eso es lo esperado. No maquilla: muestra el desglose de por qué cada ruta es (in)viable.
 
 ---
@@ -291,10 +296,10 @@ flowchart LR
         DB[("SQLite · WAL<br/>sessions + balances + ledger")]
     end
 
-    subgraph WEB["Dashboard · Next.js"]
-        UI["P&L · wallets · feed"]
-        RADAR["GraphPanel (radar SVG)"]
-        STRAT["StrategyPanel<br/>(params + universo + autopiloto)"]
+    subgraph WEB["Web · Next.js (Radar-first)"]
+        RADAR["Vista RADAR (principal)<br/>RadarView: lienzo + card + tooltip + dinamismo"]
+        UI["Vista DASHBOARD<br/>P&L · wallets · feed"]
+        STRAT["StrategyDrawer sobre el grafo<br/>(params + universo + autopiloto + préstamo auto)"]
         AUDIT["Historial / Auditoría"]
         ANLT["Analítica<br/>(P&L · win rate · CSV)"]
     end
@@ -318,7 +323,7 @@ flowchart LR
 | Frontend | **Next.js 16 / React 19** | App Router, SSR y DX moderna. |
 | Estilos | **Tailwind CSS 4** + `lucide-react` | UI consistente, responsive, modo oscuro. |
 | Tipado | **TypeScript** | Contratos motor↔UI espejados (interfaces de `useArusEngine.ts`). |
-| CI | **GitHub Actions** | `go vet` + `go test -race` + builds en cada push (el `-race` no corre en la máquina de desarrollo). |
+| CI | **GitHub Actions** | `go vet` + `go test -race` + `vitest` (layout del radar) + builds en cada push (el `-race` no corre en la máquina de desarrollo). |
 
 **Organización del repositorio:**
 
@@ -341,12 +346,24 @@ Arus/
 │  │  ├─ models.go            # ESTADO y WIRE: Balances multi-activo, TradingParameters, ClientSession, Hub, eventos
 │  │  └─ *_test.go            # 50+ tests: fórmula, grafo, ciclos, crédito, store, analítica, clamps, concurrencia + benchmark
 │  └─ web/src/
-│     ├─ app/page.tsx         # Dashboard (presentacional) + modales de crédito/fondos/guía
-│     ├─ components/          # GraphPanel (radar SVG) · StrategyPanel (params+universo+autopiloto)
-│     │                       #   · AnalyticsPanel (P&L+CSV) · LedgerPanel · OnboardingModal · TutorialModal
+│     ├─ app/page.tsx         # Contenedor: vistas RADAR | DASHBOARD, modales (crédito/fondos/simulador/guía)
+│     ├─ components/
+│     │   ├─ RadarView.tsx    # LA PANTALLA PRINCIPAL: lienzo SVG, tooltip, card de nodo, dinamismo (memoizado)
+│     │   ├─ HeaderBar.tsx    # Header compacto: patrimonio animado, tabs, Probar el bot, Estrategia
+│     │   ├─ StrategyDrawer.tsx  # Drawer sobre el grafo (usa StrategyPanel `embedded` + préstamo automático)
+│     │   ├─ StrategyPanel.tsx   # Formulario de estrategia (modo tarjeta clásico y modo embedded)
+│     │   ├─ AnalyticsPanel.tsx  # P&L acumulado + win rate + CSV (vista Dashboard)
+│     │   ├─ LedgerPanel.tsx     # Historial/Auditoría (vista Dashboard)
+│     │   ├─ GraphPanel.tsx      # Radar ANTERIOR (ya no montado; referencia hasta borrar)
+│     │   └─ OnboardingModal · TutorialModal
 │     ├─ hooks/useArusEngine.ts  # Única fuente de verdad: WebSocket + resume + reducer de eventos
-│     └─ lib/config.ts        # Endpoints del motor por variable de entorno
-├─ docs/FASE2-GRAFO.md        # Diseño del motor omnidireccional + estado por hitos
+│     └─ lib/
+│         ├─ radarLayout.ts   # LAYOUT PARAMÉTRICO del radar (1..N venues, fan-out de aristas) — 13 tests
+│         └─ config.ts        # Endpoints del motor por variable de entorno
+├─ docs/
+│  ├─ FASE2-GRAFO.md          # Diseño del motor omnidireccional + estado por hitos
+│  ├─ REDISENO-RADAR.md       # Plan del rediseño Radar-first (implementado) + notas de rendimiento
+│  └─ mockups/arus-radar-mockup.html  # Mockup interactivo aprobado (abrir en el navegador)
 └─ README.md
 ```
 
@@ -364,18 +381,28 @@ Arus/
 
 ## 🖥️ Interfaz y experiencia de usuario
 
-Web app pensada para que **cualquiera** entienda lo que ocurre (lenguaje claro, no solo para expertos):
+Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md)) pensada para que **cualquiera** entienda lo que ocurre. La filosofía: *la complejidad por dentro* — cada dato aparece en el nivel de interacción donde se necesita.
 
-- **📡 Radar Omnidireccional:** el grafo de liquidez en vivo — tus monedas en cada exchange (saldo real + valor + precio), por dónde puede fluir el dinero, y el ciclo rentable detectado resaltado en verde con su narración. Los supuestos del modelo (paridad USDT≈USD, inventario pre-fondeado) se declaran en pantalla.
-- **Panel de Estrategia:** margen mínimo, orden máxima, slippage, comisiones por exchange, multiplicador de riesgo, **tu universo** (chips de exchanges/monedas) y el **toggle del autopiloto**. Lo que ves tras aplicar es lo que el backend realmente dejó vigente.
-- **Continuidad sin fricción:** al volver, "Recuperando tu sesión…" y tus fondos/estrategia/historial aparecen solos (token en `localStorage`; botón de escape para empezar de cero).
-- **P&L acumulado en tiempo real**, precios en vivo con ping, feed de operaciones (ruta compra→venta o ciclo completo), salud de inventario por exchange y distribución del capital.
-- **Editar fondos** (depósito/retiro que no distorsiona el PnL), **tutorial guiado de 8 pasos**, **guía de estrategia** con ejemplo visual, **configuración inicial guiada**.
+**Vista RADAR (pantalla principal — aterriza aquí tras el onboarding):**
+
+- **El grafo de liquidez a pantalla completa:** una columna por exchange, tus monedas como nodos (activo + saldo + valor), las conversiones posibles como líneas mudas. Los supuestos del modelo (paridad USDT≈USD, inventario pre-fondeado) aparecen al hover de sus aristas punteadas.
+- **Hover en una arista** → tooltip con compra/venta, TU fee + slippage y la liquidez visible del libro.
+- **Click en un nodo** → card de detalle (flotante en desktop, hoja inferior en móvil): saldo, precio, los libros que tocan ese nodo, frescura del feed, y **Editar fondos** de ese exchange (funciona también para venues fuera del par clásico, como Kraken).
+- **Dinamismo:** pulso en cada nodo cuyo libro recibió tick; el ciclo rentable se ilumina en verde con **partículas recorriendo la ruta del dinero**; al ejecutarse, un `+$X` flota desde el nodo de origen y el patrimonio del header **cuenta hacia arriba**; un spike bloqueado tiñe la narración de rojo; sin ciclo, un barrido de sonar dice "sigo buscando". Respeta `prefers-reduced-motion`.
+- **Narración de 1 línea + ticker** al pie: qué ve el radar ahora mismo y la última operación.
+- **La poda del universo se VE:** los exchanges/monedas que saques de tu universo (drawer de Estrategia) se desvanecen del lienzo.
+
+**Header (ambas vistas):** patrimonio con contador animado + PnL, tabs `RADAR | DASHBOARD`, **⚡ Probar el bot** (el simulador es un pilar: es como un juez evalúa el sistema — inyectar escenarios y VER al radar reaccionar), **⚙ Estrategia**, tutorial, modo oscuro y reset.
+
+**Drawer de Estrategia (se abre SOBRE el grafo):** margen mínimo, orden máxima, slippage, comisiones por exchange, multiplicador de riesgo, **préstamo automático**, **tu universo** (chips) y el **toggle del autopiloto**. Lo que ves tras aplicar es lo que el backend dejó vigente.
+
+**Vista DASHBOARD (todo lo demás):**
+
+- **P&L acumulado en tiempo real**, precios en vivo con ping, feed de operaciones (ruta compra→venta), salud de inventario por exchange y distribución del capital (wallets del par clásico).
 - **Panel de Historial / Auditoría:** el ledger persistido de TU sesión.
-- **Panel de Analítica / Rendimiento (Sprint D):** la curva de P&L acumulado (con hover punto a punto), win rate, ritmo de operaciones, fricción total pagada (fees + slippage) y volumen — todo calculado desde el ledger persistido — más el botón de **export CSV** del historial completo.
-- **Modo de pruebas (Simulador):** inyecta escenarios (oportunidad normal, evento extremo, precio falso) para ver el Spike Filter y la lógica de crédito en acción.
-- **Decisión asistida sin fondos:** diálogo con ganancia posible, costo del crédito y tu umbral de riesgo (costo × k).
-- **Modo oscuro, responsive**, banners de crédito/reequilibrio con cuenta regresiva.
+- **Panel de Analítica / Rendimiento (Sprint D):** curva de P&L acumulado con hover, win rate, ritmo, fricción total pagada (fees + slippage) y volumen — todo desde el ledger — más **export CSV**.
+
+**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso), **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, configuración inicial guiada, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
 
 ---
 
@@ -417,9 +444,12 @@ npm run dev
 
 ```bash
 cd apps/engine
-go test ./...                                  # 50+ tests unitarios
+go test ./...                                  # 50+ tests unitarios del motor
 go test -bench=Detection -benchmem -run=^$     # benchmark del hot path
 # go test -race corre en el CI (requiere gcc de 64 bits, ausente en la máquina de desarrollo)
+
+cd ../web
+npm test                                       # 13 tests del layout paramétrico del radar (vitest)
 ```
 
 ---
@@ -463,13 +493,13 @@ Verifica: `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`, y `https
 
 ## 🧭 Qué sigue — plan de evolución
 
-> Los sprints A, B, **C y D** ya están hechos (ver [bitácora](#-estado-de-la-rama-bitácora)). Queda el cierre:
+> Los sprints A, B, **C y D** y el **rediseño Radar-first** ya están hechos (ver [bitácora](#-estado-de-la-rama-bitácora)). Queda el cierre:
 
 ### Cierre de la rama
 
-1. **Desplegar esta rama** (Fly + Vercel) y validar end-to-end en producción: panel de estrategia, radar de 3 venues, autopiloto, `resume_session`, `/api/stats` y el export CSV. El esquema nuevo (columna `fees_usd`) se migra solo al arrancar — verificado contra una base existente.
-2. **Actualizar las capturas del README** (radar de 3 columnas, panel de estrategia con universo, panel de analítica, "Recuperando tu sesión…").
-3. **Sesión de revisión profunda:** correr la revisión adversarial multi-agente sobre la rama completa (los intentos previos murieron por límites de tokens del plan — el dueño dedicará una sesión aparte al final).
+1. **Desplegar esta rama** (Fly + Vercel) y validar end-to-end en producción: vista Radar con 3 venues, drawer de estrategia, autopiloto, `resume_session`, `/api/stats` y el export CSV. El esquema nuevo (columna `fees_usd`) se migra solo al arrancar — verificado contra una base existente. **Bloqueado por:** `flyctl auth login` es interactivo (lo corre el dueño); Vercel se maneja desde su dashboard (cambiar la production branch o hacer merge a `main`).
+2. **Actualizar las capturas del README** (checklist detallado en la [sección de capturas](#-capturas-de-pantalla)) — las toma el dueño con la app corriendo en local.
+3. **Sesión de revisión profunda:** correr la revisión adversarial multi-agente sobre la rama completa (los intentos previos murieron por límites de tokens del plan — el dueño la pedirá EXPLÍCITAMENTE en una sesión dedicada; no lanzarla sin que la pida). Buen candidato a limpiar en esa sesión: `GraphPanel.tsx` (el radar viejo, ya sin montar).
 
 ### Backlog (diseño listo, sin fecha)
 
@@ -479,13 +509,27 @@ Verifica: `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`, y `https
 - **Puente a ejecución real:** interface `ExchangeAdapter` (libro/órdenes/balances) con implementación simulada actual + Binance **Testnet** — el paso de demo a sistema real.
 - **Postgres** solo si aparecen múltiples instancias del motor o cuentas con login (la interfaz `SessionStore` ya lo permite sin reescribir).
 - Wire multi-venue completo en la UI de wallets clásicas (hoy leen el plano 2-venue; el radar ya usa `balances`).
+- **Validar el modo claro del radar** con el dueño: hoy el lienzo está comprometido al oscuro (decisión de diseño tipo terminal); si no convence en modo claro, tematizarlo.
+- Tooltip de arista con la **razón de inviabilidad** cuando no hay ciclo (spread actual vs fees) — hace visible la honestidad del modelo (quedó fuera de R3 por alcance).
 
 ---
 
 ## 📸 Capturas de pantalla
 
-> ### ⚠️ PENDIENTE: ACTUALIZAR CUANDO SE TERMINE DE TRABAJAR Y TESTEAR EL PROYECTO
-> Las capturas siguientes corresponden a la **versión anterior** (rama `main`). Faltan: Radar Omnidireccional con 3 venues (GraphPanel), panel de Estrategia con universo y autopiloto, panel de Analítica/Rendimiento, y la pantalla "Recuperando tu sesión…".
+> ### ⚠️ PENDIENTE: ACTUALIZAR LAS CAPTURAS (las toma el dueño)
+> Las capturas siguientes corresponden a la **versión anterior** (rama `main`, pre-rediseño): siguen siendo útiles para los flujos que no cambiaron (crédito, onboarding, tutorial, fondos, simulador), pero **ya no reflejan la pantalla principal**. Checklist de capturas nuevas (app corriendo en local, modo oscuro):
+>
+> 1. **Vista RADAR completa** — las 3 columnas (Binance/Bitso/Kraken) con precios vivos, header con tabs y patrimonio. *La captura estrella.*
+> 2. **Card de nodo abierta** (click en BTC@Bitso, por ejemplo): libros, frescura, Editar fondos.
+> 3. **Tooltip de arista** (hover sobre un libro): compra/venta + fee + liquidez.
+> 4. **Drawer de Estrategia abierto sobre el grafo**, idealmente con un venue podado (atenuado en el lienzo detrás).
+> 5. **El ciclo en acción**: inyectar "Oportunidad normal" desde ⚡ Probar el bot y capturar el grafo con la ruta en verde + partículas (y si se puede, el `+$X` flotando).
+> 6. **Spike bloqueado**: inyectar "Precio falso" y capturar la narración en rojo.
+> 7. **Vista DASHBOARD** (tab): KPIs + wallets + feed.
+> 8. **Panel de Analítica** abierto con la curva de P&L y los tiles.
+> 9. **"Recuperando tu sesión…"** (recargar la página con sesión activa).
+>
+> Al reemplazar: mantener los nombres descriptivos en `assets/` y actualizar los `<img>`/rutas de abajo.
 
 ### Panel principal en tiempo real
 
