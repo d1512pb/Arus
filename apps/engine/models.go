@@ -62,12 +62,20 @@ const (
 	DemoChunkSize    = 0.05
 	DemoOrderLatency = 50 * time.Millisecond
 
-	CreditLineUSD            = 50000.0
-	CreditLineBTC            = 1.0
-	CreditOriginationFee     = 25.0
-	CreditAPR                = 0.10
-	CreditDurationMinutes    = 1.0
-	RebalanceDurationMinutes = 1.0 // demo: en producción el traslado entre exchanges tarda ~30+ min
+	// Términos POR DEFECTO de la línea de crédito. Desde la parametrización del
+	// préstamo son solo los VALORES INICIALES: cada sesión define los suyos vía
+	// set_params (TradingParameters.CreditLine*/CreditAPR/...), clampeados abajo.
+	DefaultCreditLineUSD        = 50000.0
+	DefaultCreditLineBTC        = 1.0
+	DefaultCreditOriginationFee = 25.0
+	DefaultCreditAPR            = 0.10
+	DefaultCreditDurationMin    = 1.0
+	RebalanceDurationMinutes    = 1.0 // demo: en producción el traslado entre exchanges tarda ~30+ min
+
+	// DefaultOrderFailureProb modela la "Falla de Orden Parcial" (Fill-or-Kill):
+	// probabilidad de que una orden remota NO se llene. Parametrizable por sesión
+	// (0 = corrida limpia; alto = provocar el circuit breaker a voluntad en demo).
+	DefaultOrderFailureProb = 0.05
 )
 
 // Parámetros de trading por defecto. Son la fuente de los VALORES INICIALES de cada
@@ -114,6 +122,17 @@ const (
 	MaxDivergenceRatioLimit = 2.00
 	MinRiskMultiplier       = 1.0 // <1 significaría endeudarse aceptando pérdida esperada: prohibido
 	MaxRiskMultiplier       = 100.0
+
+	// Rangos del PRÉSTAMO parametrizado (los términos los define el usuario).
+	MinCreditLineUSDParam = 1_000.0    // una línea menor no financia ni un chunk útil
+	MaxCreditLineUSDParam = 1_000_000.0
+	MinCreditLineBTCParam = 0.0 // 0 = préstamo solo en cash, válido
+	MaxCreditLineBTCParam = 100.0
+	MaxCreditAPRParam     = 1.0 // 100 % anual: por encima es usura, no un parámetro
+	MaxCreditFeeParam     = 1_000.0
+	MinCreditDurationMin  = 0.25 // 15 s: por debajo el plazo no alcanza ni a operar
+	MaxCreditDurationMin  = 60.0
+	MaxOrderFailureProb   = 0.5 // más de 50 % de fallos no es un mercado, es una avería
 )
 
 // MinExecutableVolumeBTC: si la liquidez disponible deja el volumen por debajo de
@@ -182,6 +201,22 @@ type TradingParameters struct {
 	// y EJECUTA el mejor ciclo de TU subgrafo con TUS fees — sustituyendo al
 	// ejecutor clásico del par BTC. Opt-in explícito del usuario.
 	RadarAutopilot bool `json:"radar_autopilot,omitempty"`
+
+	// ── PRÉSTAMO PARAMETRIZADO: los términos del crédito los define el usuario ──
+	// Antes eran constantes de compilación; ahora cada sesión negocia su propia
+	// línea: monto (USD y BTC), tasa anual, comisión de originación y plazo. La
+	// inecuación de dominancia (ganancia > costo × RiskMultiplier) no cambia —
+	// cambia el costo que el usuario acepta multiplicar.
+	CreditLineUSD        float64 `json:"credit_line_usd"`
+	CreditLineBTC        float64 `json:"credit_line_btc"`
+	CreditAPR            float64 `json:"credit_apr"`             // fracción anual (0.10 = 10 %)
+	CreditOriginationFee float64 `json:"credit_origination_fee"` // USD fijos por activación
+	CreditDurationMin    float64 `json:"credit_duration_min"`    // plazo del préstamo, en minutos
+
+	// OrderFailureProb: probabilidad de Fill-or-Kill fallido por orden (la
+	// "física" del simulador). 0 = corrida limpia para la demo; alto = provocar
+	// el circuit breaker a voluntad.
+	OrderFailureProb float64 `json:"order_failure_prob"`
 }
 
 // venueEnabled informa si un venue pertenece al universo del usuario (lista
@@ -224,13 +259,19 @@ func (p TradingParameters) universeAllows(n MarketNode) bool {
 // con los fees tomados del registro de venues.
 func DefaultTradingParameters() TradingParameters {
 	return TradingParameters{
-		TakerFees:          defaultTakerFees(),
-		MinNetProfitUSD:    DefaultMinNetProfitUSD,
-		MaxOrderSizeBTC:    DefaultMaxOrderSizeBTC,
-		SlippageRate:       DefaultSlippageRate,
-		SpikeTickDeviation: DefaultSpikeTickDeviation,
-		MaxDivergenceRatio: DefaultMaxDivergenceRatio,
-		RiskMultiplier:     DefaultRiskMultiplier,
+		TakerFees:            defaultTakerFees(),
+		MinNetProfitUSD:      DefaultMinNetProfitUSD,
+		MaxOrderSizeBTC:      DefaultMaxOrderSizeBTC,
+		SlippageRate:         DefaultSlippageRate,
+		SpikeTickDeviation:   DefaultSpikeTickDeviation,
+		MaxDivergenceRatio:   DefaultMaxDivergenceRatio,
+		RiskMultiplier:       DefaultRiskMultiplier,
+		CreditLineUSD:        DefaultCreditLineUSD,
+		CreditLineBTC:        DefaultCreditLineBTC,
+		CreditAPR:            DefaultCreditAPR,
+		CreditOriginationFee: DefaultCreditOriginationFee,
+		CreditDurationMin:    DefaultCreditDurationMin,
+		OrderFailureProb:     DefaultOrderFailureProb,
 	}
 }
 

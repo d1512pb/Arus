@@ -38,6 +38,15 @@ export interface TradingParams {
   enabled_assets?: string[];
   // Autopiloto del radar: detección → ejecución del mejor ciclo del universo.
   radar_autopilot?: boolean;
+  // Préstamo parametrizado: los términos del crédito los define el usuario.
+  // Opcionales solo por compatibilidad con motores previos al bloque.
+  credit_line_usd?: number;
+  credit_line_btc?: number;
+  credit_apr?: number; // fracción anual (0.10 = 10 %)
+  credit_origination_fee?: number;
+  credit_duration_min?: number;
+  // Física del simulador: probabilidad de Fill-or-Kill fallido por orden.
+  order_failure_prob?: number;
 }
 
 // --- Radar omnidireccional (Fase 2): espejo de GraphSnapshotWire en Go ---

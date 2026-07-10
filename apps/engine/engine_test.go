@@ -65,7 +65,7 @@ func TestComputeNetProfit_LiquidityTrap(t *testing.T) {
 
 // TestCreditWorthIt cubre la inecuación de dominancia con el multiplicador de riesgo.
 func TestCreditWorthIt(t *testing.T) {
-	cost := calculateCreditCost(CreditLineUSD)
+	cost := calculateCreditCost(DefaultTradingParameters())
 
 	cases := []struct {
 		name       string
@@ -87,13 +87,25 @@ func TestCreditWorthIt(t *testing.T) {
 	}
 }
 
-// TestCalculateCreditCost: originación + interés prorrateado por minuto.
+// TestCalculateCreditCost: originación + interés prorrateado por minuto, sobre
+// los TÉRMINOS DE LA SESIÓN (préstamo parametrizado).
 func TestCalculateCreditCost(t *testing.T) {
-	got := calculateCreditCost(CreditLineUSD)
-	interest := (CreditAPR / 365.0 / 24.0 / 60.0) * CreditDurationMinutes * CreditLineUSD
-	want := CreditOriginationFee + interest
+	got := calculateCreditCost(DefaultTradingParameters())
+	interest := (DefaultCreditAPR / 365.0 / 24.0 / 60.0) * DefaultCreditDurationMin * DefaultCreditLineUSD
+	want := DefaultCreditOriginationFee + interest
 	if !almostEqual(got, want) {
 		t.Fatalf("costo=%.10f, esperado %.10f", got, want)
+	}
+
+	// Términos propios del usuario: línea de 100k al 20 % anual, fee $50, 10 min.
+	p := DefaultTradingParameters()
+	p.CreditLineUSD = 100_000
+	p.CreditAPR = 0.20
+	p.CreditOriginationFee = 50
+	p.CreditDurationMin = 10
+	want = 50 + (0.20/365.0/24.0/60.0)*10*100_000
+	if got := calculateCreditCost(p); !almostEqual(got, want) {
+		t.Fatalf("costo con términos propios=%.10f, esperado %.10f", got, want)
 	}
 }
 
@@ -183,6 +195,77 @@ func TestSanitizeTradingParams_ValidPassesThrough(t *testing.T) {
 		p.SlippageRate != 0.001 || p.SpikeTickDeviation != 0.08 ||
 		p.MaxDivergenceRatio != 1.15 || p.RiskMultiplier != 5.0 {
 		t.Fatalf("parámetros válidos alterados: %+v", p)
+	}
+}
+
+// TestSanitizeTradingParams_CreditBlock: versionado del wire del préstamo.
+// Un payload SIN el bloque (CreditLineUSD == 0: sesión persistida o cliente
+// viejos) conserva TODOS los defaults del crédito; un payload v2 respeta valores
+// explícitos (APR 0, fee 0) y clampea los absurdos.
+func TestSanitizeTradingParams_CreditBlock(t *testing.T) {
+	// Payload v1 (sin bloque): defaults intactos, nunca "línea al mínimo".
+	v1 := sanitizeTradingParams(TradingParameters{MinNetProfitUSD: 5})
+	if v1.CreditLineUSD != DefaultCreditLineUSD || v1.CreditAPR != DefaultCreditAPR ||
+		v1.CreditOriginationFee != DefaultCreditOriginationFee ||
+		v1.CreditDurationMin != DefaultCreditDurationMin ||
+		v1.OrderFailureProb != DefaultOrderFailureProb {
+		t.Fatalf("payload v1 no conservó los defaults del crédito: %+v", v1)
+	}
+
+	// Payload v2: APR 0 y fee 0 son decisiones EXPLÍCITAS válidas (crédito gratis).
+	v2 := sanitizeTradingParams(TradingParameters{
+		CreditLineUSD:        100_000,
+		CreditLineBTC:        2,
+		CreditAPR:            0,
+		CreditOriginationFee: 0,
+		CreditDurationMin:    10,
+		OrderFailureProb:     0,
+	})
+	if v2.CreditLineUSD != 100_000 || v2.CreditLineBTC != 2 || v2.CreditAPR != 0 ||
+		v2.CreditOriginationFee != 0 || v2.CreditDurationMin != 10 || v2.OrderFailureProb != 0 {
+		t.Fatalf("payload v2 explícito alterado: %+v", v2)
+	}
+
+	// Payload v2 absurdo: cada término cae a su rango sano.
+	abs := sanitizeTradingParams(TradingParameters{
+		CreditLineUSD:        1e12,  // → MaxCreditLineUSDParam
+		CreditLineBTC:        -3,    // → MinCreditLineBTCParam
+		CreditAPR:            9.0,   // 900 % anual → MaxCreditAPRParam
+		CreditOriginationFee: 1e6,   // → MaxCreditFeeParam
+		CreditDurationMin:    0.001, // → MinCreditDurationMin
+		OrderFailureProb:     0.99,  // → MaxOrderFailureProb
+	})
+	if abs.CreditLineUSD != MaxCreditLineUSDParam || abs.CreditLineBTC != MinCreditLineBTCParam ||
+		abs.CreditAPR != MaxCreditAPRParam || abs.CreditOriginationFee != MaxCreditFeeParam ||
+		abs.CreditDurationMin != MinCreditDurationMin || abs.OrderFailureProb != MaxOrderFailureProb {
+		t.Fatalf("clamps del crédito no aplicados: %+v", abs)
+	}
+}
+
+// TestActivateCredit_UserTerms: la activación usa los términos DE LA SESIÓN
+// (línea, fee, APR, plazo), no constantes del motor.
+func TestActivateCredit_UserTerms(t *testing.T) {
+	e := &HFTEngine{Tracker: NewSpreadTracker()}
+	s := newClientSession("credito-propio", nil)
+	initSession(s, 10_000, 0.5)
+
+	p := s.Params()
+	p.CreditLineUSD = 20_000
+	p.CreditLineBTC = 0.5
+	p.CreditOriginationFee = 100
+	p.CreditAPR = 0 // interés cero: el costo debe ser exactamente la originación
+	s.SetParams(p)
+
+	e.activateCreditSession(s)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if !almostEqual(s.Credit.BorrowedUSD["Binance"], 10_000) ||
+		!almostEqual(s.Credit.BorrowedBTC["Bitso"], 0.25) {
+		t.Fatalf("préstamo no usó la línea del usuario: USD=%+v BTC=%+v", s.Credit.BorrowedUSD, s.Credit.BorrowedBTC)
+	}
+	if !almostEqual(s.Credit.LastCost, 100) {
+		t.Fatalf("costo=%v, esperado exactamente la originación $100 (APR 0)", s.Credit.LastCost)
 	}
 }
 
@@ -429,9 +512,9 @@ func TestActivateCredit_ClassicPairOnly(t *testing.T) {
 	if got := s.Credit.BorrowedUSD["Kraken"]; got != 0 {
 		t.Fatalf("Kraken recibió préstamo: %v", got)
 	}
-	if !almostEqual(s.Credit.BorrowedUSD["Binance"], CreditLineUSD/2) ||
-		!almostEqual(s.Credit.BorrowedUSD["Bitso"], CreditLineUSD/2) ||
-		!almostEqual(s.Credit.BorrowedBTC["Binance"], CreditLineBTC/2) {
+	if !almostEqual(s.Credit.BorrowedUSD["Binance"], DefaultCreditLineUSD/2) ||
+		!almostEqual(s.Credit.BorrowedUSD["Bitso"], DefaultCreditLineUSD/2) ||
+		!almostEqual(s.Credit.BorrowedBTC["Binance"], DefaultCreditLineBTC/2) {
 		t.Fatalf("préstamo mal repartido: USD=%+v BTC=%+v", s.Credit.BorrowedUSD, s.Credit.BorrowedBTC)
 	}
 	if s.Wallets.Get("Kraken", "USD") != 0 {

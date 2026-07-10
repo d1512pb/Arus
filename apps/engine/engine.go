@@ -17,22 +17,18 @@ const (
 	SpikeWarnMultiplier  = 15.0
 	SpikeBlockMultiplier = 50.0
 
-	// OrderFailureProbability modela una "Falla de Orden Parcial" (Fill-or-Kill): con esta
-	// probabilidad, la orden de mercado en el exchange remoto NO se llena. Es un escenario
-	// adverso deliberado para ejercitar el circuit breaker: al fallar, abortamos el trade
-	// ANTES de tocar ninguna wallet (atómico, cero exposición direccional) y pausamos.
-	OrderFailureProbability = 0.05 // 5 % de Fill-or-Kill por orden
-
 	// OrderFailurePause es cuánto se pausa la sesión tras un Fill-or-Kill fallido, para no
 	// reintentar a ciegas contra un libro que está rechazando liquidez en ese instante.
 	OrderFailurePause = 2 * time.Second
 )
 
-// orderFails simula una Falla de Orden Parcial (Fill-or-Kill): devuelve true con
-// OrderFailureProbability. Se evalúa JUSTO antes de mover wallets, de modo que un
-// fallo aborta la operación sin dejar estado a medias (sin exposición direccional).
-func orderFails() bool {
-	return rand.Float64() < OrderFailureProbability
+// orderFails simula una Falla de Orden Parcial (Fill-or-Kill): con probabilidad
+// `prob` la orden remota NO se llena (TradingParameters.OrderFailureProb — cada
+// sesión define la "física" de su simulador). Se evalúa JUSTO antes de mover
+// wallets, de modo que un fallo aborta sin dejar estado a medias (sin exposición
+// direccional).
+func orderFails(prob float64) bool {
+	return rand.Float64() < prob
 }
 
 // computeNetProfit es LA fórmula institucional de rentabilidad — la única fuente de
@@ -683,19 +679,19 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 		return
 	}
 
-	// Circuit breaker (Fill-or-Kill): con OrderFailureProbability la orden remota no se
-	// llena. Como todavía NO hemos tocado ninguna wallet, abortar aquí es atómico (cero
-	// exposición direccional: nunca quedamos comprados en una pierna sin vender la otra).
-	// Pausamos la sesión para no martillar un libro que está rechazando liquidez.
-	if orderFails() {
+	p := session.Params()
+
+	// Circuit breaker (Fill-or-Kill): con la probabilidad de fallo DE LA SESIÓN la
+	// orden remota no se llena. Como todavía NO hemos tocado ninguna wallet, abortar
+	// aquí es atómico (cero exposición direccional: nunca quedamos comprados en una
+	// pierna sin vender la otra). Pausamos para no martillar un libro roto.
+	if orderFails(p.OrderFailureProb) {
 		session.Mu.Lock()
 		session.PausedUntil = time.Now().Add(OrderFailurePause)
 		session.Mu.Unlock()
 		sendLog(session, "🔌 [CIRCUIT BREAKER] Fallo de liquidez en exchange remoto, abortando para evitar exposición direccional")
 		return
 	}
-
-	p := session.Params()
 
 	session.Mu.Lock()
 
@@ -901,8 +897,9 @@ func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedPr
 
 	// Inecuación de dominancia del crédito con el apetito de riesgo del usuario:
 	// endeudarse solo si la ganancia proyectada supera costo × RiskMultiplier.
+	// El costo sale de los TÉRMINOS DE LA SESIÓN (línea, APR, fee, plazo).
 	p := session.Params()
-	creditCost := calculateCreditCost(CreditLineUSD)
+	creditCost := calculateCreditCost(p)
 	required := creditCost * p.RiskMultiplier
 
 	if autoMode && creditWorthIt(projectedProfit, creditCost, p.RiskMultiplier) {
@@ -939,13 +936,22 @@ func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedPr
 	})
 }
 
-func calculateCreditCost(usdBorrowed float64) float64 {
-	minuteRate := CreditAPR / 365.0 / 24.0 / 60.0
-	interest := minuteRate * CreditDurationMinutes * usdBorrowed
-	return CreditOriginationFee + interest
+// calculateCreditCost valora el préstamo con los TÉRMINOS DE LA SESIÓN:
+// comisión de originación + interés simple prorrateado al plazo en minutos
+// sobre la línea en USD. Antes eran constantes; ahora cada usuario define
+// cuánto pide, a qué tasa y por cuánto tiempo — y el costo que RiskMultiplier
+// multiplica se mueve con ellos.
+func calculateCreditCost(p TradingParameters) float64 {
+	minuteRate := p.CreditAPR / 365.0 / 24.0 / 60.0
+	interest := minuteRate * p.CreditDurationMin * p.CreditLineUSD
+	return p.CreditOriginationFee + interest
 }
 
 func (e *HFTEngine) activateCreditSession(s *ClientSession) {
+	// Términos del préstamo de ESTA sesión (línea, APR, fee, plazo): snapshot
+	// consistente para toda la activación aunque el usuario edite a mitad.
+	p := s.Params()
+
 	s.Mu.Lock()
 	if s.Credit.Active {
 		s.Mu.Unlock()
@@ -957,14 +963,14 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 		s.Mu.Unlock()
 		return
 	}
-	cost := calculateCreditCost(CreditLineUSD)
+	cost := calculateCreditCost(p)
 
 	// La línea de crédito se reparte por igual entre los venues del PAR CLÁSICO:
 	// es liquidez para seguir operando el par (y los ciclos que arrancan en sus
 	// nodos cash), no capital para exchanges que el crédito nunca respaldó.
 	pair := classicVenues()
-	perVenueUSD := CreditLineUSD / float64(len(pair))
-	perVenueBTC := CreditLineBTC / float64(len(pair))
+	perVenueUSD := p.CreditLineUSD / float64(len(pair))
+	perVenueBTC := p.CreditLineBTC / float64(len(pair))
 
 	s.Credit.BorrowedUSD = make(map[string]float64, len(pair))
 	s.Credit.BorrowedBTC = make(map[string]float64, len(pair))
@@ -979,7 +985,7 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	s.TotalWealth -= cost
 	s.Credit.Active = true
 	s.Credit.ActivatedAt = time.Now()
-	s.Credit.ExpiresAt = time.Now().Add(CreditDurationMinutes * time.Minute)
+	s.Credit.ExpiresAt = time.Now().Add(time.Duration(p.CreditDurationMin * float64(time.Minute)))
 	s.Credit.TotalCostPaid += cost
 	s.Credit.ActivationCount++
 	s.Credit.DepletedPending = false
@@ -991,8 +997,8 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	expiresAt := s.Credit.ExpiresAt
 	s.Mu.Unlock()
 
-	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO ACTIVADO] +$%.0f USD +%.1f BTC prestados | Costo: $%.2f | Operando con crédito mientras se reequilibran fondos (%.0f min demo)",
-		CreditLineUSD, CreditLineBTC, cost, CreditDurationMinutes))
+	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO ACTIVADO] +$%.0f USD +%.1f BTC prestados | Costo: $%.2f (APR %.1f %% · fee $%.2f) | Plazo: %.2g min",
+		p.CreditLineUSD, p.CreditLineBTC, cost, p.CreditAPR*100, p.CreditOriginationFee, p.CreditDurationMin))
 
 	sendEvent(s, ServerEvent{
 		Type:               "CREDIT_APPROVED",
@@ -1012,14 +1018,14 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 		Timestamp:         time.Now(),
 		BuyExchange:       "Préstamo",
 		SellExchange:      "Línea de Crédito",
-		VolumeBTC:         CreditLineBTC,
+		VolumeBTC:         p.CreditLineBTC,
 		SpreadUSD:         0,
 		NetProfitUSD:      -cost,
 		IsCreditInjection: true,
 	})
 
 	go func() {
-		time.Sleep(time.Duration(CreditDurationMinutes * float64(time.Minute)))
+		time.Sleep(time.Duration(p.CreditDurationMin * float64(time.Minute)))
 		s.Mu.Lock()
 		stillActive := s.Credit.Active
 		var earnings float64
@@ -1168,10 +1174,10 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 			break
 		}
 
-		// Mismo circuit breaker que en el camino real: 5 % de Fill-or-Kill por chunk.
-		// Aún no se ha movido ninguna wallet, así que abortar es atómico; pausamos la
-		// sesión y cortamos la inyección para no exponernos en una sola pierna.
-		if orderFails() {
+		// Mismo circuit breaker que en el camino real: Fill-or-Kill por chunk con la
+		// probabilidad de fallo de la sesión. Aún no se ha movido ninguna wallet, así
+		// que abortar es atómico; pausamos y cortamos la inyección.
+		if orderFails(p.OrderFailureProb) {
 			session.Mu.Lock()
 			session.PausedUntil = time.Now().Add(OrderFailurePause)
 			session.Mu.Unlock()

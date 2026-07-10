@@ -199,8 +199,8 @@ func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btc
 		return 0, false
 	}
 	for _, v := range pair {
-		hypo.Add(v.Name, v.QuoteAsset, CreditLineUSD/float64(len(pair)))
-		hypo.Add(v.Name, v.BaseAsset, CreditLineBTC/float64(len(pair)))
+		hypo.Add(v.Name, v.QuoteAsset, p.CreditLineUSD/float64(len(pair)))
+		hypo.Add(v.Name, v.BaseAsset, p.CreditLineBTC/float64(len(pair)))
 	}
 	plan, err := planCycle(c, hypo, p, btcPrice)
 	if err != nil {
@@ -270,9 +270,9 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		return
 	}
 
-	// Circuit breaker Fill-or-Kill, ANTES de tocar saldos (atomicidad idéntica
-	// al camino clásico: cero exposición direccional).
-	if orderFails() {
+	// Circuit breaker Fill-or-Kill con la probabilidad de fallo de la sesión,
+	// ANTES de tocar saldos (atomicidad idéntica al camino clásico).
+	if orderFails(p.OrderFailureProb) {
 		session.Mu.Lock()
 		session.PausedUntil = time.Now().Add(OrderFailurePause)
 		session.Mu.Unlock()

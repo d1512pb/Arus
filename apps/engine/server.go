@@ -148,7 +148,7 @@ func sanitizeTradingParams(requested TradingParameters) TradingParameters {
 		}
 	}
 
-	return TradingParameters{
+	applied := TradingParameters{
 		TakerFees:          fees,
 		MinNetProfitUSD:    clampFloat(requested.MinNetProfitUSD, MinNetProfitFloor, MaxNetProfitCeil, defaults.MinNetProfitUSD),
 		MaxOrderSizeBTC:    clampFloat(requested.MaxOrderSizeBTC, MinOrderSizeBTC, MaxOrderSizeCapBTC, defaults.MaxOrderSizeBTC),
@@ -159,7 +159,31 @@ func sanitizeTradingParams(requested TradingParameters) TradingParameters {
 		EnabledVenues:      venuesU,
 		EnabledAssets:      assetsU,
 		RadarAutopilot:     requested.RadarAutopilot,
+
+		// Bloque nuevo (préstamo + simulador): defaults salvo payload v2, abajo.
+		CreditLineUSD:        defaults.CreditLineUSD,
+		CreditLineBTC:        defaults.CreditLineBTC,
+		CreditAPR:            defaults.CreditAPR,
+		CreditOriginationFee: defaults.CreditOriginationFee,
+		CreditDurationMin:    defaults.CreditDurationMin,
+		OrderFailureProb:     defaults.OrderFailureProb,
 	}
+
+	// Versionado del wire: un payload SIN el bloque del préstamo (sesión persistida
+	// o cliente anteriores a la parametrización del crédito) llega con
+	// CreditLineUSD == 0 — todo el bloque conserva los defaults de arriba, en vez
+	// de degradar la línea al mínimo o dejar APR/fee en cero por accidente. Un
+	// payload v2 SIEMPRE trae la línea (la UI envía el struct completo) y ahí sí
+	// se respetan valores explícitos como APR 0 o fee 0.
+	if requested.CreditLineUSD != 0 {
+		applied.CreditLineUSD = clampFloat(requested.CreditLineUSD, MinCreditLineUSDParam, MaxCreditLineUSDParam, defaults.CreditLineUSD)
+		applied.CreditLineBTC = clampFloat(requested.CreditLineBTC, MinCreditLineBTCParam, MaxCreditLineBTCParam, defaults.CreditLineBTC)
+		applied.CreditAPR = clampFloat(requested.CreditAPR, 0, MaxCreditAPRParam, defaults.CreditAPR)
+		applied.CreditOriginationFee = clampFloat(requested.CreditOriginationFee, 0, MaxCreditFeeParam, defaults.CreditOriginationFee)
+		applied.CreditDurationMin = clampFloat(requested.CreditDurationMin, MinCreditDurationMin, MaxCreditDurationMin, defaults.CreditDurationMin)
+		applied.OrderFailureProb = clampFloat(requested.OrderFailureProb, 0, MaxOrderFailureProb, defaults.OrderFailureProb)
+	}
+	return applied
 }
 
 func sendEvent(s *ClientSession, ev ServerEvent) {

@@ -28,6 +28,17 @@ interface FormState {
   maxOrder: string;
   slippageBps: string;
   risk: string;
+  // Filtros de seguridad (circuit breakers), en % para legibilidad.
+  spikePct: string;      // spike_tick_deviation × 100
+  divergencePct: string; // (max_divergence_ratio − 1) × 100
+  // Préstamo parametrizado: los términos del crédito los define el usuario.
+  creditLineUsd: string;
+  creditLineBtc: string;
+  creditAprPct: string; // credit_apr × 100
+  creditFee: string;
+  creditDurationMin: string;
+  // Física del simulador: probabilidad de fallo de orden, en %.
+  failureProbPct: string;
   fees: Record<string, string>;
   autopilot: boolean;
   venues: string[]; // universo seleccionado (vacío antes de conocer catálogo)
@@ -44,6 +55,14 @@ function fromParams(p: TradingParams, catalogVenues: string[], catalogAssets: st
     maxOrder: p.max_order_size_btc.toString(),
     slippageBps: (p.slippage_rate * 10000).toString(), // fracción → bps
     risk: p.risk_multiplier.toString(),
+    spikePct: (p.spike_tick_deviation * 100).toString(),
+    divergencePct: ((p.max_divergence_ratio - 1) * 100).toFixed(0),
+    creditLineUsd: (p.credit_line_usd ?? 50000).toString(),
+    creditLineBtc: (p.credit_line_btc ?? 1).toString(),
+    creditAprPct: ((p.credit_apr ?? 0.1) * 100).toString(),
+    creditFee: (p.credit_origination_fee ?? 25).toString(),
+    creditDurationMin: (p.credit_duration_min ?? 1).toString(),
+    failureProbPct: ((p.order_failure_prob ?? 0.05) * 100).toString(),
     fees,
     autopilot: p.radar_autopilot === true,
     // Lista vacía en el servidor = "todos": se materializa con el catálogo.
@@ -51,6 +70,27 @@ function fromParams(p: TradingParams, catalogVenues: string[], catalogAssets: st
     assets: p.enabled_assets?.length ? p.enabled_assets : catalogAssets,
   };
 }
+
+// Presets de estrategia: rellenan el formulario (SIN aplicar — el usuario revisa
+// y pulsa Aplicar). No tocan fees, universo ni crédito: son perfiles de apetito
+// de riesgo, no de mercado.
+const PRESETS: Record<string, Partial<FormState> & { hint: string }> = {
+  Conservador: {
+    minNet: "5", maxOrder: "0.002", slippageBps: "10", risk: "5",
+    spikePct: "2", divergencePct: "10",
+    hint: "Solo jugadas claras: margen alto, órdenes chicas y filtros estrictos.",
+  },
+  Balanceado: {
+    minNet: "0.1", maxOrder: "0.005", slippageBps: "5", risk: "2",
+    spikePct: "5", divergencePct: "20",
+    hint: "El punto medio: los defaults del motor con un crédito prudente.",
+  },
+  Agresivo: {
+    minNet: "0.01", maxOrder: "0.05", slippageBps: "3", risk: "1",
+    spikePct: "10", divergencePct: "50",
+    hint: "Captura hasta lo mínimo: margen simbólico, órdenes grandes, crédito al límite.",
+  },
+};
 
 const num = (s: string) => {
   const v = parseFloat(s);
@@ -108,6 +148,14 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
       max_order_size_btc: num(form.maxOrder),
       slippage_rate: num(form.slippageBps) / 10000, // bps → fracción
       risk_multiplier: num(form.risk),
+      spike_tick_deviation: num(form.spikePct) / 100,
+      max_divergence_ratio: 1 + num(form.divergencePct) / 100,
+      credit_line_usd: num(form.creditLineUsd),
+      credit_line_btc: num(form.creditLineBtc),
+      credit_apr: num(form.creditAprPct) / 100,
+      credit_origination_fee: num(form.creditFee),
+      credit_duration_min: num(form.creditDurationMin),
+      order_failure_prob: num(form.failureProbPct) / 100,
       enabled_venues: allV ? [] : form.venues,
       enabled_assets: allA ? [] : form.assets,
       radar_autopilot: form.autopilot,
@@ -126,6 +174,26 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
   // y el StrategyDrawer del radar (embedded).
   const body = (
     <div className={embedded ? "" : "border-t border-gray-100 dark:border-gray-800 px-4 sm:px-6 py-5"}>
+          {/* Presets: el rango completo de la parametrización en un click.
+              Solo rellenan el formulario — nada se aplica sin revisar. */}
+          <div className="mb-5 flex flex-wrap items-center gap-2">
+            <span className={labelCls}>Perfiles rápidos</span>
+            {Object.entries(PRESETS).map(([name, preset]) => (
+              <button
+                key={name}
+                onClick={() => {
+                  const { hint: _hint, ...fields } = preset;
+                  edit(fields);
+                }}
+                title={preset.hint}
+                className="px-3 py-1.5 rounded-full text-[11px] font-bold border border-violet-200 dark:border-violet-500/30 text-violet-600 bg-violet-50 dark:bg-violet-500/10 hover:bg-violet-600 hover:text-white transition-colors"
+              >
+                {name}
+              </button>
+            ))}
+            <span className={`${hintCls} mt-0 basis-full sm:basis-auto`}>Rellenan el formulario; revisa y pulsa Aplicar.</span>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className={labelCls}>Margen mínimo de ganancia (USD)</label>
@@ -150,6 +218,76 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
               <input type="number" step="0.5" min="1" max="100" value={form.risk}
                 onChange={e => edit({ risk: e.target.value })} className={`${inputCls} mt-1`} />
               <p className={hintCls}>Pedir préstamo solo si la ganancia cubre el costo × este factor. 1 = agresivo (al límite); 5 = conservador.</p>
+            </div>
+          </div>
+
+          {/* Filtros de seguridad (circuit breakers): antes existían en el motor
+              sin control en la UI — ahora el usuario ajusta sus propias compuertas. */}
+          <div className="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800">
+            <p className={`${labelCls} mb-3`}>Filtros de seguridad (circuit breakers)</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={labelCls}>Spike Filter: salto máx. por tick (%)</label>
+                <input type="number" step="0.5" min="0.5" max="50" value={form.spikePct}
+                  onChange={e => edit({ spikePct: e.target.value })} className={`${inputCls} mt-1`} />
+                <p className={hintCls}>Si el precio salta más que esto entre dos ticks, el dato se descarta como corrupto. Estricto = opera solo con datos suaves.</p>
+              </div>
+              <div>
+                <label className={labelCls}>Divergencia máx. entre casas (%)</label>
+                <input type="number" step="1" min="1" max="100" value={form.divergencePct}
+                  onChange={e => edit({ divergencePct: e.target.value })} className={`${inputCls} mt-1`} />
+                <p className={hintCls}>Compuerta de cordura: si un exchange se aleja del otro más que esto, algo está roto y no se opera.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Préstamo parametrizado: los términos del crédito los define el usuario.
+              El multiplicador de riesgo (arriba) decide CUÁNDO endeudarse; esto
+              define QUÉ préstamo se pide. */}
+          <div className="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800">
+            <p className={`${labelCls} mb-3`}>Tu línea de crédito (términos del préstamo)</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+              <div>
+                <label className={labelCls}>Línea (USD)</label>
+                <input type="number" step="1000" min="1000" max="1000000" value={form.creditLineUsd}
+                  onChange={e => edit({ creditLineUsd: e.target.value })} className={`${inputCls} mt-1`} />
+              </div>
+              <div>
+                <label className={labelCls}>Línea (BTC)</label>
+                <input type="number" step="0.1" min="0" max="100" value={form.creditLineBtc}
+                  onChange={e => edit({ creditLineBtc: e.target.value })} className={`${inputCls} mt-1`} />
+              </div>
+              <div>
+                <label className={labelCls}>Tasa anual (%)</label>
+                <input type="number" step="0.5" min="0" max="100" value={form.creditAprPct}
+                  onChange={e => edit({ creditAprPct: e.target.value })} className={`${inputCls} mt-1`} />
+              </div>
+              <div>
+                <label className={labelCls}>Fee de apertura (USD)</label>
+                <input type="number" step="5" min="0" max="1000" value={form.creditFee}
+                  onChange={e => edit({ creditFee: e.target.value })} className={`${inputCls} mt-1`} />
+              </div>
+              <div>
+                <label className={labelCls}>Plazo (min)</label>
+                <input type="number" step="0.25" min="0.25" max="60" value={form.creditDurationMin}
+                  onChange={e => edit({ creditDurationMin: e.target.value })} className={`${inputCls} mt-1`} />
+              </div>
+            </div>
+            <p className={hintCls}>
+              Costo por activación = fee de apertura + interés prorrateado al plazo. El bot solo se endeuda si la ganancia proyectada supera ese costo × tu multiplicador de riesgo.
+            </p>
+          </div>
+
+          {/* Física del simulador: qué tan hostil es el mercado simulado. */}
+          <div className="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800">
+            <p className={`${labelCls} mb-3`}>Simulador</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={labelCls}>Prob. de fallo de orden (%)</label>
+                <input type="number" step="1" min="0" max="50" value={form.failureProbPct}
+                  onChange={e => edit({ failureProbPct: e.target.value })} className={`${inputCls} mt-1`} />
+                <p className={hintCls}>Probabilidad de que una orden no se llene (Fill-or-Kill) y salte el circuit breaker. 0 = corrida limpia; alto = estrés máximo.</p>
+              </div>
             </div>
           </div>
 
