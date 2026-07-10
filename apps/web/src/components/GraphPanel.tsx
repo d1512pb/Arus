@@ -264,7 +264,11 @@ export function GraphPanel({ graph }: { graph: GraphSnapshot | null }) {
               </p>
               <p className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 mt-1.5">
                 Retorno neto por vuelta: <strong>+{cycle.net_return_pct.toFixed(3)}%</strong> (fees y slippage ya descontados)
-                {cycle.max_volume_btc > 0 && <> · liquidez disponible: <strong>{cycle.max_volume_btc.toFixed(4)} BTC</strong></>}
+                {cycle.max_volume_btc > 0 ? (
+                  <> · liquidez disponible: <strong>{cycle.max_volume_btc.toFixed(4)} BTC</strong></>
+                ) : (cycle.max_start_amount ?? 0) > 0 ? (
+                  <> · entrada hasta: <strong>{(cycle.max_start_amount as number).toLocaleString("en-US", { maximumFractionDigits: 2 })} {cycle.start_asset}</strong></>
+                ) : null}
               </p>
             </div>
           ) : (

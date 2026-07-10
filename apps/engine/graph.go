@@ -122,10 +122,16 @@ type Cycle struct {
 	NetReturn float64
 	// MaxVolumeBTC es el volumen ejecutable acotado por la arista de libro menos
 	// líquida, SOLO cuando todas las piernas de libro comparten el mismo activo
-	// base (p. ej. el ciclo espacial BTC). En ciclos con bases mixtas (triangular
-	// BTC/ETH) vale 0 = "no homogéneo"; la homogeneización llega con la ejecución
-	// de ciclos (hito 3).
+	// base (p. ej. el ciclo espacial BTC). En ciclos con bases mixtas vale 0;
+	// la capacidad real viaja en MaxStartAmount/StartAsset.
 	MaxVolumeBTC float64
+	// MaxStartAmount es la capacidad del ciclo expresada en unidades de su nodo
+	// de inicio (StartAsset): cuánto puede ENTRAR al ciclo sin exceder la
+	// liquidez de ninguna pierna, con la misma matemática de mapeo por producto
+	// de tasas que usa planRotation. Cubre los ciclos triangulares (bases
+	// mixtas), donde MaxVolumeBTC no aplica. 0 = sin dato de liquidez.
+	MaxStartAmount float64
+	StartAsset     string
 }
 
 // Universe es el subgrafo PERSONAL de una sesión: los venues y activos con los que
@@ -403,10 +409,61 @@ func findNegativeCycle(edges []Edge, nodeCount int) *Cycle {
 		}
 	}
 	if !homogeneous {
-		maxVol = 0 // bases mixtas (triangular): sin volumen homogéneo aún
+		maxVol = 0 // bases mixtas (triangular): el volumen homogéneo no aplica
 	}
 
-	return &Cycle{Edges: cycleEdges, NetReturn: net, MaxVolumeBTC: maxVol}
+	start, capacity := cycleStartCapacity(cycleEdges)
+	return &Cycle{
+		Edges: cycleEdges, NetReturn: net, MaxVolumeBTC: maxVol,
+		MaxStartAmount: capacity, StartAsset: start,
+	}
+}
+
+// cycleStartCapacity calcula cuánto puede ENTRAR al ciclo (en unidades de su nodo
+// de inicio) sin exceder la liquidez visible de ninguna pierna de libro — la misma
+// matemática de mapeo por producto de tasas que planRotation (cycle.go), pero sin
+// saldos ni parámetros: es capacidad PURA de mercado. El ciclo se rota a su primer
+// nodo cash (USD/USDT) si lo tiene, para que la cifra se lea como "entrada ≈ USD";
+// un ciclo sin nodo cash (p. ej. ETH↔BTC entre venues) reporta en su primer activo.
+func cycleStartCapacity(edges []Edge) (startAsset string, capacity float64) {
+	if len(edges) == 0 {
+		return "", 0
+	}
+	rot := 0
+	for i, e := range edges {
+		if isCashAsset(e.From.Asset) {
+			rot = i
+			break
+		}
+	}
+	rotated := append(append([]Edge{}, edges[rot:]...), edges[:rot]...)
+
+	maxStart := math.Inf(1)
+	prod := 1.0
+	for _, e := range rotated {
+		eff := e.Rate * (1 - e.Fee)
+		if eff <= 0 {
+			return string(rotated[0].From.Asset), 0
+		}
+		if e.Kind == EdgeOrderBook && e.Liquidity > 0 {
+			var limit float64
+			if string(e.To.Asset) == e.BaseAsset {
+				// Compra: el volumen en base SALE de la pierna → X·prod·eff ≤ liq.
+				limit = e.Liquidity / (prod * eff)
+			} else {
+				// Venta: el volumen en base ENTRA a la pierna → X·prod ≤ liq.
+				limit = e.Liquidity / prod
+			}
+			if limit < maxStart {
+				maxStart = limit
+			}
+		}
+		prod *= eff
+	}
+	if math.IsInf(maxStart, 1) {
+		maxStart = 0 // ninguna pierna reportó liquidez: sin dato, no "infinito"
+	}
+	return string(rotated[0].From.Asset), maxStart
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +502,12 @@ type GraphCycleWire struct {
 	Path         []string `json:"path"` // IDs de nodos en orden, cerrado (primero == último)
 	NetReturnPct float64  `json:"net_return_pct"`
 	MaxVolumeBTC float64  `json:"max_volume_btc"` // 0 = piernas con bases mixtas (triangular)
-	Viable       bool     `json:"viable"`
+	// MaxStartAmount/StartAsset: capacidad del ciclo en unidades de su nodo de
+	// inicio ("hasta 12 000 USDT de entrada") — cubre los triangulares, donde
+	// max_volume_btc no aplica.
+	MaxStartAmount float64 `json:"max_start_amount,omitempty"`
+	StartAsset     string  `json:"start_asset,omitempty"`
+	Viable         bool    `json:"viable"`
 }
 
 // GraphSnapshotWire es el paquete completo que consume el GraphPanel.
@@ -467,9 +529,11 @@ func isCashAsset(a Asset) bool {
 
 // SnapshotFor arma la vista del radar para UNA sesión: el grafo global de mercado
 // con los SALDOS MULTI-ACTIVO de esa sesión superpuestos en cada nodo (hito 3:
-// el ETH de un ciclo triangular aparece con su saldo real). El ciclo (calculado
-// una vez por barrido) se pasa ya resuelto para no repetir Bellman-Ford por sesión.
-func (g *LiquidityGraph) SnapshotFor(wallets Balances, cycle *Cycle, now time.Time) *GraphSnapshotWire {
+// el ETH de un ciclo triangular aparece con su saldo real) y las aristas de libro
+// valoradas con LOS FEES DEL USUARIO (p.takerFee + p.SlippageRate): mover un
+// slider en el panel cambia los números del radar en el siguiente barrido. El
+// ciclo llega ya resuelto (FindBestCycleFor por sesión, ver Start).
+func (g *LiquidityGraph) SnapshotFor(wallets Balances, p TradingParameters, cycle *Cycle, now time.Time) *GraphSnapshotWire {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -531,12 +595,18 @@ func (g *LiquidityGraph) SnapshotFor(wallets Balances, cycle *Cycle, now time.Ti
 		if math.IsInf(e.Weight, 1) && e.Kind == EdgeOrderBook {
 			continue // libro sin datos: no pintar una arista vacía
 		}
+		feePct := e.Fee * 100
+		if e.Kind == EdgeOrderBook {
+			// La arista se pinta con el costo que ESTE usuario pagaría por usarla,
+			// no con el de referencia: mismo cálculo que FindBestCycleFor.
+			feePct = (p.takerFee(e.From.Venue) + p.SlippageRate) * 100
+		}
 		snap.Edges = append(snap.Edges, GraphEdgeWire{
 			From:      e.From.ID(),
 			To:        e.To.ID(),
 			Kind:      e.Kind.wireKind(),
 			Rate:      e.Rate,
-			FeePct:    e.Fee * 100,
+			FeePct:    feePct,
 			Liquidity: e.Liquidity,
 			BaseAsset: e.BaseAsset,
 			Stale:     e.Kind == EdgeOrderBook && now.Sub(e.UpdatedAt) > MaxBookStaleness,
@@ -550,10 +620,12 @@ func (g *LiquidityGraph) SnapshotFor(wallets Balances, cycle *Cycle, now time.Ti
 			path = append(path, e.To.ID())
 		}
 		snap.BestCycle = &GraphCycleWire{
-			Path:         path,
-			NetReturnPct: cycle.NetReturn * 100,
-			MaxVolumeBTC: cycle.MaxVolumeBTC,
-			Viable:       cycle.NetReturn > 0,
+			Path:           path,
+			NetReturnPct:   cycle.NetReturn * 100,
+			MaxVolumeBTC:   cycle.MaxVolumeBTC,
+			MaxStartAmount: cycle.MaxStartAmount,
+			StartAsset:     cycle.StartAsset,
+			Viable:         cycle.NetReturn > 0,
 		}
 	}
 
@@ -572,6 +644,11 @@ func DescribeCycle(c *Cycle) string {
 	}
 	if c.MaxVolumeBTC > 0 {
 		return fmt.Sprintf("%s (%+.3f %% neto, hasta %.4f BTC)", s, c.NetReturn*100, c.MaxVolumeBTC)
+	}
+	if c.MaxStartAmount > 0 {
+		// Ciclo de bases mixtas (triangular): la capacidad se narra en unidades
+		// del nodo de inicio ("entrada hasta 12 000 USDT").
+		return fmt.Sprintf("%s (%+.3f %% neto, entrada hasta %.2f %s)", s, c.NetReturn*100, c.MaxStartAmount, c.StartAsset)
 	}
 	return fmt.Sprintf("%s (%+.3f %% neto)", s, c.NetReturn*100)
 }

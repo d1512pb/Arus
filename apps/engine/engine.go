@@ -164,8 +164,10 @@ func broadcastLog(hub *Hub, msg string, spread float64, netProfit float64) {
 }
 
 // isValidTick descarta un tick cuya variación respecto al anterior supere maxDeviation
-// (fracción, p. ej. 0.05 = 5 %). Corre en el bucle compartido de ingesta (pre-fan-out),
-// así que recibe el umbral del motor (DefaultSpikeTickDeviation) en vez de uno por sesión.
+// (fracción, p. ej. 0.05 = 5 %). Se aplica en DOS capas: el bucle compartido de ingesta
+// filtra con el default del motor (protege el grafo y el tracker globales), y
+// executeForSession vuelve a filtrar con la tolerancia de CADA sesión
+// (TradingParameters.SpikeTickDeviation) sobre los mids del par.
 func isValidTick(newPrice, lastPrice, maxDeviation float64) bool {
 	if lastPrice == 0 {
 		return true
@@ -490,15 +492,14 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 		if time.Since(lastLogTime) >= time.Second {
 			lastLogTime = time.Now()
 
-			// Radar (Fase 2): un solo Bellman-Ford por barrido; el snapshot por
-			// sesión solo superpone los saldos de cada usuario sobre el grafo.
-			var cycle *Cycle
+			// Radar (Fase 2): la vista GLOBAL de referencia se calcula una vez por
+			// barrido y alimenta el log compartido del feed.
 			if e.Graph != nil {
-				cycle = e.Graph.FindBestCycle(now)
-				if cycle != nil && !radarCycleActive {
-					broadcastLog(hub, fmt.Sprintf("📡 [RADAR] Ciclo rentable detectado: %s", DescribeCycle(cycle)), 0, cycle.NetReturn)
+				refCycle := e.Graph.FindBestCycle(now)
+				if refCycle != nil && !radarCycleActive {
+					broadcastLog(hub, fmt.Sprintf("📡 [RADAR] Ciclo rentable detectado: %s", DescribeCycle(refCycle)), 0, refCycle.NetReturn)
 				}
-				radarCycleActive = cycle != nil
+				radarCycleActive = refCycle != nil
 			}
 
 			for _, s := range hub.Snapshot() {
@@ -514,16 +515,21 @@ func (e *HFTEngine) Start(priceChan <-chan PriceTick, hub *Hub) {
 					s.Mu.Lock()
 					wallets := s.Wallets.Clone()
 					s.Mu.Unlock()
-					snap := e.Graph.SnapshotFor(wallets, cycle, now)
+
+					// Radar PERSONALIZADO (hito 3): el ciclo que ve cada sesión es el
+					// de SU subgrafo — sus fees, su slippage y su universo. Dos usuarios
+					// con el mismo mercado ven radares distintos; ajustar un slider en
+					// el panel cambia este dibujo en el siguiente barrido. Con ≤ 9
+					// nodos el Bellman-Ford extra por sesión cuesta microsegundos.
+					p := s.Params()
+					userCycle := e.Graph.FindBestCycleFor(p, now)
+					snap := e.Graph.SnapshotFor(wallets, p, userCycle, now)
 					sendEvent(s, ServerEvent{Type: "graph_update", SessionID: s.ID, Graph: snap})
 
-					// Hito 3 — AUTOPILOTO DEL RADAR: si el usuario lo activó, el
-					// mejor ciclo de SU subgrafo (sus fees, su universo) se ejecuta.
-					p := s.Params()
-					if p.RadarAutopilot {
-						if userCycle := e.Graph.FindBestCycleFor(p, now); userCycle != nil {
-							go e.executeCycleForSession(s, userCycle, p)
-						}
+					// AUTOPILOTO DEL RADAR: si el usuario lo activó, ese mismo ciclo
+					// (ya calculado para su vista) se ejecuta.
+					if p.RadarAutopilot && userCycle != nil {
+						go e.executeCycleForSession(s, userCycle, p)
 					}
 				}
 			}
@@ -558,11 +564,40 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 		return
 	}
 
+	// El UNIVERSO del usuario gobierna también al ejecutor clásico: si deshabilitó
+	// cualquiera de los dos venues del par en el panel, el par no opera — el toggle
+	// de "exchanges activos" apaga el trading de verdad, no solo el radar.
+	for _, venue := range classicPair {
+		if !p.venueEnabled(venue) {
+			return
+		}
+	}
+
 	if mkt.BitAsk > mkt.BinAsk*p.MaxDivergenceRatio || mkt.BinAsk > mkt.BitAsk*p.MaxDivergenceRatio {
 		return
 	}
 
 	session.Mu.Lock()
+	// Spike Filter POR SESIÓN: la tolerancia tick-a-tick DEL USUARIO
+	// (SpikeTickDeviation) se aplica sobre los mids del par, encima del filtro
+	// global de ingesta (que protege el grafo compartido con el default). Los
+	// últimos mids se actualizan SIEMPRE —incluso si después corta el cooldown—
+	// para que la continuidad de la serie no invente spikes fantasma.
+	binMid := (mkt.BinAsk + mkt.BinBid) / 2
+	bitMid := (mkt.BitAsk + mkt.BitBid) / 2
+	prevBin, prevBit := session.lastBinMid, session.lastBitMid
+	session.lastBinMid, session.lastBitMid = binMid, bitMid
+	if !isValidTick(binMid, prevBin, p.SpikeTickDeviation) || !isValidTick(bitMid, prevBit, p.SpikeTickDeviation) {
+		shouldLog := time.Since(session.lastSpikeLogAt) >= 5*time.Second
+		if shouldLog {
+			session.lastSpikeLogAt = time.Now()
+		}
+		session.Mu.Unlock()
+		if shouldLog {
+			sendLog(session, fmt.Sprintf("🚨 [SPIKE BLOQUEADO] Variación del par supera TU tolerancia (%.1f %%) — tick descartado para proteger capital.", p.SpikeTickDeviation*100))
+		}
+		return
+	}
 	if session.IsReplenishing {
 		session.Mu.Unlock()
 		return

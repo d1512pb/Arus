@@ -156,7 +156,10 @@ type TradingParameters struct {
 	// de tolerancia (rechazar si slippage calculado > tolerancia del usuario).
 	SlippageRate float64 `json:"slippage_rate"`
 
-	// SpikeTickDeviation: variación máx. tick-a-tick tolerada por el Spike Filter.
+	// SpikeTickDeviation: variación máx. tick-a-tick tolerada por el Spike Filter
+	// DE ESTA SESIÓN. La ingesta compartida filtra con el default (protege el grafo
+	// y el tracker globales); este valor gobierna además la compuerta por sesión en
+	// executeForSession: un usuario más estricto que el default filtra MÁS.
 	SpikeTickDeviation float64 `json:"spike_tick_deviation"`
 
 	// MaxDivergenceRatio: compuerta de cordura entre precios de ambos venues.
@@ -181,20 +184,26 @@ type TradingParameters struct {
 	RadarAutopilot bool `json:"radar_autopilot,omitempty"`
 }
 
+// venueEnabled informa si un venue pertenece al universo del usuario (lista
+// vacía = todos). Lo consulta también el EJECUTOR CLÁSICO: deshabilitar un venue
+// del par en el panel apaga de verdad el trading del par, no solo el radar.
+func (p TradingParameters) venueEnabled(venue string) bool {
+	if len(p.EnabledVenues) == 0 {
+		return true
+	}
+	for _, v := range p.EnabledVenues {
+		if v == venue {
+			return true
+		}
+	}
+	return false
+}
+
 // universeAllows informa si un nodo del grafo pertenece al universo del usuario
 // (listas vacías = sin restricción).
 func (p TradingParameters) universeAllows(n MarketNode) bool {
-	if len(p.EnabledVenues) > 0 {
-		ok := false
-		for _, v := range p.EnabledVenues {
-			if v == n.Venue {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
+	if !p.venueEnabled(n.Venue) {
+		return false
 	}
 	if len(p.EnabledAssets) > 0 {
 		ok := false
@@ -284,6 +293,11 @@ type ClientSession struct {
 	// el cooldown, de modo que solo una goroutine puede operar a la vez por sesión (cierra
 	// el race de sobre-trading donde dos ticks ejecutaban dos trades simultáneos).
 	IsExecuting bool
+	// Spike Filter POR SESIÓN: últimos mids aceptados del par, para aplicar la
+	// tolerancia tick-a-tick del usuario (SpikeTickDeviation) sobre SU vista del
+	// mercado, encima del filtro global de ingesta. Protegidos por Mu.
+	lastBinMid, lastBitMid float64
+	lastSpikeLogAt         time.Time
 	// PausedUntil bloquea la operativa de la sesión hasta este instante; lo fija el circuit
 	// breaker cuando una orden Fill-or-Kill falla, para no reintentar contra un libro roto.
 	PausedUntil time.Time

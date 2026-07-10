@@ -22,6 +22,24 @@ function logColor(level: string): string {
     }
 }
 
+// Colores de marca por casa de cambio para los badges del feed. Un venue fuera
+// del mapa (recién agregado al registro del motor) cae al estilo neutro en vez
+// de disfrazarse de otro exchange.
+const VENUE_BADGE_STYLES: Record<string, string> = {
+  Binance: "bg-[#D4A000]/10 text-[#D4A000] border-[#D4A000]/20",
+  Bitso: "bg-[#0088FF]/10 text-[#0088FF] border-[#0088FF]/20",
+  Kraken: "bg-[#5741D9]/10 text-[#5741D9] border-[#5741D9]/20",
+};
+
+function VenueBadge({ name }: { name: string }) {
+  const style = VENUE_BADGE_STYLES[name] ?? "bg-gray-500/10 text-gray-500 border-gray-500/20";
+  return (
+    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${style}`}>
+      {name.toUpperCase()}
+    </span>
+  );
+}
+
 function CreditToggle({ autoMode, onToggle }: { autoMode: boolean, onToggle: () => void }) {
   return (
     <div className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm mt-4">
@@ -463,6 +481,17 @@ export default function Home() {
   }, [state.logs]);
   const openFundsModal = useCallback((venue: string) => setFundsModal(venue), []);
 
+  // Catálogo de casas de cambio derivado de los nodos del radar (misma técnica
+  // que el StrategyPanel): el simulador ofrece TODOS los venues del registro del
+  // motor — un 4º exchange aparece aquí solo, sin tocar la UI.
+  const catalogVenues = useMemo(() => {
+    const venues: string[] = [];
+    for (const n of state.graph?.nodes ?? []) {
+      if (!venues.includes(n.venue)) venues.push(n.venue);
+    }
+    return venues.length > 0 ? venues : ["Binance", "Bitso"];
+  }, [state.graph]);
+
   // Tutorial automático en la primera visita (se recuerda con localStorage).
   useEffect(() => {
     if (sessionReady && typeof window !== "undefined" && !localStorage.getItem("arus_tutorial_seen")) {
@@ -645,8 +674,9 @@ export default function Home() {
                       onChange={e => setInjectionExchange(e.target.value)}
                       className="w-full bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-gray-100 p-3 rounded-lg outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-colors mt-1 text-sm shadow-sm"
                     >
-                      <option value="Binance">Binance</option>
-                      <option value="Bitso">Bitso</option>
+                      {catalogVenues.map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
                     </select>
                   </div>
                   <div>
@@ -1152,17 +1182,9 @@ export default function Home() {
                           <td className="py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">{formatTime(trade.timestamp)}</td>
                           <td className="py-3 whitespace-nowrap">
                             <div className="flex items-center gap-2">
-                              {trade.exchange_buy === 'Binance' ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#D4A000]/10 text-[#D4A000] border border-[#D4A000]/20">BINANCE</span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#0088FF]/10 text-[#0088FF] border border-[#0088FF]/20">BITSO</span>
-                              )}
+                              <VenueBadge name={trade.exchange_buy} />
                               <ArrowRight className="w-3 h-3 text-gray-300 dark:text-gray-600 transition-transform group-hover:translate-x-1" />
-                              {trade.exchange_sell === 'Binance' ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#D4A000]/10 text-[#D4A000] border border-[#D4A000]/20">BINANCE</span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#0088FF]/10 text-[#0088FF] border border-[#0088FF]/20">BITSO</span>
-                              )}
+                              <VenueBadge name={trade.exchange_sell} />
                             </div>
                           </td>
                           <td className="py-3 text-right font-black text-sm whitespace-nowrap">

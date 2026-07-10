@@ -584,7 +584,13 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
           {spikeMsg
             ? `⚠️ ${spikeMsg}`
             : cyclePath
-              ? `📡 Ciclo rentable: ${cyclePath.join(" → ")} (${netPct >= 0 ? "+" : ""}${netPct.toFixed(3)} % neto por vuelta)`
+              ? `📡 Ciclo rentable: ${cyclePath.join(" → ")} (${netPct >= 0 ? "+" : ""}${netPct.toFixed(3)} % neto por vuelta${
+                  (graph.best_cycle?.max_volume_btc ?? 0) > 0
+                    ? ` · hasta ${graph.best_cycle!.max_volume_btc.toFixed(4)} BTC`
+                    : (graph.best_cycle?.max_start_amount ?? 0) > 0
+                      ? ` · entrada hasta ${graph.best_cycle!.max_start_amount!.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${graph.best_cycle!.start_asset}`
+                      : ""
+                })`
               : "◉ Mercado eficiente — los fees superan al spread. El radar recalcula cada segundo…"}
         </p>
         {lastTrade && (

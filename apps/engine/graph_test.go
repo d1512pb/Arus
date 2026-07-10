@@ -216,9 +216,19 @@ func TestFindBestCycle_Triangular(t *testing.T) {
 		t.Fatalf("tasa neta=%v, esperada %v (%s)", c.NetReturn, wantNet, DescribeCycle(c))
 	}
 
-	// Bases mixtas (ETH y BTC): el volumen homogéneo aún no aplica → 0.
+	// Bases mixtas (ETH y BTC): el volumen homogéneo no aplica → 0, pero la
+	// capacidad en unidades del nodo de inicio SÍ se reporta (misma matemática
+	// de mapeo por producto de tasas que planRotation). La pierna que acota es
+	// ETH/BTC: 5 ETH de bid → 5/eff1 = 15 000/(1−fee) USDT de entrada.
 	if c.MaxVolumeBTC != 0 {
 		t.Fatalf("volumen=%v, esperado 0 (bases mixtas)", c.MaxVolumeBTC)
+	}
+	if c.StartAsset != "USDT" {
+		t.Fatalf("StartAsset=%q, esperado USDT (nodo cash de inicio)", c.StartAsset)
+	}
+	wantCap := 15_000.0 / (1 - fee)
+	if !closeTo(c.MaxStartAmount, wantCap, 1e-6) {
+		t.Fatalf("capacidad de entrada=%v, esperada %v", c.MaxStartAmount, wantCap)
 	}
 }
 
@@ -249,7 +259,7 @@ func TestSnapshotFor(t *testing.T) {
 		"Bitso":   {"USD": 7_000, "BTC": 0.25},
 	}
 	cycle := g.FindBestCycle(now)
-	snap := g.SnapshotFor(wallets, cycle, now)
+	snap := g.SnapshotFor(wallets, DefaultTradingParameters(), cycle, now)
 
 	if !snap.ParityAssumed {
 		t.Fatal("el snapshot debe declarar el supuesto de paridad USDT≈USD")

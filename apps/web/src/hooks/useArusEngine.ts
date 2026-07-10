@@ -68,6 +68,10 @@ export interface GraphCycle {
   path: string[]; // cerrado: primero == último
   net_return_pct: number;
   max_volume_btc: number; // 0 = piernas con bases mixtas (triangular)
+  // Capacidad del ciclo en unidades de su nodo de inicio ("entrada hasta
+  // 12 000 USDT"): cubre los triangulares, donde max_volume_btc no aplica.
+  max_start_amount?: number;
+  start_asset?: string;
   viable: boolean;
 }
 

@@ -5,6 +5,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 )
 
 // almostEqual compara floats con tolerancia absoluta (aritmética financiera de demo).
@@ -435,6 +436,102 @@ func TestActivateCredit_ClassicPairOnly(t *testing.T) {
 	}
 	if s.Wallets.Get("Kraken", "USD") != 0 {
 		t.Fatalf("el préstamo tocó la wallet de Kraken: %v", s.Wallets.Get("Kraken", "USD"))
+	}
+}
+
+// TestExecuteForSession_UniverseGovernsClassicExecutor: deshabilitar un venue del
+// par clásico en el panel apaga el trading del par DE VERDAD (antes el toggle solo
+// podaba el radar y el ejecutor clásico seguía operando Binance↔Bitso).
+func TestExecuteForSession_UniverseGovernsClassicExecutor(t *testing.T) {
+	e := &HFTEngine{Tracker: NewSpreadTracker()}
+	s := newClientSession("universo-par", nil)
+	initSession(s, 100_000, 2)
+
+	p := s.Params()
+	p.EnabledVenues = []string{"Kraken"} // el par clásico queda fuera del universo
+	s.SetParams(p)
+
+	mkt := pairView{ // spread enorme: sin la compuerta ejecutaría seguro
+		BinAsk: 60_000, BinBid: 59_990, BitAsk: 60_700, BitBid: 60_650,
+		BinAskQty: 1, BinBidQty: 1, BitAskQty: 1, BitBidQty: 1,
+	}
+	e.executeForSession(s, mkt)
+
+	s.Mu.Lock()
+	net := s.TotalNetProfit
+	s.Mu.Unlock()
+	if net != 0 {
+		t.Fatalf("el ejecutor clásico operó con el par deshabilitado: PnL=%v", net)
+	}
+
+	// Control positivo: con el universo completo (vacío = todos) sí ejecuta.
+	p.EnabledVenues = nil
+	s.SetParams(p)
+	for i := 0; i < 10 && net == 0; i++ { // tolera el Fill-or-Kill probabilístico
+		s.Mu.Lock()
+		s.LastTradeTime = time.Time{}
+		s.PausedUntil = time.Time{}
+		s.Mu.Unlock()
+		e.executeForSession(s, mkt)
+		s.Mu.Lock()
+		net = s.TotalNetProfit
+		s.Mu.Unlock()
+	}
+	if net <= 0 {
+		t.Fatal("control positivo: el ejecutor no operó con el universo completo")
+	}
+}
+
+// TestExecuteForSession_SessionSpikeGate: la tolerancia tick-a-tick DEL USUARIO
+// (SpikeTickDeviation) filtra de verdad en el ejecutor clásico: un salto del par
+// que supere SU umbral descarta el tick aunque el filtro global (default) lo acepte.
+func TestExecuteForSession_SessionSpikeGate(t *testing.T) {
+	e := &HFTEngine{Tracker: NewSpreadTracker()}
+	s := newClientSession("spike-sesion", nil)
+	initSession(s, 100_000, 2)
+
+	p := s.Params()
+	p.SpikeTickDeviation = 0.01 // usuario estricto: 1 % (el default global es 5 %)
+	s.SetParams(p)
+
+	// Línea base sin oportunidad: establece los últimos mids de la sesión.
+	flat := pairView{
+		BinAsk: 60_000, BinBid: 59_990, BitAsk: 60_010, BitBid: 60_000,
+		BinAskQty: 1, BinBidQty: 1, BitAskQty: 1, BitBidQty: 1,
+	}
+	e.executeForSession(s, flat)
+
+	// Salto del +10 % en un tick, con spread jugoso: SU filtro debe descartarlo.
+	spiked := pairView{
+		BinAsk: 66_000, BinBid: 65_990, BitAsk: 66_900, BitBid: 66_800,
+		BinAskQty: 1, BinBidQty: 1, BitAskQty: 1, BitBidQty: 1,
+	}
+	s.Mu.Lock()
+	s.LastTradeTime = time.Time{}
+	s.Mu.Unlock()
+	e.executeForSession(s, spiked)
+
+	s.Mu.Lock()
+	net := s.TotalNetProfit
+	s.Mu.Unlock()
+	if net != 0 {
+		t.Fatalf("el spike superó la tolerancia del usuario y aun así operó: PnL=%v", net)
+	}
+
+	// El mismo mercado un tick después (variación 0 contra el último mid aceptado)
+	// ya no es spike: el ejecutor opera con normalidad.
+	for i := 0; i < 10 && net == 0; i++ { // tolera el Fill-or-Kill probabilístico
+		s.Mu.Lock()
+		s.LastTradeTime = time.Time{}
+		s.PausedUntil = time.Time{}
+		s.Mu.Unlock()
+		e.executeForSession(s, spiked)
+		s.Mu.Lock()
+		net = s.TotalNetProfit
+		s.Mu.Unlock()
+	}
+	if net <= 0 {
+		t.Fatal("control positivo: el ejecutor no operó tras estabilizarse el precio")
 	}
 }
 
