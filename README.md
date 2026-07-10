@@ -38,11 +38,12 @@
 9. [Persistencia y continuidad](#-persistencia-y-continuidad-sesiones-completas--trade-ledger)
 10. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
 11. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
-12. [Instalación y ejecución local](#-instalación-y-ejecución-local)
-13. [Despliegue](#-despliegue)
-14. [Qué sigue — plan de evolución](#-qué-sigue--plan-de-evolución)
-15. [Capturas de pantalla](#-capturas-de-pantalla)
-16. [Licencia](#-licencia)
+12. [Parámetros y configuración — referencia completa](#️-parámetros-y-configuración--referencia-completa)
+13. [Instalación y ejecución local](#-instalación-y-ejecución-local)
+14. [Despliegue](#-despliegue)
+15. [Qué sigue — plan de evolución](#-qué-sigue--plan-de-evolución)
+16. [Capturas de pantalla](#-capturas-de-pantalla)
+17. [Licencia](#-licencia)
 
 ---
 
@@ -63,6 +64,7 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 | **Sprint C — Más exchanges y monedas** | **Kraken como tercer venue** (WebSocket v2, canal `ticker` con `event_trigger=bbo`: BTC/USD · ETH/USD · ETH/BTC) y **SOL/USDT + SOL/BTC** en Binance (segundo triángulo) → radar de **9 nodos / 32 aristas**; **par clásico explícito** (`classicPair` = Binance+Bitso): capital inicial, crédito y reequilibrio operan solo sobre el par (un tercer venue ya no infla el capital ni diluye el crédito); `planCycle` prueba **todas las rotaciones cash** del ciclo → un ciclo vía Kraken es ejecutable sin fondos en Kraken | `krakenFeed` (ws_real_market.go) · `classicPair`/`classicVenues` (venues.go) · `planRotation` (cycle.go) |
 | **Sprint D — Crédito para ciclos + analítica** | El autopiloto **ya no omite en silencio** oportunidades sin fondos: `cycleCreditProjection` re-planifica con la línea de crédito hipotética y la decisión pasa por la misma inecuación `ganancia > costo × k` del modo clásico (auto-crédito / reequilibrio / diálogo asistido); **analítica desde el ledger**: columna `fees_usd` (fricción total, con migración aditiva automática), `GET /api/stats` (P&L acumulado en serie, win rate, ops/hora), `GET /api/ledger.csv` (export) y **panel de Analítica** en el dashboard (tiles + curva de P&L con hover) | `cycleCreditProjection` (cycle.go) · `analytics.go` (stats/CSV) · `AnalyticsPanel.tsx` |
 | **Rediseño Radar-first (UI)** | **El radar es ahora la pantalla principal** (revelación progresiva: nodos con activo+saldo; precio/fee/liquidez al hover de cada arista; detalle completo al click con card flotante/sheet); vistas `RADAR \| DASHBOARD` con header compacto (patrimonio con contador animado, **Probar el bot** global); **Estrategia como drawer sobre el grafo** (préstamo automático incluido; la poda del universo se VE: los venues excluidos se atenúan); dinamismo: pulso por tick, partículas recorriendo el ciclo, cobro flotante `+$X`, spike en rojo, barrido de sonar; **layout paramétrico** (1..N venues sin tocar código, fan-out de aristas intra-venue) con 13 tests puros | `radarLayout.ts` · `RadarView.tsx` · `HeaderBar.tsx` · `StrategyDrawer.tsx` · plan y mockup en `docs/REDISENO-RADAR.md` |
+| **Revisión final — parametrización total** | Auditoría contra los criterios del comité y cierre de TODO knob cosmético: el **radar es por sesión** (cada usuario ve el ciclo de SU subgrafo con SUS fees en las aristas — mover un slider cambia el dibujo); el **universo apaga también al ejecutor clásico**; el **Spike Filter por sesión filtra de verdad** (segunda capa sobre el default global); los **triangulares reportan capacidad real** (`max_start_amount` en unidades del nodo de inicio); el **préstamo es parametrizado** (línea USD/BTC, APR, fee de apertura y plazo son del usuario, con versionado del wire para sesiones viejas); **filtros de seguridad y prob. de fallo de orden en el panel** + presets Conservador/Balanceado/Agresivo; **catálogo externo** (`ARUS_CATALOG`/`venues.json`: agregar un libro = editar JSON, sin recompilar) y **`GET /api/config`** (el motor declara sus 16 parámetros con defaults y rangos, el catálogo y los guardrails); `ARUS_DB_PATH` para volúmenes | `config.go` (LoadCatalog + /api/config) · bloque crédito en `models.go`/`server.go` · `venues.example.json` · [referencia completa](#️-parámetros-y-configuración--referencia-completa) |
 
 **Decisiones de diseño que hay que conocer para seguir trabajando:**
 
@@ -74,7 +76,7 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 - **El crédito TAMBIÉN aplica a ciclos del radar (Sprint D).** Cuando el plan de un ciclo muere por saldo, `cycleCreditProjection` calcula si la línea de crédito lo volvería viable y la decisión pasa por `handleLiquidityShortfall` — la misma inecuación `ganancia > costo × k`, el mismo diálogo asistido. La línea sigue llegando al par clásico (los ciclos arrancan desde sus nodos cash).
 - **La UI es Radar-first (rediseño).** Dos vistas conmutadas por tabs: `RADAR` (principal, el grafo a pantalla completa con revelación progresiva) y `DASHBOARD` (todo lo clásico). La **Estrategia es un drawer sobre el grafo** (incluye el préstamo automático) y **Probar el bot vive en el header**, accesible desde ambas vistas — es la demo central para un juez. El plan de diseño con TODAS las decisiones (y el mockup aprobado) vive en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md).
 - **El lienzo del radar está comprometido al modo oscuro** (es un terminal; colores explícitos, no tematiza), mientras header/cards/drawer sí siguen el tema claro/oscuro de la app. Validar esa decisión con el dueño mirando el modo claro sigue abierto (backlog).
-- **Todo lo simulado sigue simulado.** Las órdenes no tocan APIs privadas de exchanges: los fills son instantáneos al top-of-book con slippage estimado, y el Fill-or-Kill es probabilístico (5 %). El puente a ejecución real (testnet) está en el plan (ver [Qué sigue](#-qué-sigue--plan-de-evolución)).
+- **Todo lo simulado sigue simulado.** Las órdenes no tocan APIs privadas de exchanges: los fills son instantáneos al top-of-book con slippage estimado, y el Fill-or-Kill es probabilístico (**configurable por sesión**, default 5 % — 0 % para una corrida limpia, alto para provocar el circuit breaker a voluntad). El puente a ejecución real (testnet) está en el plan (ver [Qué sigue](#-qué-sigue--plan-de-evolución)).
 
 **Notas de entorno de desarrollo (gotchas reales):**
 
@@ -135,8 +137,13 @@ Los parámetros que gobiernan al bot son **del usuario, no del sistema** — edi
 | **Slippage estimado (bps)** | Deslizamiento asumido por pierna | Un perfil agresivo asume menos fricción y ejecuta más |
 | **Comisiones por exchange** | Taker fee de cada casa | La misma oportunidad existe para quien paga 0.1 % y desaparece para quien paga 2 % — con sus fees en los pesos del grafo |
 | **Multiplicador de riesgo** | Inecuación del crédito: `ganancia > costo × k` | Conservador `k=5` (solo endeudarse si cubre 5× el costo); agresivo `k=1` |
+| **Términos del préstamo** | Línea (USD y BTC), tasa anual, fee de apertura y plazo del crédito | Un usuario pide $20 000 a 10 min con fee $10; otro $500 000 al límite — el costo que `k` multiplica se mueve con SUS términos |
+| **Filtros de seguridad** | Spike Filter por tick (%) y divergencia máxima entre casas (%) | El estricto descarta saltos >1 % y opera solo con datos suaves; el tolerante deja pasar volatilidad de evento |
+| **Prob. de fallo de orden** | La "física" del simulador: Fill-or-Kill por orden | 0 % = corrida limpia para la demo; 30 % = estrés que dispara el circuit breaker a voluntad |
 | **Tu universo** | Con qué exchanges y monedas juega el bot (poda del grafo) | Solo Binance → el radar busca únicamente ciclos triangulares internos |
 | **Autopiloto del radar** | Detección → ejecución del mejor ciclo del universo | ON: ejecuta ciclos espaciales o triangulares; OFF: modo clásico del par |
+
+Tres **presets** (Conservador / Balanceado / Agresivo) rellenan el formulario de un click para recorrer el rango completo de la parametrización; nada se aplica sin revisar. Y la personalización **se ve**: el radar de cada sesión se calcula con SUS fees y SU universo — dos usuarios miran el mismo mercado y ven ciclos distintos. La referencia exhaustiva (cada parámetro con default, rango y cómo se cambia) está en [Parámetros y configuración](#️-parámetros-y-configuración--referencia-completa).
 
 El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`) y responde con lo realmente aplicado: un mensaje malicioso no puede corromper una sesión (ni siquiera una fila de la base de datos manipulada a mano — la reanudación también sanea). Los cambios son atómicos (snapshot por operación): si editas a mitad de un trade, ese trade termina con los parámetros con los que empezó.
 
@@ -144,7 +151,7 @@ El backend **valida y acota** cada valor a rangos sanos (`sanitizeTradingParams`
 
 En el arbitraje real existe un enemigo silencioso: el **tiempo muerto**. Cuando un exchange agota su inventario, reponerlo exige una transferencia on-chain de **~30+ minutos**, y durante esa espera el capital queda ocioso mientras las oportunidades —que viven milisegundos— se evaporan. La mayoría de los bots simplemente **se detienen**.
 
-Arus no se detiene: **razona**. Modela una línea de crédito instantánea (`$50 000 USD` + `1 BTC`, con comisión de originación `$25` y APR `10 %` prorrateado al plazo, vía `calculateCreditCost`) y decide según la **inecuación de dominancia** con el apetito de riesgo del usuario:
+Arus no se detiene: **razona**. Modela una línea de crédito instantánea cuyos **términos define cada usuario** desde el panel — monto (default `$50 000 USD` + `1 BTC`), comisión de originación (default `$25`), tasa anual (default `10 %`) y plazo (default `1 min`), todo clampeado por el backend — y `calculateCreditCost` valora ESE préstamo (fee + interés prorrateado al plazo) para decidir según la **inecuación de dominancia** con el apetito de riesgo del usuario:
 
 ```
 pedir préstamo ⇔ ganancia proyectada > costo del crédito × RiskMultiplier
@@ -240,9 +247,9 @@ Neto = (P_venta × V × (1 − fee_venta)) − (P_compra × V × (1 + fee_compra
 > **¿Cómo manejas baja liquidez, órdenes parciales y movimientos bruscos? ¿Hay circuit breaker?**
 
 - **Detección de feed congelado (staleness):** si un libro lleva **>10 s** sin publicar, es **dato muerto**: la evaluación del par se pausa (`[FEED CONGELADO]`) y sus aristas salen de la búsqueda de ciclos. El motor prefiere no operar a operar contra precios fantasma.
-- **Spike Filter (circuit breaker de precio), POR LIBRO:** un tick cuya variación supere el **5 %** respecto al anterior se descarta como corrupto. Además, el spread se mide contra su media móvil: factor **>15×** → `[SPIKE ALERTA]` (opera con aviso); **>50×** → `[SPIKE BLOQUEADO]` (probable error de API → se rechaza).
-- **Doble compuerta de cordura:** divergencia entre exchanges >20 % → se aborta antes de tocar saldos.
-- **Fill-or-Kill atómico (5 % simulado):** tanto en el par como en cada ciclo, el fallo de orden se evalúa **antes** de mover saldos — abortar es atómico, cero exposición direccional, y la sesión pausa 2 s para no martillar un libro roto.
+- **Spike Filter (circuit breaker de precio), en DOS capas:** la ingesta compartida descarta ticks cuya variación supere el default del motor (**5 %**) — protege el grafo y el tracker globales — y cada sesión vuelve a filtrar con **SU tolerancia** (`spike_tick_deviation`, ajustable en el panel): el conservador que exige 1 % descarta lo que el default deja pasar. Además, el spread se mide contra su media móvil: factor **>15×** → `[SPIKE ALERTA]` (opera con aviso); **>50×** → `[SPIKE BLOQUEADO]` (probable error de API → se rechaza).
+- **Doble compuerta de cordura:** divergencia entre exchanges mayor que la tolerancia del usuario (default **20 %**, ajustable) → se aborta antes de tocar saldos.
+- **Fill-or-Kill atómico (simulado, probabilidad por sesión, default 5 %):** tanto en el par como en cada ciclo, el fallo de orden se evalúa **antes** de mover saldos — abortar es atómico, cero exposición direccional, y la sesión pausa 2 s para no martillar un libro roto.
 - **Doble *hard block* de fondos:** el saldo se valida al planificar y **otra vez** bajo el lock justo antes del commit; si el mundo cambió en ese microinstante, la operación se rechaza. El motor jamás permite saldos negativos (clamp de *dust* de redondeo en `Balances.Add`).
 - **Ritmo anti-*overtrading*:** cooldown de **3 s** por sesión + flag `IsExecuting` que serializa (cierra la ventana TOCTOU de doble ejecución en el mismo tick).
 - **Apalancamiento disciplinado:** nunca se pide un préstamo que no cubra `costo × RiskMultiplier`; el crédito agotado pausa hasta el vencimiento y se devuelve solo.
@@ -394,7 +401,7 @@ Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RA
 
 **Header (ambas vistas):** patrimonio con contador animado + PnL, tabs `RADAR | DASHBOARD`, **⚡ Probar el bot** (el simulador es un pilar: es como un juez evalúa el sistema — inyectar escenarios y VER al radar reaccionar), **⚙ Estrategia**, tutorial, modo oscuro y reset.
 
-**Drawer de Estrategia (se abre SOBRE el grafo):** margen mínimo, orden máxima, slippage, comisiones por exchange, multiplicador de riesgo, **préstamo automático**, **tu universo** (chips) y el **toggle del autopiloto**. Lo que ves tras aplicar es lo que el backend dejó vigente.
+**Drawer de Estrategia (se abre SOBRE el grafo):** margen mínimo, orden máxima, slippage, **filtros de seguridad** (spike y divergencia), **términos del préstamo** (línea USD/BTC, tasa, fee de apertura, plazo), multiplicador de riesgo, **prob. de fallo del simulador**, comisiones por exchange, **préstamo automático**, **tu universo** (chips), el **toggle del autopiloto** y **presets** Conservador/Balanceado/Agresivo. Lo que ves tras aplicar es lo que el backend dejó vigente — y el radar de fondo se recalcula con TU configuración en el siguiente barrido.
 
 **Vista DASHBOARD (todo lo demás):**
 
@@ -402,7 +409,73 @@ Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RA
 - **Panel de Historial / Auditoría:** el ledger persistido de TU sesión.
 - **Panel de Analítica / Rendimiento (Sprint D):** curva de P&L acumulado con hover, win rate, ritmo, fricción total pagada (fees + slippage) y volumen — todo desde el ledger — más **export CSV**.
 
-**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso), **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, configuración inicial guiada, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
+**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso) e inyección manual sobre **cualquier venue del catálogo**, **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, configuración inicial guiada, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
+
+---
+
+## ⚙️ Parámetros y configuración — referencia completa
+
+> La parametrización es el corazón del proyecto: **el motor declara todo lo que controla**. Esta tabla es el mapa; la fuente de verdad viva es `GET /api/config` — un solo request devuelve cada parámetro con su default y su rango de clamp, el catálogo de venues/instrumentos, las paridades declaradas, los guardrails de la build y las variables de entorno:
+>
+> ```bash
+> curl http://localhost:8080/api/config
+> ```
+
+### Parámetros por sesión (editables EN VIVO)
+
+Se ajustan desde el **drawer de Estrategia** (o por WebSocket con la acción `set_params`); el backend clampea cada valor a su rango (`sanitizeTradingParams`), responde con lo aplicado y **persiste** la estrategia con la sesión. Un payload sin el bloque del préstamo (cliente/sesión anteriores) conserva sus defaults — versionado del wire, nunca términos degradados por accidente.
+
+| Parámetro (wire) | Qué controla | Default | Rango | UI |
+|---|---|---|---|---|
+| `taker_fees[venue]` | Comisión taker por exchange | del registro (0.1 % / 0.65 % / 0.4 %) | 0 – 5 % | Comisiones por casa |
+| `min_net_profit_usd` | Umbral de ganancia neta para ejecutar | $0.10 | $0 – $1 M | Margen mínimo |
+| `max_order_size_btc` | Tope de volumen por operación | 0.005 | 0.0005 – 10 | Orden máxima |
+| `slippage_rate` | Slippage estimado por pierna | 5 bps | 0 – 100 bps | Slippage (bps) |
+| `spike_tick_deviation` | Spike Filter por sesión (salto máx. por tick) | 5 % | 0.5 – 50 % | Filtros de seguridad |
+| `max_divergence_ratio` | Divergencia máxima entre casas | 1.20 | 1.01 – 2.00 | Filtros de seguridad (en %) |
+| `risk_multiplier` | Inecuación del crédito: `ganancia > costo × k` | 1.0 | 1 – 100 | Riesgo del crédito |
+| `credit_line_usd` | Línea de crédito en USD | $50 000 | $1 000 – $1 M | Tu línea de crédito |
+| `credit_line_btc` | Línea de crédito en BTC | 1.0 | 0 – 100 | Tu línea de crédito |
+| `credit_apr` | Tasa anual del préstamo | 10 % | 0 – 100 % | Tu línea de crédito |
+| `credit_origination_fee` | Fee de apertura por activación | $25 | $0 – $1 000 | Tu línea de crédito |
+| `credit_duration_min` | Plazo del préstamo (minutos) | 1 | 0.25 – 60 | Tu línea de crédito |
+| `order_failure_prob` | Prob. de Fill-or-Kill fallido por orden | 5 % | 0 – 50 % | Simulador |
+| `enabled_venues` | Universo: exchanges activos (poda del grafo **y** del ejecutor clásico) | todos | subconjunto del catálogo | Tu universo (chips) |
+| `enabled_assets` | Universo: monedas activas | todas | subconjunto del catálogo | Tu universo (chips) |
+| `radar_autopilot` | Detección → ejecución de ciclos (apaga el modo clásico) | off | bool | Autopiloto |
+
+### Variables de entorno del motor
+
+| Variable | Qué hace | Default |
+|---|---|---|
+| `PORT` | Puerto HTTP del motor | `8080` |
+| `ARUS_CATALOG` | Ruta a un **catálogo JSON** de venues/instrumentos/paridades | `./venues.json` si existe; si no, el registro compilado |
+| `ARUS_DB_PATH` | Ruta del SQLite (ledger + sesiones) — útil para volúmenes de Fly/Railway | `data/ledger.db` |
+
+El frontend solo necesita `NEXT_PUBLIC_ENGINE_WS_URL` y `NEXT_PUBLIC_ENGINE_HTTP_URL` (ver `apps/web/.env.example`).
+
+### El catálogo como configuración (`venues.json`)
+
+El registro de exchanges e instrumentos es **dato, no código**: al arrancar, si `ARUS_CATALOG` apunta a un JSON (o existe `./venues.json`), el motor carga de ahí sus venues, libros y paridades — con validación estricta (nombres únicos, fees en rango, `stream_id` presente, el par clásico Binance+Bitso obligatorio) y **fallback al catálogo compilado** ante cualquier defecto. La plantilla versionada es [`apps/engine/venues.example.json`](apps/engine/venues.example.json).
+
+**Demo sin recompilar:** copia la plantilla como `venues.json`, agrega una línea al arreglo `instruments`…
+
+```json
+{ "venue": "Kraken", "base": "SOL", "quote": "USD", "stream_id": "SOL/USD" }
+```
+
+…reinicia el motor, y el radar gana los nodos y aristas de SOL@Kraken: el `krakenFeed` se suscribe solo al libro nuevo (`instrumentsForVenue`), el grafo se reconstruye desde el registro y `knownAssets()` deriva el catálogo de monedas del panel. Nada más que un JSON.
+
+### Añade tu 4º exchange (guía)
+
+Así entró Kraken en el Sprint C — el patrón completo, en orden:
+
+1. **Declara el venue y sus libros** — si usas catálogo externo, en `venues.json`; si no, una entrada en `Venues` y N en `Instruments` ([venues.go](apps/engine/venues.go)). Con esto el venue ya existe para el grafo, el panel y las wallets.
+2. **Escribe su FeedAdapter** (~100–130 líneas en [ws_real_market.go](apps/engine/ws_real_market.go)): la interfaz son 2 métodos — `Name()` y `Run(priceChan)` ([feed.go](apps/engine/feed.go)) — conexión WebSocket, suscripción a los `StreamID` que diga el registro (`instrumentsForVenue`), parseo del top-of-book y publicación de `PriceTick` normalizados. La reconexión y el patrón están en los 3 adaptadores existentes.
+3. **Regístralo** en `feedAdapters` ([feed.go](apps/engine/feed.go)) — una línea.
+4. **Nada más.** El grafo gana sus nodos/aristas al construirse desde el registro, Bellman-Ford descubre sus ciclos solo (no hay listas de triángulos), el panel de estrategia pinta su fee y sus chips dinámicamente, el simulador lo ofrece en el selector y las wallets/persistencia son multi-activo por diseño. El resto del motor **no se toca** — esa es la prueba de la arquitectura data-céntrica.
+
+Un venue declarado **sin** adapter es válido: aparece en el radar sin datos de precio (solo-radar), útil para preparar la integración. Y ten presente el diseño del **par clásico**: capital inicial 50/50, crédito y reequilibrio operan solo sobre Binance+Bitso; los demás venues se fondean por depósitos del usuario o por ciclos del autopiloto.
 
 ---
 
@@ -505,7 +578,9 @@ Verifica: `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`, y `https
 
 - **Slippage por profundidad real** (streams `depth`): el `SlippageRate` del usuario pasa de estimación a **tolerancia máxima**.
 - **Liquidez compartida entre sesiones** (la oportunidad se la lleva quien llega primero — decisión de producto pendiente del dueño).
-- **Préstamo dimensionado a la oportunidad** (hoy la línea es fija $50k + 1 BTC).
+- **Préstamo dimensionado a la oportunidad** (los términos ya los define el usuario; falta que el MONTO se calcule por ciclo en vez de pedir la línea completa).
+- **Top-K ciclos con distancia al umbral** ("el triángulo SOL está a −4 bps de TU margen"): el radar narra también los casi-rentables, no solo el mejor ciclo.
+- **Paridades con basis/haircut configurable** (hoy `parity_pairs` declara equivalencia 1:1 exacta; un haircut en bps la volvería un knob más).
 - **Puente a ejecución real:** interface `ExchangeAdapter` (libro/órdenes/balances) con implementación simulada actual + Binance **Testnet** — el paso de demo a sistema real.
 - **Postgres** solo si aparecen múltiples instancias del motor o cuentas con login (la interfaz `SessionStore` ya lo permite sin reescribir).
 - Wire multi-venue completo en la UI de wallets clásicas (hoy leen el plano 2-venue; el radar ya usa `balances`).
