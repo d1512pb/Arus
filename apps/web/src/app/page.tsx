@@ -329,7 +329,7 @@ function StrategyGuideModal({ open, onClose }: { open: boolean, onClose: () => v
               <div className="bg-gray-50 dark:bg-gray-950 p-4 rounded-lg border border-gray-100 dark:border-gray-800">
                 <span className="text-xl mb-2 block">📉</span>
                 <p className="text-xs font-bold text-gray-800 dark:text-gray-200 mb-1">2. Superar comisiones</p>
-                <p className="text-[11px] leading-relaxed">La ganancia debe ser mayor a las comisiones de compra/venta (~0.1%).</p>
+                <p className="text-[11px] leading-relaxed">La ganancia debe superar las comisiones de compra/venta — las tuyas, tal como las configuraste en Estrategia.</p>
               </div>
               <div className="bg-gray-50 dark:bg-gray-950 p-4 rounded-lg border border-gray-100 dark:border-gray-800">
                 <span className="text-xl mb-2 block">💰</span>
@@ -515,17 +515,41 @@ export default function Home() {
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
 
+  // Tema: la elección MANUAL del usuario (persistida) siempre gana; el sistema
+  // (prefers-color-scheme) solo decide mientras no haya preferencia guardada —
+  // antes el listener del sistema podía pisar el toggle a mitad de una demo.
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('arus_dark');
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-      setIsDarkMode(mediaQuery.matches);
+      setIsDarkMode(stored !== null ? stored === '1' : mediaQuery.matches);
 
-      const handleChange = (e: MediaQueryListEvent) => setIsDarkMode(e.matches);
+      const handleChange = (e: MediaQueryListEvent) => {
+        if (localStorage.getItem('arus_dark') === null) setIsDarkMode(e.matches);
+      };
       mediaQuery.addEventListener('change', handleChange);
-
       return () => mediaQuery.removeEventListener('change', handleChange);
     }
   }, []);
+
+  const toggleDarkMode = () => {
+    const next = !isDarkMode;
+    if (typeof window !== 'undefined') localStorage.setItem('arus_dark', next ? '1' : '0');
+    setIsDarkMode(next);
+  };
+
+  // La pestaña activa sobrevive recargas (se restaura en efecto para no
+  // desalinear la hidratación de React).
+  useEffect(() => {
+    if (typeof window !== 'undefined' && localStorage.getItem('arus_view') === 'dashboard') {
+      setView('dashboard');
+    }
+  }, []);
+
+  const changeView = (v: AppView) => {
+    setView(v);
+    if (typeof window !== 'undefined') localStorage.setItem('arus_view', v);
+  };
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -878,7 +902,7 @@ export default function Home() {
           El préstamo automático se movió al drawer de Estrategia. */}
       <HeaderBar
         view={view}
-        onViewChange={setView}
+        onViewChange={changeView}
         totalWealth={totalWealth}
         pnl={actualPnl}
         uptime={formatUptime(state.uptimeSeconds)}
@@ -888,7 +912,7 @@ export default function Home() {
         onTutorial={() => setShowTutorial(true)}
         onReset={resetSession}
         isDarkMode={isDarkMode}
-        onToggleDark={() => setIsDarkMode(!isDarkMode)}
+        onToggleDark={toggleDarkMode}
       />
 
       {/* Estrategia como drawer SOBRE el radar: la poda del universo se ve en vivo */}
@@ -1020,7 +1044,7 @@ export default function Home() {
                   <span>NIVEL DE FONDOS (PROPIOS)</span>
                   <span className={calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBinanceUsd, "Binance"))}%</span>
                 </div>
-                <div className="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden">
+                <div className="w-full bg-gray-100 dark:bg-gray-800 h-1.5 rounded-full overflow-hidden">
                   <div 
                     className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
                     style={{ width: `${calculateHealth(ownedBinanceUsd, "Binance")}%` }}
@@ -1086,7 +1110,7 @@ export default function Home() {
                   <span>NIVEL DE FONDOS (PROPIOS)</span>
                   <span className={calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBitsoUsd, "Bitso"))}%</span>
                 </div>
-                <div className="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden">
+                <div className="w-full bg-gray-100 dark:bg-gray-800 h-1.5 rounded-full overflow-hidden">
                   <div 
                     className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
                     style={{ width: `${calculateHealth(ownedBitsoUsd, "Bitso")}%` }}
@@ -1095,49 +1119,128 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Distribucion del capital */}
+            {/* Venues FUERA del par clásico (Kraken…): sus saldos viven en el wire
+                multi-activo del radar, no en el plano 2-venue — sin esta card, el
+                20 % que un experto asignó a Kraken era dinero invisible en el
+                dashboard. Solo se pinta si el venue tiene o puede tener fondos. */}
             {(() => {
-              const pBinanceUSD = totalWealth > 0 ? (Math.max(0, wallets.binance.usd) / totalWealth) * 100 : 25;
-              const pBitsoUSD = totalWealth > 0 ? (Math.max(0, wallets.bitso.usd) / totalWealth) * 100 : 25;
-              const bncBtcVal = Math.max(0, wallets.binance.btc) * (state.livePrices.binance || 60000);
-              // const bsoBtcVal = wallets.bitso.btc * (state.livePrices.bitso || 60000);
-              const pBinanceBTC = totalWealth > 0 ? (bncBtcVal / totalWealth) * 100 : 25;
-              
-              const cp1 = pBinanceUSD;
-              const cp2 = cp1 + pBitsoUSD;
-              const cp3 = cp2 + pBinanceBTC;
-              
-              const dynamicConicGradient = `conic-gradient(#EAB308 0% ${cp1}%, #2563EB ${cp1}% ${cp2}%, #F97316 ${cp2}% ${cp3}%, #06B6D4 ${cp3}% 100%)`;
+              const classic = new Set(["Binance", "Bitso"]);
+              const extraVenues: string[] = [];
+              for (const n of state.graph?.nodes ?? []) {
+                if (!classic.has(n.venue) && !extraVenues.includes(n.venue)) extraVenues.push(n.venue);
+              }
+              return extraVenues.map(venue => {
+                const nodes = (state.graph?.nodes ?? []).filter(n => n.venue === venue);
+                const holdings = nodes.filter(n => n.balance > 0);
+                const totalVenueUSD = nodes.reduce((s, n) => s + n.balance_usd, 0);
+                return (
+                  <div key={venue} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group" style={{ animationDelay: '0.55s' }}>
+                    <div className="absolute inset-0 bg-violet-600/0 group-hover:bg-violet-600/5 transition-colors duration-500 pointer-events-none"></div>
+                    <div className="flex justify-between items-center mb-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-6 h-6 bg-violet-600 text-white font-black flex items-center justify-center rounded-[4px] text-xs">
+                          {venue.charAt(0).toUpperCase()}
+                        </div>
+                        <h3 className="text-gray-900 dark:text-gray-100 font-bold tracking-widest uppercase">{venue}</h3>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setFundsModal(venue)}
+                          className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 hover:bg-blue-100 dark:hover:bg-blue-500/20 rounded-full px-2.5 py-1 transition-colors"
+                          title={`Agregar o retirar dinero de ${venue}`}
+                        >
+                          <Pencil className="w-3 h-3" /> Editar fondos
+                        </button>
+                        <span className="text-[10px] border border-violet-200 dark:border-violet-500/30 bg-violet-50 dark:bg-violet-500/10 rounded-full px-3 py-1 text-violet-600 dark:text-violet-300 tracking-wider font-bold" title="Este venue lo opera el radar (ciclos); la línea de crédito y el reequilibrio viven en el par clásico">RADAR</span>
+                      </div>
+                    </div>
+                    {holdings.length === 0 ? (
+                      <p className="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed">
+                        Sin fondos todavía. Deposita con &quot;Editar fondos&quot; (o deja que un ciclo del autopiloto le acerque capital) y el radar podrá operar rutas que pasen por aquí.
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        {holdings.map(n => (
+                          <div key={n.id}>
+                            <p className="text-gray-500 dark:text-gray-400 text-[10px] font-bold tracking-widest mb-1">SALDO EN {n.asset}</p>
+                            <p className="font-black text-gray-900 dark:text-gray-100 text-lg">
+                              {n.kind === "cash"
+                                ? `$${n.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                : n.balance.toFixed(4)}
+                            </p>
+                            {n.kind !== "cash" && n.balance_usd > 0 && (
+                              <p className="text-[10px] text-gray-400 mt-0.5">≈ ${n.balance_usd.toLocaleString('en-US', { maximumFractionDigits: 0 })}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {totalVenueUSD > 0 && (
+                      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+                        Valor total aquí: <span className="font-bold text-gray-600 dark:text-gray-300">${totalVenueUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                      </p>
+                    )}
+                  </div>
+                );
+              });
+            })()}
+
+            {/* Distribución del capital — derivada de los NODOS DEL RADAR: todo el
+                dinero real (todos los venues y activos, valorados por el motor),
+                no un 4-buckets fijo de Binance/Bitso. El 40/40/20 de un experto y
+                el ETH de un ciclo triangular aparecen aquí solos. */}
+            {(() => {
+              type Bucket = { label: string; usd: number; color: string };
+              const PALETTE = ["#EAB308", "#2563EB", "#F97316", "#06B6D4", "#7C3AED", "#10B981", "#EC4899", "#64748B"];
+              const nodes = (state.graph?.nodes ?? []).filter(n => n.balance_usd > 0.01);
+              const totalUSD = nodes.reduce((s, n) => s + n.balance_usd, 0);
+
+              // Un bucket por activo@venue con saldo, de mayor a menor; los que no
+              // caben en la paleta se agrupan en "Otros" (nunca se oculta dinero).
+              const sorted: Bucket[] = nodes
+                .map(n => ({ label: `${n.venue} · ${n.asset}`, usd: n.balance_usd, color: "" }))
+                .sort((a, b) => b.usd - a.usd);
+              const buckets = sorted.slice(0, PALETTE.length - 1).map((b, i) => ({ ...b, color: PALETTE[i] }));
+              const rest = sorted.slice(PALETTE.length - 1);
+              if (rest.length > 0) {
+                buckets.push({ label: "Otros", usd: rest.reduce((s, b) => s + b.usd, 0), color: PALETTE[PALETTE.length - 1] });
+              }
+
+              let acc = 0;
+              const stops = buckets.map(b => {
+                const from = acc;
+                acc += totalUSD > 0 ? (b.usd / totalUSD) * 100 : 0;
+                return `${b.color} ${from}% ${acc}%`;
+              });
+              const gradient = `conic-gradient(${stops.join(", ")})`;
+              const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
               return (
                 <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 mt-2 shadow-sm animate-fade-in-up hover:shadow-lg transition-all duration-500 group" style={{ animationDelay: '0.6s' }}>
                   <p className="text-gray-500 dark:text-gray-400 text-[10px] font-bold tracking-widest mb-6">DÓNDE ESTÁ TU DINERO</p>
-                  <div className="flex items-center gap-6">
-                    <div className="relative w-24 h-24 rounded-full flex items-center justify-center shadow-sm transition-all duration-700 group-hover:scale-105" style={{ background: dynamicConicGradient }}>
-                      <div className="w-20 h-20 bg-white dark:bg-gray-900 rounded-full flex items-center justify-center flex-col z-10 shadow-inner">
-                        <p className="text-[10px] text-gray-400 font-bold">TOT</p>
-                        <p className="text-gray-900 dark:text-gray-100 font-black text-xl">4</p>
+                  {buckets.length === 0 ? (
+                    <p className="text-xs text-gray-400 dark:text-gray-500 py-6 text-center">Esperando la primera lectura del radar…</p>
+                  ) : (
+                    <div className="flex items-center gap-6">
+                      <div className="relative w-24 h-24 rounded-full flex items-center justify-center shadow-sm transition-all duration-700 group-hover:scale-105 flex-shrink-0" style={{ background: gradient }}>
+                        <div className="w-20 h-20 bg-white dark:bg-gray-900 rounded-full flex items-center justify-center flex-col z-10 shadow-inner">
+                          <p className="text-[10px] text-gray-400 font-bold">TOTAL</p>
+                          <p className="text-gray-900 dark:text-gray-100 font-black text-lg">${compact.format(totalUSD)}</p>
+                        </div>
+                      </div>
+                      <div className="flex-1 space-y-2.5 min-w-0">
+                        {buckets.map(b => (
+                          <div key={b.label} className="flex justify-between items-center gap-2 text-xs" title={`$${b.usd.toLocaleString("en-US", { maximumFractionDigits: 2 })}`}>
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.color }}></div>
+                              <span className="text-gray-600 dark:text-gray-400 font-bold truncate">{b.label}</span>
+                            </div>
+                            <span className="text-gray-900 dark:text-gray-100 font-bold flex-shrink-0">{totalUSD > 0 ? ((b.usd / totalUSD) * 100).toFixed(1) : "0.0"}%</span>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                    <div className="flex-1 space-y-3">
-                      <div className="flex justify-between items-center text-xs">
-                        <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-yellow-500"></div><span className="text-gray-600 dark:text-gray-400 font-bold">BNC - USD</span></div>
-                        <span className="text-gray-900 dark:text-gray-100 font-bold">{pBinanceUSD.toFixed(1)}%</span>
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-blue-600"></div><span className="text-gray-600 dark:text-gray-400 font-bold">BSO - USD</span></div>
-                        <span className="text-gray-900 dark:text-gray-100 font-bold">{pBitsoUSD.toFixed(1)}%</span>
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-orange-500"></div><span className="text-gray-600 dark:text-gray-400 font-bold">BNC - BTC</span></div>
-                        <span className="text-gray-900 dark:text-gray-100 font-bold">{pBinanceBTC.toFixed(1)}%</span>
-                      </div>
-                      <div className="flex justify-between items-center text-xs">
-                        <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-cyan-500"></div><span className="text-gray-600 dark:text-gray-400 font-bold">BSO - BTC</span></div>
-                        <span className="text-gray-900 dark:text-gray-100 font-bold">{Math.max(0, 100 - cp3).toFixed(1)}%</span>
-                      </div>
-                    </div>
-                  </div>
+                  )}
                 </div>
               );
             })()}
@@ -1167,7 +1270,7 @@ export default function Home() {
                 <div className="h-full flex flex-col items-center justify-center text-gray-400 dark:text-gray-500 min-h-[300px]">
                   <div className="w-16 h-16 border-4 border-gray-200 dark:border-gray-800 border-t-emerald-500 rounded-full animate-spin mb-4"></div>
                   <p className="text-sm font-bold tracking-widest uppercase">BUSCANDO OPORTUNIDADES...</p>
-                  <p className="text-[10px] mt-2 max-w-xs text-center opacity-70">El bot compara el precio del bitcoin entre Binance y Bitso en tiempo real. Operará solo si la ganancia supera los costos.</p>
+                  <p className="text-[10px] mt-2 max-w-xs text-center opacity-70">El bot compara precios entre tus casas de cambio activas en tiempo real. Operará solo si la ganancia neta supera tu margen mínimo.</p>
                 </div>
               ) : (
                 <div className="w-full min-w-[500px]">
@@ -1192,7 +1295,7 @@ export default function Home() {
                             </div>
                           </td>
                           <td className="py-3 text-right font-black text-sm whitespace-nowrap">
-                            {trade.volume?.toFixed(3) || "0.005"}
+                            {trade.volume?.toFixed(4) ?? "—"}
                           </td>
                           <td className="py-3 text-right whitespace-nowrap">
                             <span className="inline-flex items-center gap-1.5 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 border border-emerald-200 dark:border-emerald-500/20 px-3 py-1 rounded-md font-black shadow-sm group-hover:bg-emerald-100 dark:group-hover:bg-emerald-500/20 transition-colors">

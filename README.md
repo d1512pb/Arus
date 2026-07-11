@@ -429,7 +429,7 @@ Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RA
 
 La última configuración se recuerda (localStorage) y la barra de "nivel de fondos" del dashboard se calibra contra lo que CADA venue recibió realmente, no contra un 50/50 asumido.
 
-**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso) e inyección manual sobre **cualquier venue del catálogo**, **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
+**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso) e inyección manual sobre **cualquier venue del catálogo**, **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado paso a paso (ahora radar-first: radar → estrategia → dashboard), banners de crédito/reequilibrio con cuenta regresiva, **modo oscuro persistente** (la elección manual gana sobre el sistema) y responsive. El **dashboard es multi-venue de verdad**: los venues fuera del par clásico (Kraken…) tienen su propia tarjeta con saldos multi-activo y edición de fondos, y el donut "dónde está tu dinero" se deriva de los nodos del radar — todo el capital (todos los venues y activos, valorados por el motor) es visible, nunca un 4-buckets fijo.
 
 ---
 

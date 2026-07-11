@@ -103,7 +103,9 @@ export function LedgerPanel({ sessionId }: { sessionId: string }) {
             </button>
           </div>
 
-          <div className="max-h-[360px] overflow-y-auto overscroll-contain">
+          {/* overflow-x: las rutas de ciclos del radar ("Radar ➔ USDT@Binance→…")
+              son anchas — la tabla scrollea dentro de la card, nunca rompe el layout. */}
+          <div className="max-h-[360px] overflow-y-auto overflow-x-auto overscroll-contain">
             {error ? (
               <div className="px-6 py-10 text-center text-sm text-red-500">{error}</div>
             ) : loading && records.length === 0 ? (
@@ -135,7 +137,11 @@ export function LedgerPanel({ sessionId }: { sessionId: string }) {
                         )}
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 dark:text-gray-300 font-medium">
-                        {r.buy_exchange} <span className="text-gray-300 dark:text-gray-600">➔</span> {r.sell_exchange}
+                        {/* Ruta truncada con tooltip: un ciclo de 5 piernas no debe
+                            estirar la tabla a 800px; el detalle completo, al hover. */}
+                        <span className="inline-block max-w-[260px] truncate align-bottom" title={`${r.buy_exchange} ➔ ${r.sell_exchange}`}>
+                          {r.buy_exchange} <span className="text-gray-300 dark:text-gray-600">➔</span> {r.sell_exchange}
+                        </span>
                       </td>
                       <td className="px-3 py-2.5 text-right whitespace-nowrap font-mono text-gray-700 dark:text-gray-300">{r.volume_btc.toFixed(4)}</td>
                       <td className="px-4 sm:px-6 py-2.5 text-right whitespace-nowrap font-black font-mono">
