@@ -13,8 +13,10 @@ import { layoutRadar, routeEdges, pairKey, LayoutNode, LayoutEdge, NODE_R } from
 // partículas del ciclo, cobro flotante, barrido) se anima por mutación directa
 // de refs — React solo re-renderiza al llegar cada graph_update (~1/s).
 //
-// El lienzo está COMPROMETIDO al modo oscuro (es un terminal): sus colores son
-// explícitos y no siguen el tema; cards/tooltip sí tematizan con la app.
+// El lienzo TEMATIZA con la app vía variables CSS (--radar-*, globals.css):
+// la clase .dark del contenedor raíz conmuta la paleta completa — SVG incluido,
+// porque las custom properties se heredan. Ojo: en ATRIBUTOS de presentación
+// SVG var() no es válido — los colores dinámicos van por style, no setAttribute.
 
 interface Props {
   graph: GraphSnapshot | null;
@@ -29,10 +31,10 @@ interface Props {
   onEditFunds: (venue: string) => void;
 }
 
-const INK = "#e8edf7", INK2 = "#8b96ad", INK3 = "#4a5570";
-const ACCENT = "#10d98e", HOVER = "#4da2ff", DANGER = "#ff5470";
+const INK = "var(--radar-ink)", INK2 = "var(--radar-ink2)", INK3 = "var(--radar-ink3)";
+const ACCENT = "var(--radar-accent)", DANGER = "var(--radar-danger)";
 const assetFill = (kind: string, asset: string) =>
-  kind === "cash" ? "#4da2ff" : asset === "BTC" ? "#f5a623" : "#a78bfa";
+  kind === "cash" ? "var(--radar-cash)" : asset === "BTC" ? "var(--radar-btc)" : "var(--radar-alt)";
 
 const fmtUSD = (v: number) =>
   "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -164,7 +166,8 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     for (let i = 0; i < N; i++) {
       const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       c.setAttribute("r", "4.5");
-      c.setAttribute("fill", ACCENT);
+      // var() no es válido como ATRIBUTO de presentación SVG: el color va por style.
+      c.style.fill = ACCENT;
       c.style.filter = `drop-shadow(0 0 6px ${ACCENT})`;
       c.style.pointerEvents = "none";
       g.appendChild(c);
@@ -316,9 +319,9 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   // ── Estado vacío (primer graph_update aún en camino) ─────────────────────
   if (!graph || !layout || graph.nodes.length === 0) {
     return (
-      <div className="flex-1 min-h-[520px] flex flex-col items-center justify-center gap-5 bg-[#060a14]">
-        <div className="w-12 h-12 border-4 border-[#1b2740] border-t-[#10d98e] rounded-full animate-spin" />
-        <p className="text-[11px] font-mono font-bold tracking-[0.2em] uppercase text-[#8b96ad]">
+      <div className="flex-1 min-h-[520px] flex flex-col items-center justify-center gap-5 bg-[var(--radar-bg)]">
+        <div className="w-12 h-12 border-4 border-[var(--radar-border)] border-t-[var(--radar-accent)] rounded-full animate-spin" />
+        <p className="text-[11px] font-mono font-bold tracking-[0.2em] uppercase text-[var(--radar-ink2)]">
           Conectando con el radar…
         </p>
       </div>
@@ -337,7 +340,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   const netPct = graph.best_cycle?.net_return_pct ?? 0;
 
   return (
-    <div className="flex-1 min-h-[520px] flex flex-col min-h-0 bg-[#060a14]" onClick={() => setSelNode(null)}>
+    <div className="flex-1 min-h-[520px] flex flex-col min-h-0 bg-[var(--radar-bg)]" onClick={() => setSelNode(null)}>
       {/* Lienzo con scroll horizontal si el universo no cabe */}
       <div ref={wrapRef} className="flex-1 min-h-0 overflow-auto">
         <div ref={innerRef} className="relative h-full" style={{ minWidth: w }}>
@@ -353,20 +356,20 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                  style={{ transition: "opacity .4s" }}>
                 <rect
                   x={offsetX + colW * i + 18} y={52} width={colW - 36} height={h - 108} rx={16}
-                  fill="rgba(12,19,34,.55)" stroke="#1b2740" strokeWidth={1}
+                  style={{ fill: "var(--radar-panel)", stroke: "var(--radar-border)" }} strokeWidth={1}
                 />
                 <text x={offsetX + colW * i + colW / 2} y={84} textAnchor="middle"
-                  className="text-[12px] font-black tracking-[0.3em]" fill={INK2}>
+                  className="text-[12px] font-black tracking-[0.3em]" style={{ fill: INK2 }}>
                   {v.toUpperCase()}
                 </text>
                 {!venueAllowed(v) ? (
                   <text x={offsetX + colW * i + colW / 2} y={100} textAnchor="middle"
-                    className="text-[9px] font-bold" fill={INK3}>
+                    className="text-[9px] font-bold" style={{ fill: INK3 }}>
                     fuera de tu universo
                   </text>
                 ) : staleVenues.has(v) && (
                   <text x={offsetX + colW * i + colW / 2} y={100} textAnchor="middle"
-                    className="text-[9px] font-bold" fill={DANGER}>
+                    className="text-[9px] font-bold" style={{ fill: DANGER }}>
                     ❄ feed congelado
                   </text>
                 )}
@@ -384,10 +387,12 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                       ref={(el) => { if (el) pathRefs.current.set(r.key, el); else pathRefs.current.delete(r.key); }}
                       d={r.d}
                       fill="none"
-                      stroke={inCycle ? ACCENT : isBook ? "#33415f" : "#232f4a"}
                       strokeWidth={inCycle ? 2.6 : isBook ? 1.6 : 1.1}
                       strokeDasharray={isBook ? undefined : "5 6"}
-                      style={inCycle ? { filter: `drop-shadow(0 0 7px ${ACCENT})` } : undefined}
+                      style={{
+                        stroke: inCycle ? ACCENT : isBook ? "var(--radar-edge-book)" : "var(--radar-edge-assume)",
+                        ...(inCycle ? { filter: `drop-shadow(0 0 7px ${ACCENT})` } : null),
+                      }}
                     />
                     <path
                       d={r.d}
@@ -428,30 +433,32 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                   <circle
                     ref={(el) => { if (el) pulseRefs.current.set(n.id, el); else pulseRefs.current.delete(n.id); }}
                     cx={p.x} cy={p.y} r={NODE_R}
-                    fill="none" stroke={ACCENT} opacity={0}
-                    style={{ transformBox: "fill-box", transformOrigin: "center", pointerEvents: "none" }}
+                    fill="none" opacity={0}
+                    style={{ stroke: ACCENT, transformBox: "fill-box", transformOrigin: "center", pointerEvents: "none" }}
                   />
                   <circle
                     cx={p.x} cy={p.y} r={NODE_R}
-                    fill="#0d1526"
-                    stroke={inCycle || seld ? ACCENT : "#1b2740"}
                     strokeWidth={inCycle ? 2.4 : seld ? 2 : 1.4}
-                    style={inCycle ? { filter: `drop-shadow(0 0 8px rgba(16,217,142,.5))` } : undefined}
+                    style={{
+                      fill: "var(--radar-node)",
+                      stroke: inCycle || seld ? ACCENT : "var(--radar-border)",
+                      ...(inCycle ? { filter: `drop-shadow(0 0 8px var(--radar-accent-glow))` } : null),
+                    }}
                   />
                   <text x={p.x} y={p.y - 8} textAnchor="middle" className="text-[13px] font-black font-mono"
-                    fill={assetFill(n.kind, n.asset)}>
+                    style={{ fill: assetFill(n.kind, n.asset) }}>
                     {n.asset}
                   </text>
-                  <text x={p.x} y={p.y + 9} textAnchor="middle" className="text-[11px] font-bold font-mono" fill={INK}>
+                  <text x={p.x} y={p.y + 9} textAnchor="middle" className="text-[11px] font-bold font-mono" style={{ fill: INK }}>
                     {fmtBalance(n.kind, n.asset, n.balance)}
                   </text>
                   {n.kind !== "cash" && n.balance_usd > 0 && (
-                    <text x={p.x} y={p.y + 23} textAnchor="middle" className="text-[9px] font-mono" fill={INK3}>
+                    <text x={p.x} y={p.y + 23} textAnchor="middle" className="text-[9px] font-mono" style={{ fill: INK3 }}>
                       ≈ {fmtUSD(n.balance_usd)}
                     </text>
                   )}
                   {n.kind !== "cash" && n.price_usd > 0 && (
-                    <text x={p.x} y={p.y + NODE_R + 16} textAnchor="middle" className="text-[9px] font-mono" fill={INK3}>
+                    <text x={p.x} y={p.y + NODE_R + 16} textAnchor="middle" className="text-[9px] font-mono" style={{ fill: INK3 }}>
                       1 {n.asset} = {fmtUSD(n.price_usd)}
                     </text>
                   )}
@@ -468,7 +475,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
               aria-hidden="true"
               className="absolute inset-y-3 left-0 w-[130px] pointer-events-none animate-radar-sweep"
               style={{
-                background: "linear-gradient(90deg, rgba(16,217,142,0), rgba(16,217,142,.05) 60%, rgba(16,217,142,.14))",
+                background: "linear-gradient(90deg, transparent, var(--radar-sweep-mid) 60%, var(--radar-sweep-end))",
                 willChange: "transform",
                 ["--sweep-dist" as string]: `${w + 140}px`,
               }}
@@ -496,7 +503,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
             <div
               key={f.id}
               className="absolute z-30 pointer-events-none font-mono font-black text-xl animate-profit-rise"
-              style={{ left: f.x, top: f.y, color: f.amount >= 0 ? ACCENT : DANGER, textShadow: `0 0 14px ${ACCENT}` }}
+              style={{ left: f.x, top: f.y, color: f.amount >= 0 ? ACCENT : DANGER, textShadow: `0 0 14px ${f.amount >= 0 ? ACCENT : DANGER}` }}
             >
               {f.amount >= 0 ? "+" : "-"}{fmtUSD(Math.abs(f.amount))}
             </div>
@@ -575,7 +582,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
       </div>
 
       {/* Narración de 1 línea + ticker de última operación */}
-      <div className="flex items-center gap-4 px-4 sm:px-5 h-10 border-t border-[#1b2740] bg-[#0c1322] font-mono text-[11px] flex-shrink-0">
+      <div className="flex items-center gap-4 px-4 sm:px-5 h-10 border-t border-[var(--radar-border)] bg-[var(--radar-bar)] font-mono text-[11px] flex-shrink-0">
         <p
           className="truncate"
           style={{ color: spikeMsg ? DANGER : cyclePath ? ACCENT : INK2 }}

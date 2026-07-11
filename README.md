@@ -51,7 +51,7 @@
 
 > Esta sección existe para retomar el proyecto **sin más contexto que este README**. Resume qué se construyó en esta rama, en qué orden y por qué. El diseño detallado del grafo vive en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md); el del rediseño de la UI (decisiones, mockup aprobado y notas de rendimiento), en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md).
 
-El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (rama `main`, lo que muestra el deploy actual) y evolucionó en esta rama hacia una **plataforma omnidireccional personalizable** con el radar como pantalla principal. Todo lo siguiente está implementado, testeado (50+ tests de Go y 13 de frontend; CI en GitHub Actions con `go test -race` + `vitest` + builds) y verificado end-to-end contra feeds reales:
+El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (rama `main`, lo que muestra el deploy actual) y evolucionó en esta rama hacia una **plataforma omnidireccional personalizable** con el radar como pantalla principal. Todo lo siguiente está implementado, testeado (60+ tests de Go y 13 de frontend; CI en GitHub Actions con `go test -race` + `vitest` + builds) y verificado end-to-end contra feeds reales:
 
 | Etapa | Qué se construyó | Piezas clave |
 |---|---|---|
@@ -66,6 +66,8 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 | **Rediseño Radar-first (UI)** | **El radar es ahora la pantalla principal** (revelación progresiva: nodos con activo+saldo; precio/fee/liquidez al hover de cada arista; detalle completo al click con card flotante/sheet); vistas `RADAR \| DASHBOARD` con header compacto (patrimonio con contador animado, **Probar el bot** global); **Estrategia como drawer sobre el grafo** (préstamo automático incluido; la poda del universo se VE: los venues excluidos se atenúan); dinamismo: pulso por tick, partículas recorriendo el ciclo, cobro flotante `+$X`, spike en rojo, barrido de sonar; **layout paramétrico** (1..N venues sin tocar código, fan-out de aristas intra-venue) con 13 tests puros | `radarLayout.ts` · `RadarView.tsx` · `HeaderBar.tsx` · `StrategyDrawer.tsx` · plan y mockup en `docs/REDISENO-RADAR.md` |
 | **Revisión final — parametrización total** | Auditoría contra los criterios del comité y cierre de TODO knob cosmético: el **radar es por sesión** (cada usuario ve el ciclo de SU subgrafo con SUS fees en las aristas — mover un slider cambia el dibujo); el **universo apaga también al ejecutor clásico**; el **Spike Filter por sesión filtra de verdad** (segunda capa sobre el default global); los **triangulares reportan capacidad real** (`max_start_amount` en unidades del nodo de inicio); el **préstamo es parametrizado** (línea USD/BTC, APR, fee de apertura y plazo son del usuario, con versionado del wire para sesiones viejas); **filtros de seguridad y prob. de fallo de orden en el panel** + presets Conservador/Balanceado/Agresivo; **catálogo externo** (`ARUS_CATALOG`/`venues.json`: agregar un libro = editar JSON, sin recompilar) y **`GET /api/config`** (el motor declara sus 16 parámetros con defaults y rangos, el catálogo y los guardrails); `ARUS_DB_PATH` para volúmenes | `config.go` (LoadCatalog + /api/config) · bloque crédito en `models.go`/`server.go` · `venues.example.json` · [referencia completa](#️-parámetros-y-configuración--referencia-completa) |
 | **Onboarding adaptativo — dos clases de usuario** | La puerta de entrada se adapta a quién llega: modo **Guiado** (un solo número + presets desde $100; el BTC se deriva del precio de referencia de `/api/config` y el reparto 50/50 se EXPLICA — el bot necesita inventario en ambos lados porque compra y vende simultáneo) y modo **Experto** (totales USD+BTC + **matriz de % por exchange** del catálogo real, distribución separada para BTC opcional, suma 100 validada en UI y backend, rechazo explícito con motivo). La distribución **persiste** (`sessions.alloc_json`, migración aditiva) y `reset_session` la respeta; la barra de salud del dashboard se calibra contra la distribución real. Nueva subsección en el README: la defensa técnica de **SQLite embebida vs base "completa"** | `OnboardingModal.tsx` (dos modos) · `validAllocation`/`initSession` (server.go) · `alloc_json` (store.go) · [¿Por qué SQLite?](#️-por-qué-una-base-de-datos-local-embebida-sqlite-y-no-una-completa) |
+| **Pulido visual del dashboard (secciones secundarias)** | Auditoría UX con las dos personas y pruebas multi-viewport: **donut "dónde está tu dinero" data-driven** desde los nodos del radar (todo venue/activo con saldo, TOTAL real en el centro, bucket "Otros" — muere el "TOT 4" y el fallback 60000 del frontend); **card por venue fuera del par clásico** (Kraken visible en el dashboard con saldos multi-activo + Editar fondos + chip RADAR); **tema y pestaña activa persistentes** (elección manual > sistema, claves `arus_dark`/`arus_view`); fixes: track de salud con variante dark, volumen del feed a 4 decimales, ledger con overflow-x propio y rutas truncadas, textos sin supuestos fijos, tutorial radar-first (contador dinámico) | commit `5fc0125` · donut y cards en `page.tsx` · `LedgerPanel.tsx` · `TutorialModal.tsx` |
+| **Radar tematizado (claro/oscuro)** | El dueño reportó como **bug** que el radar quedara siempre oscuro (era una decisión "lienzo-terminal" pendiente de validar → validada: debe tematizar). El lienzo ahora conmuta con la app vía **variables CSS `--radar-*`** (paleta clara en `:root`, oscura bajo `.dark`, ambas en `globals.css`); los colores del SVG van por `style` porque **`var()` no es válido en atributos de presentación SVG**; partículas/glow/barrido usan las mismas variables. Paleta clara tipo "plano técnico": papel `#edf1f8`, tinta `#17233d`, acento emerald-600, BTC en amber-700 (el 600 no contrasta en blanco) | `globals.css` (`--radar-*`) · `RadarView.tsx` |
 
 **Decisiones de diseño que hay que conocer para seguir trabajando:**
 
@@ -76,18 +78,21 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 - **USDT ≠ USD, declarado.** Binance opera BTC/USDT; Bitso y Kraken operan BTC/USD; la equivalencia 1:1 es una arista `EdgeParity` **visible** en el grafo (`AssumeUSDTParity`, `parityPairs` en venues.go), no un supuesto escondido.
 - **El crédito TAMBIÉN aplica a ciclos del radar (Sprint D).** Cuando el plan de un ciclo muere por saldo, `cycleCreditProjection` calcula si la línea de crédito lo volvería viable y la decisión pasa por `handleLiquidityShortfall` — la misma inecuación `ganancia > costo × k`, el mismo diálogo asistido. La línea sigue llegando al par clásico (los ciclos arrancan desde sus nodos cash).
 - **La UI es Radar-first (rediseño).** Dos vistas conmutadas por tabs: `RADAR` (principal, el grafo a pantalla completa con revelación progresiva) y `DASHBOARD` (todo lo clásico). La **Estrategia es un drawer sobre el grafo** (incluye el préstamo automático) y **Probar el bot vive en el header**, accesible desde ambas vistas — es la demo central para un juez. El plan de diseño con TODAS las decisiones (y el mockup aprobado) vive en [`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md).
-- **El lienzo del radar está comprometido al modo oscuro** (es un terminal; colores explícitos, no tematiza), mientras header/cards/drawer sí siguen el tema claro/oscuro de la app. Validar esa decisión con el dueño mirando el modo claro sigue abierto (backlog).
+- **El radar tematiza con la app** (claro/oscuro) vía variables CSS `--radar-*` definidas en `globals.css` (`:root` = paleta clara, `.dark` = oscura; la clase `dark` vive en el contenedor raíz de `page.tsx` y las custom properties se heredan hasta el SVG). Regla dura aprendida: `var()` **no funciona en atributos de presentación SVG** (`fill=`/`stroke=` como atributo JSX) — todo color dinámico del lienzo va por `style`. La decisión original de "lienzo comprometido al oscuro" (docs/REDISENO-RADAR.md) quedó **superada**: el dueño la reportó como bug.
 - **Todo lo simulado sigue simulado.** Las órdenes no tocan APIs privadas de exchanges: los fills son instantáneos al top-of-book con slippage estimado, y el Fill-or-Kill es probabilístico (**configurable por sesión**, default 5 % — 0 % para una corrida limpia, alto para provocar el circuit breaker a voluntad). El puente a ejecución real (testnet) está en el plan (ver [Qué sigue](#-qué-sigue--plan-de-evolución)).
 
 **Notas de entorno de desarrollo (gotchas reales):**
 
 - `go test -race` **no corre en la máquina de desarrollo Windows** (requiere gcc de 64 bits); el CI de GitHub Actions lo cubre en cada push.
-- En pruebas locales pueden quedar **procesos zombi en el puerto 8080** (el bind falla en silencio y te conectas a un motor viejo). Liberar con PowerShell: `Get-NetTCPConnection -LocalPort 8080 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`.
+- En pruebas locales pueden quedar **procesos zombi en los puertos 8080 (motor) y 3000 (Next)** (el bind falla en silencio y te conectas a un servidor viejo). Liberar con PowerShell: `Get-NetTCPConnection -LocalPort 8080 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }` (ídem con 3000).
+- **La caché persistente de Turbopack puede servir CSS viejo**: tras editar `globals.css`, si las reglas nuevas no aparecen en el CSS servido (verifica con `fetch` de la hoja y busca tu selector), borra `apps/web/.next` y reinicia el dev server. Ocurrió de verdad al agregar las variables `--radar-*`: las utilidades que las USAN se generaron, pero las DEFINICIONES `:root`/`.dark` no llegaron hasta limpiar la caché.
+- **HTML nativo: `step` se ancla a `min`** en `<input type="number">`. Con `min="1" step="1000"`, el valor 10000 es INVÁLIDO (válidos: 9001/10001) y un `<form>` bloquea el submit **sin mensaje visible**. En inputs de valor libre usa `step="any"` (bug real del onboarding, corregido).
+- **PowerShell 5.1 corrompe UTF-8 sin BOM**: `Get-Content`/`Set-Content` sobre archivos con acentos los convierte en mojibake (asume ANSI). Para ediciones scriptadas usar `[System.IO.File]::ReadAllText/WriteAllText` con `UTF8Encoding($false)`.
 - Smoke E2E por WebSocket: Node ≥ 21 trae `WebSocket` global — un script `.mjs` de ~40 líneas conecta a `ws://localhost:8080/ws`, envía acciones y valida eventos (patrón usado para verificar cada sprint).
 - El esquema SQLite **se auto-crea/migra al arrancar** (`InitLedger` → `initSessionStore`); en Fly.io el volumen montado en `data/` conserva la base entre deploys sin pasos manuales.
 - **Rendimiento del radar (aprendido en la verificación E2E, no regresionar):** `RadarView` está **memoizado** y recibe solo el último log de spike — pasarle el feed de logs completo re-renderiza TODO el lienzo con cada log (decenas por segundo con feeds reales). Las animaciones continuas (barrido) van en **overlays HTML**, no dentro del SVG (animar un `<g>` repinta el canvas entero por frame). El contador del patrimonio pinta SIEMPRE el valor real de React y anima por mutación imperativa encima.
 - Frontend: `npm test` corre los tests de **vitest** (layout paramétrico del radar); el CI también los corre.
-- Nota para sesiones con Claude Code: en la sesión del rediseño, la herramienta de screenshots del preview **no pudo capturar esta app** (timeouts con la página sana) — verificar por snapshot de accesibilidad + `eval` sobre el DOM, y dejar la validación visual al dueño en su navegador.
+- Nota para sesiones con Claude Code: la herramienta de screenshots del preview **no puede capturar esta app** (timeouts con la página sana — confirmado en tres sesiones distintas; probablemente por el canvas SVG animado). Verificar por `javascript_tool`/`eval` sobre el DOM y estilos computados (`getComputedStyle`), y dejar la validación visual final al dueño. Además, el navegador del preview **arranca con localStorage limpio en cada sesión** de verificación: no hay resume automático entre sesiones de Claude — hay que rehacer el onboarding (la base del MOTOR sí persiste en `apps/engine/data/`).
 
 ---
 
@@ -364,7 +369,7 @@ Arus/
 │  │  ├─ ledger.go            # PERSISTENCIA del ledger: esquema + migración aditiva, write-behind, consultas por sesión
 │  │  ├─ analytics.go         # ANALÍTICA: agregados del ledger (/api/stats) + export CSV (/api/ledger.csv)
 │  │  ├─ models.go            # ESTADO y WIRE: Balances multi-activo, TradingParameters, ClientSession, Hub, eventos
-│  │  └─ *_test.go            # 50+ tests: fórmula, grafo, ciclos, crédito, store, analítica, clamps, concurrencia + benchmark
+│  │  └─ *_test.go            # 60+ tests: fórmula, grafo, ciclos, crédito, distribución, catálogo, store, analítica, clamps, concurrencia + benchmark
 │  └─ web/src/
 │     ├─ app/page.tsx         # Contenedor: vistas RADAR | DASHBOARD, modales (crédito/fondos/simulador/guía)
 │     ├─ components/
@@ -411,6 +416,7 @@ Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RA
 - **Dinamismo:** pulso en cada nodo cuyo libro recibió tick; el ciclo rentable se ilumina en verde con **partículas recorriendo la ruta del dinero**; al ejecutarse, un `+$X` flota desde el nodo de origen y el patrimonio del header **cuenta hacia arriba**; un spike bloqueado tiñe la narración de rojo; sin ciclo, un barrido de sonar dice "sigo buscando". Respeta `prefers-reduced-motion`.
 - **Narración de 1 línea + ticker** al pie: qué ve el radar ahora mismo y la última operación.
 - **La poda del universo se VE:** los exchanges/monedas que saques de tu universo (drawer de Estrategia) se desvanecen del lienzo.
+- **Tematiza claro/oscuro con la app** (variables CSS `--radar-*`): terminal oscuro o "plano técnico" claro, según el toggle del header — que persiste y le gana al tema del sistema.
 
 **Header (ambas vistas):** patrimonio con contador animado + PnL, tabs `RADAR | DASHBOARD`, **⚡ Probar el bot** (el simulador es un pilar: es como un juez evalúa el sistema — inyectar escenarios y VER al radar reaccionar), **⚙ Estrategia**, tutorial, modo oscuro y reset.
 
@@ -547,7 +553,7 @@ npm run dev
 
 ```bash
 cd apps/engine
-go test ./...                                  # 50+ tests unitarios del motor
+go test ./...                                  # 60+ tests unitarios del motor
 go test -bench=Detection -benchmem -run=^$     # benchmark del hot path
 # go test -race corre en el CI (requiere gcc de 64 bits, ausente en la máquina de desarrollo)
 
@@ -614,25 +620,27 @@ Verifica: `https://<tu-app>.fly.dev/api/ledger` → debe devolver `[]`, y `https
 - **Puente a ejecución real:** interface `ExchangeAdapter` (libro/órdenes/balances) con implementación simulada actual + Binance **Testnet** — el paso de demo a sistema real.
 - **Postgres** solo si aparecen múltiples instancias del motor o cuentas con login (la interfaz `SessionStore` ya lo permite sin reescribir).
 - Wire multi-venue completo en la UI de wallets clásicas (hoy leen el plano 2-venue; el radar ya usa `balances`).
-- **Validar el modo claro del radar** con el dueño: hoy el lienzo está comprometido al oscuro (decisión de diseño tipo terminal); si no convence en modo claro, tematizarlo.
 - Tooltip de arista con la **razón de inviabilidad** cuando no hay ciclo (spread actual vs fees) — hace visible la honestidad del modelo (quedó fuera de R3 por alcance).
+- **FundsModal multi-activo** (hoy solo USD/BTC: depositar ETH en un venue exige que un ciclo lo deje ahí) y **wire plano 2-venue** en las cards clásicas del dashboard (los venues nuevos ya tienen su propia card desde los nodos del radar).
 
 ---
 
 ## 📸 Capturas de pantalla
 
 > ### ⚠️ PENDIENTE: ACTUALIZAR LAS CAPTURAS (las toma el dueño)
-> Las capturas siguientes corresponden a la **versión anterior** (rama `main`, pre-rediseño): siguen siendo útiles para los flujos que no cambiaron (crédito, onboarding, tutorial, fondos, simulador), pero **ya no reflejan la pantalla principal**. Checklist de capturas nuevas (app corriendo en local, modo oscuro):
+> Las capturas siguientes corresponden a la **versión anterior** (rama `main`, pre-rediseño): siguen siendo útiles para los flujos que no cambiaron (crédito, fondos, simulador), pero **ya no reflejan la pantalla principal ni el onboarding**. Checklist de capturas nuevas (app corriendo en local, modo oscuro salvo donde se indique):
 >
 > 1. **Vista RADAR completa** — las 3 columnas (Binance/Bitso/Kraken) con precios vivos, header con tabs y patrimonio. *La captura estrella.*
-> 2. **Card de nodo abierta** (click en BTC@Bitso, por ejemplo): libros, frescura, Editar fondos.
-> 3. **Tooltip de arista** (hover sobre un libro): compra/venta + fee + liquidez.
-> 4. **Drawer de Estrategia abierto sobre el grafo**, idealmente con un venue podado (atenuado en el lienzo detrás).
-> 5. **El ciclo en acción**: inyectar "Oportunidad normal" desde ⚡ Probar el bot y capturar el grafo con la ruta en verde + partículas (y si se puede, el `+$X` flotando).
-> 6. **Spike bloqueado**: inyectar "Precio falso" y capturar la narración en rojo.
-> 7. **Vista DASHBOARD** (tab): KPIs + wallets + feed.
-> 8. **Panel de Analítica** abierto con la curva de P&L y los tiles.
-> 9. **"Recuperando tu sesión…"** (recargar la página con sesión activa).
+> 2. **Radar en MODO CLARO** (toggle del header): demuestra que el lienzo tematiza — paleta "plano técnico".
+> 3. **Onboarding modo GUIADO** (un número + presets + "así se prepara tu dinero") y **modo EXPERTO** (matriz de % por exchange con la suma validada).
+> 4. **Card de nodo abierta** (click en BTC@Bitso, por ejemplo): libros, frescura, Editar fondos.
+> 5. **Tooltip de arista** (hover sobre un libro): compra/venta + fee + liquidez.
+> 6. **Drawer de Estrategia abierto sobre el grafo** con las secciones nuevas visibles (perfiles rápidos, filtros de seguridad, tu línea de crédito), idealmente con un venue podado (atenuado detrás).
+> 7. **El ciclo en acción**: inyectar "Oportunidad normal" desde ⚡ Probar el bot y capturar el grafo con la ruta en verde + partículas (y si se puede, el `+$X` flotando).
+> 8. **Spike bloqueado**: inyectar "Precio falso" y capturar la narración en rojo.
+> 9. **Vista DASHBOARD** (tab): KPIs + wallets (incluida la card de Kraken) + donut "dónde está tu dinero" + feed.
+> 10. **Panel de Analítica** abierto con la curva de P&L y los tiles.
+> 11. **"Recuperando tu sesión…"** (recargar la página con sesión activa).
 >
 > Al reemplazar: mantener los nombres descriptivos en `assets/` y actualizar los `<img>`/rutas de abajo.
 
