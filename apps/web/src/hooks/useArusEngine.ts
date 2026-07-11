@@ -92,10 +92,18 @@ export interface GraphSnapshot {
   updated_at: string;
 }
 
+// Distribución del capital por venue (porcentajes, suman 100).
+export type Allocation = Record<string, number>;
+
 export interface EngineState {
   sessionId: string;
   params: TradingParams | null;
   graph: GraphSnapshot | null;
+  // Distribución elegida en el onboarding (undefined = 50/50 clásico o sesión
+  // reanudada): la usa la barra de salud de fondos para calibrar el 100 %.
+  usdAllocation?: Allocation;
+  // Rechazo del backend al init (INIT_REJECTED): el onboarding lo muestra.
+  initError?: string;
   trades: Trade[];
   totalWealth: number;
   initialWealth: number;
@@ -185,8 +193,19 @@ export function useArusEngine() {
   });
 
   const wsRef = useRef<WebSocket | null>(null);
-  const configRef = useRef<{ usd: number; btc: number } | null>(null);
+  const configRef = useRef<{ usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation } | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // initMsg arma el payload de init_session con la distribución (si la hay) —
+  // lo comparten el arranque normal y la re-inicialización tras reconexión.
+  const initMsg = (cfg: { usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation }) =>
+    JSON.stringify({
+      action: "init_session",
+      initial_usd: cfg.usd,
+      initial_btc: cfg.btc,
+      usd_allocation: cfg.usdAlloc,
+      btc_allocation: cfg.btcAlloc,
+    });
 
   // openSocket abre la conexión con los handlers compartidos. La reconexión
   // automática PREFIERE reanudar la sesión persistida (resume_session con el
@@ -219,7 +238,7 @@ export function useArusEngine() {
         if (token) {
           openSocket(s => s.send(JSON.stringify({ action: "resume_session", session_id: token })));
         } else if (configRef.current) {
-          openSocket(s => s.send(JSON.stringify({ action: "init_session", initial_usd: configRef.current!.usd, initial_btc: configRef.current!.btc })));
+          openSocket(s => s.send(initMsg(configRef.current!)));
         }
       }, 3000);
     };
@@ -228,9 +247,10 @@ export function useArusEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const initSession = useCallback((usd: number, btc: number) => {
-    configRef.current = { usd, btc };
-    const msg = JSON.stringify({ action: "init_session", initial_usd: usd, initial_btc: btc });
+  const initSession = useCallback((usd: number, btc: number, usdAlloc?: Allocation, btcAlloc?: Allocation) => {
+    configRef.current = { usd, btc, usdAlloc, btcAlloc };
+    setState(prev => ({ ...prev, usdAllocation: usdAlloc, initError: undefined }));
+    const msg = initMsg(configRef.current);
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(msg); // socket vivo (p. ej. tras RESUME_FAILED): reúsalo
       return;
@@ -346,6 +366,7 @@ export function useArusEngine() {
       setSessionReady(true);
       setState(prev => ({
         ...prev,
+        initError: undefined,
         sessionId: (data.session_id as string) || prev.sessionId,
         params: (data.params as TradingParams) ?? prev.params,
         totalWealth: (data.total_wealth as number) ?? prev.totalWealth,
@@ -367,6 +388,10 @@ export function useArusEngine() {
         insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
         loanResults: null,
       }));
+    } else if (data.type === "INIT_REJECTED") {
+      // El backend rechazó el capital o la distribución: el onboarding muestra
+      // el motivo tal cual (a un experto no se le deja esperando en silencio).
+      setState(prev => ({ ...prev, initError: (data.message as string) || "El motor rechazó la configuración inicial." }));
     } else if (data.type === "RESUME_FAILED") {
       // El token ya no corresponde a una sesión válida: se olvida y el usuario
       // pasa por el onboarding normal (el socket queda abierto para el init).

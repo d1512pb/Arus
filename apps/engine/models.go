@@ -325,6 +325,14 @@ type ClientSession struct {
 	// leen la vista consistente con Params() — sin locks y sin estados a medias.
 	params atomic.Pointer[TradingParameters]
 
+	// UsdAlloc / BtcAlloc: la distribución del capital inicial elegida en el
+	// onboarding (porcentaje por venue; nil = clásico 50/50 entre el par). Se
+	// persiste con la sesión (alloc_json) y reset_session la respeta: el 40/40/20
+	// de un experto sobrevive a reinicios y resets. Los mapas se tratan como
+	// SOLO-LECTURA tras publicarse (misma convención que TakerFees).
+	UsdAlloc map[string]float64
+	BtcAlloc map[string]float64
+
 	IsReplenishing           bool
 	ReplenishExpiresAt       time.Time
 	InsufficientFundsPending bool
@@ -465,6 +473,16 @@ type ClientMessage struct {
 	Action     string  `json:"action"`
 	InitialUSD float64 `json:"initial_usd,omitempty"`
 	InitialBTC float64 `json:"initial_btc,omitempty"`
+
+	// UsdAllocation / BtcAllocation acompañan a init_session (OPCIONAL, modo
+	// experto del onboarding): porcentaje del capital por venue, p. ej.
+	// {"Binance": 40, "Bitso": 40, "Kraken": 20}. Claves = venues registrados;
+	// la suma debe ser 100. Ausentes = reparto clásico 50/50 entre el par.
+	// BtcAllocation ausente con UsdAllocation presente = el BTC sigue a la de USD.
+	// Una distribución INVÁLIDA se rechaza explícitamente (INIT_REJECTED):
+	// a un experto jamás se le corrigen los números en silencio.
+	UsdAllocation map[string]float64 `json:"usd_allocation,omitempty"`
+	BtcAllocation map[string]float64 `json:"btc_allocation,omitempty"`
 
 	// SessionID acompaña a resume_session: el token (UUID no enumerable) que el
 	// navegador guarda en localStorage para recuperar SU sesión persistida.

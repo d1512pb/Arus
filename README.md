@@ -65,6 +65,7 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 | **Sprint D — Crédito para ciclos + analítica** | El autopiloto **ya no omite en silencio** oportunidades sin fondos: `cycleCreditProjection` re-planifica con la línea de crédito hipotética y la decisión pasa por la misma inecuación `ganancia > costo × k` del modo clásico (auto-crédito / reequilibrio / diálogo asistido); **analítica desde el ledger**: columna `fees_usd` (fricción total, con migración aditiva automática), `GET /api/stats` (P&L acumulado en serie, win rate, ops/hora), `GET /api/ledger.csv` (export) y **panel de Analítica** en el dashboard (tiles + curva de P&L con hover) | `cycleCreditProjection` (cycle.go) · `analytics.go` (stats/CSV) · `AnalyticsPanel.tsx` |
 | **Rediseño Radar-first (UI)** | **El radar es ahora la pantalla principal** (revelación progresiva: nodos con activo+saldo; precio/fee/liquidez al hover de cada arista; detalle completo al click con card flotante/sheet); vistas `RADAR \| DASHBOARD` con header compacto (patrimonio con contador animado, **Probar el bot** global); **Estrategia como drawer sobre el grafo** (préstamo automático incluido; la poda del universo se VE: los venues excluidos se atenúan); dinamismo: pulso por tick, partículas recorriendo el ciclo, cobro flotante `+$X`, spike en rojo, barrido de sonar; **layout paramétrico** (1..N venues sin tocar código, fan-out de aristas intra-venue) con 13 tests puros | `radarLayout.ts` · `RadarView.tsx` · `HeaderBar.tsx` · `StrategyDrawer.tsx` · plan y mockup en `docs/REDISENO-RADAR.md` |
 | **Revisión final — parametrización total** | Auditoría contra los criterios del comité y cierre de TODO knob cosmético: el **radar es por sesión** (cada usuario ve el ciclo de SU subgrafo con SUS fees en las aristas — mover un slider cambia el dibujo); el **universo apaga también al ejecutor clásico**; el **Spike Filter por sesión filtra de verdad** (segunda capa sobre el default global); los **triangulares reportan capacidad real** (`max_start_amount` en unidades del nodo de inicio); el **préstamo es parametrizado** (línea USD/BTC, APR, fee de apertura y plazo son del usuario, con versionado del wire para sesiones viejas); **filtros de seguridad y prob. de fallo de orden en el panel** + presets Conservador/Balanceado/Agresivo; **catálogo externo** (`ARUS_CATALOG`/`venues.json`: agregar un libro = editar JSON, sin recompilar) y **`GET /api/config`** (el motor declara sus 16 parámetros con defaults y rangos, el catálogo y los guardrails); `ARUS_DB_PATH` para volúmenes | `config.go` (LoadCatalog + /api/config) · bloque crédito en `models.go`/`server.go` · `venues.example.json` · [referencia completa](#️-parámetros-y-configuración--referencia-completa) |
+| **Onboarding adaptativo — dos clases de usuario** | La puerta de entrada se adapta a quién llega: modo **Guiado** (un solo número + presets desde $100; el BTC se deriva del precio de referencia de `/api/config` y el reparto 50/50 se EXPLICA — el bot necesita inventario en ambos lados porque compra y vende simultáneo) y modo **Experto** (totales USD+BTC + **matriz de % por exchange** del catálogo real, distribución separada para BTC opcional, suma 100 validada en UI y backend, rechazo explícito con motivo). La distribución **persiste** (`sessions.alloc_json`, migración aditiva) y `reset_session` la respeta; la barra de salud del dashboard se calibra contra la distribución real. Nueva subsección en el README: la defensa técnica de **SQLite embebida vs base "completa"** | `OnboardingModal.tsx` (dos modos) · `validAllocation`/`initSession` (server.go) · `alloc_json` (store.go) · [¿Por qué SQLite?](#️-por-qué-una-base-de-datos-local-embebida-sqlite-y-no-una-completa) |
 
 **Decisiones de diseño que hay que conocer para seguir trabajando:**
 
@@ -140,6 +141,7 @@ Los parámetros que gobiernan al bot son **del usuario, no del sistema** — edi
 | **Términos del préstamo** | Línea (USD y BTC), tasa anual, fee de apertura y plazo del crédito | Un usuario pide $20 000 a 10 min con fee $10; otro $500 000 al límite — el costo que `k` multiplica se mueve con SUS términos |
 | **Filtros de seguridad** | Spike Filter por tick (%) y divergencia máxima entre casas (%) | El estricto descarta saltos >1 % y opera solo con datos suaves; el tolerante deja pasar volatilidad de evento |
 | **Prob. de fallo de orden** | La "física" del simulador: Fill-or-Kill por orden | 0 % = corrida limpia para la demo; 30 % = estrés que dispara el circuit breaker a voluntad |
+| **Distribución del capital** | Porcentaje del capital inicial por exchange (cash y BTC por separado) | El novato acepta el 50/50 explicado; el experto arranca 40/40/20 con su BTC concentrado donde hay liquidez |
 | **Tu universo** | Con qué exchanges y monedas juega el bot (poda del grafo) | Solo Binance → el radar busca únicamente ciclos triangulares internos |
 | **Autopiloto del radar** | Detección → ejecución del mejor ciclo del universo | ON: ejecuta ciclos espaciales o triangulares; OFF: modo clásico del par |
 
@@ -267,6 +269,17 @@ Arus persiste en SQLite **la sesión completa de cada usuario**, no solo sus tra
 - **Reconexión sin pérdidas:** un parpadeo de red reanuda la sesión persistida (antes ¡re-inicializaba y borraba el progreso!). Si otra pestaña reclama el mismo token, la vieja se desconecta limpiamente (takeover identity-aware en el Hub).
 - **Sin préstamos fantasma:** la fotografía persiste solo fondos PROPIOS (préstamo activo excluido).
 - **Write-behind siempre:** cada mutación de saldos dispara la fotografía asíncrona (el punto de paso es `sendWalletUpdate`); si el disco falla, el motor sigue operando en memoria.
+
+### 🗄️ ¿Por qué una base de datos local embebida (SQLite) y no una "completa"?
+
+Porque para el patrón de escritura de este motor, SQLite no es un atajo: **es la elección técnicamente correcta**. El argumento no es "es un demo" — es este:
+
+1. **El patrón de acceso es exactamente el caso de uso de SQLite.** El motor es UN proceso con UN escritor (write-behind: cada mutación de saldos dispara una fotografía asíncrona) y lecturas esporádicas (reanudación, `/api/stats`). No hay múltiples instancias del motor, no hay escritores concurrentes de máquinas distintas, no hay usuarios con login compartiendo filas. Una base cliente-servidor (Postgres, MySQL) existe para resolver problemas que este sistema **no tiene** — y los cobraría igual: un salto de red por escritura en el camino del trading, credenciales que rotar, un servicio más que puede caerse. SQLite embebida escribe en el mismo proceso, con WAL + `busy_timeout` + 1 conexión para serializar el único escritor real.
+2. **Fiabilidad operativa de una sola pieza.** La base es **un archivo**: el volumen de Fly.io lo persiste entre deploys, copiarlo es el backup, y el esquema se **auto-crea y auto-migra al arrancar** (migraciones aditivas vía `pragma_table_info`: así entraron `fees_usd` en el ledger y `alloc_json` en las sesiones, contra bases existentes, sin un solo paso manual). El jurado clona el repo, corre `go run .`, y la persistencia simplemente existe — cero infraestructura que instalar, exactamente lo que exige el objetivo de "sistema funcional en menos de 2 minutos".
+3. **No es una base "de juguete".** SQLite es transaccional ACID y es la base de datos más desplegada del mundo (cada navegador y cada teléfono llevan varias). Las garantías que este sistema necesita — upserts atómicos de la fotografía de sesión, un ledger inmutable con índices por sesión — las da completas.
+4. **Y la decisión es reversible por diseño, con disparadores explícitos.** El motor no sabe que hay SQLite: habla con la interfaz `SessionStore` (patrón repositorio). El día que aparezca el problema que Postgres SÍ resuelve — múltiples instancias del motor detrás de un balanceador, o cuentas con login — migrar es escribir otro driver de la misma interfaz, **cero cambios en la lógica de negocio**. Esos disparadores están documentados en el backlog: elegir Postgres *hoy* sería pagar por adelantado un problema que quizá nunca llegue, en el sentido exactamente opuesto a YAGNI.
+
+En corto: la pregunta correcta no es "¿por qué no una base completa?" sino "¿qué problema tendría que aparecer para justificarla?" — y la arquitectura ya tiene la puerta abierta para ese día.
 
 El **Trade Ledger** sigue siendo el registro de auditoría **inmutable**: cada operación (del par o ciclo completo con su ruta) con timestamp, volumen, **fricción pagada** (`fees_usd`, fees + slippage — Sprint D, con migración automática de bases anteriores), neto y flag de préstamo/reequilibrio. Y desde el Sprint D, el ledger alimenta la **analítica por sesión**:
 
@@ -409,7 +422,14 @@ Web app **Radar-first** (rediseño completo, plan y mockup en [`docs/REDISENO-RA
 - **Panel de Historial / Auditoría:** el ledger persistido de TU sesión.
 - **Panel de Analítica / Rendimiento (Sprint D):** curva de P&L acumulado con hover, win rate, ritmo, fricción total pagada (fees + slippage) y volumen — todo desde el ledger — más **export CSV**.
 
-**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso) e inyección manual sobre **cualquier venue del catálogo**, **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, configuración inicial guiada, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
+**Onboarding adaptativo (dos clases de usuario):** la puerta de entrada pregunta distinto según quién eres. Detrás hay una reflexión de producto: el **novato con pocos recursos** llega sabiendo UNA sola cosa (cuánto está dispuesto a arriesgar) — la pantalla anterior le exigía dos números en unidades distintas (USD *y* BTC), le imponía mínimos arbitrarios y le *anunciaba* el reparto 50/50 sin *explicárselo*; el **experto** es lo contrario: sabe sus porcentajes exactos por exchange y la simplificación le estorba. Por eso el onboarding tiene dos modos:
+
+- **Guiado** — un solo número ("¿cuánto quieres invertir?", desde $100, con presets) y Arus deriva el resto **explicando por qué**: el bot compra y vende *en el mismo instante*, así que necesita inventario en ambos lados ANTES de la oportunidad — mitad efectivo, mitad BTC al precio de referencia del motor (`/api/config → reference.btc_price_usd`), repartido 50/50 en el par clásico.
+- **Experto** — totales de USD y BTC + **matriz de porcentajes por exchange** (el catálogo real del motor: un 4º venue aparece solo), con **distribución separada para el BTC** opcional (el cash donde pagas menos fees; el inventario donde hay liquidez). Suma 100 validada en vivo en la UI y OTRA VEZ en el backend (`validAllocation`) — una distribución inválida se **rechaza** con motivo (`INIT_REJECTED`): a un experto jamás se le corrigen los números en silencio. La distribución **persiste** con la sesión (columna `alloc_json`, migración aditiva automática) y `reset_session` la respeta: el 40/40/20 sobrevive a reinicios y resets.
+
+La última configuración se recuerda (localStorage) y la barra de "nivel de fondos" del dashboard se calibra contra lo que CADA venue recibió realmente, no contra un 50/50 asumido.
+
+**Transversal:** continuidad sin fricción ("Recuperando tu sesión…" con token en `localStorage`), **modo de pruebas** con 3 escenarios (oportunidad normal / evento extremo / precio falso) e inyección manual sobre **cualquier venue del catálogo**, **decisión asistida sin fondos** (ganancia posible vs costo del crédito × tu riesgo), tutorial guiado de 8 pasos, banners de crédito/reequilibrio con cuenta regresiva, modo oscuro y responsive.
 
 ---
 
@@ -443,6 +463,16 @@ Se ajustan desde el **drawer de Estrategia** (o por WebSocket con la acción `se
 | `enabled_venues` | Universo: exchanges activos (poda del grafo **y** del ejecutor clásico) | todos | subconjunto del catálogo | Tu universo (chips) |
 | `enabled_assets` | Universo: monedas activas | todas | subconjunto del catálogo | Tu universo (chips) |
 | `radar_autopilot` | Detección → ejecución de ciclos (apaga el modo clásico) | off | bool | Autopiloto |
+
+### Parámetros del onboarding (acción `init_session`)
+
+| Parámetro (wire) | Qué controla | Default | Validación | UI |
+|---|---|---|---|---|
+| `initial_usd` / `initial_btc` | Capital inicial | los define el usuario | finitos, > 0, topes sanos | Guiado (un total) o Experto (ambos) |
+| `usd_allocation` | % del cash por venue (`{"Binance":40,"Bitso":40,"Kraken":20}`) | ausente = 50/50 par clásico | venues registrados, suma exacta 100; inválida → `INIT_REJECTED` | Experto: matriz de % |
+| `btc_allocation` | % del BTC por venue (puede diferir del cash) | ausente = sigue a `usd_allocation` | misma validación | Experto: toggle "distribución distinta para BTC" |
+
+La distribución elegida **persiste** con la sesión (`sessions.alloc_json`) y `reset_session` la respeta.
 
 ### Variables de entorno del motor
 
@@ -632,7 +662,7 @@ Cuando un exchange se queda sin saldo y el préstamo automático está apagado, 
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="assets/Configuracion_Inicial.png" alt="Configuración inicial del capital"><br><sub>Configuración inicial: el usuario elige capital de arranque (mín. $1 000 y 0.1 BTC) y ve cómo se repartirá 50/50.</sub></td>
+<td width="50%" valign="top"><img src="assets/Configuracion_Inicial.png" alt="Configuración inicial del capital"><br><sub>Configuración inicial (captura pre-rediseño): hoy el onboarding tiene modo Guiado (un solo número, todo explicado) y modo Experto (distribución por exchange en porcentajes).</sub></td>
 <td width="50%" valign="top"><img src="assets/Tutorial.png" alt="Tutorial guiado de 8 pasos"><br><sub>Tutorial guiado de 8 pasos en lenguaje sencillo, con chip de ubicación de cada elemento.</sub></td>
 </tr>
 </table>

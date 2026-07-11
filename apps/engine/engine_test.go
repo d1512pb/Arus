@@ -247,7 +247,7 @@ func TestSanitizeTradingParams_CreditBlock(t *testing.T) {
 func TestActivateCredit_UserTerms(t *testing.T) {
 	e := &HFTEngine{Tracker: NewSpreadTracker()}
 	s := newClientSession("credito-propio", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	p := s.Params()
 	p.CreditLineUSD = 20_000
@@ -440,7 +440,7 @@ func TestKrakenTickerParsing(t *testing.T) {
 // (antes del Sprint C, usd/2 por venue habría inflado el capital 1.5×).
 func TestInitSession_ClassicPairOnly(t *testing.T) {
 	s := newClientSession("init-3-venues", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -460,12 +460,93 @@ func TestInitSession_ClassicPairOnly(t *testing.T) {
 	}
 }
 
+// TestValidAllocation: la distribución del modo experto se acepta solo con
+// venues registrados, porcentajes sanos y suma exacta de 100.
+func TestValidAllocation(t *testing.T) {
+	cases := []struct {
+		name  string
+		alloc map[string]float64
+		want  bool
+	}{
+		{"40/40/20 clásico+Kraken", map[string]float64{"Binance": 40, "Bitso": 40, "Kraken": 20}, true},
+		{"100 % en un solo venue", map[string]float64{"Kraken": 100}, true},
+		{"decimales que suman 100", map[string]float64{"Binance": 33.33, "Bitso": 33.33, "Kraken": 33.34}, true},
+		{"vacía", map[string]float64{}, false},
+		{"suma 90", map[string]float64{"Binance": 50, "Bitso": 40}, false},
+		{"suma 110", map[string]float64{"Binance": 60, "Bitso": 50}, false},
+		{"venue desconocido", map[string]float64{"FTX": 100}, false},
+		{"porcentaje negativo", map[string]float64{"Binance": 150, "Bitso": -50}, false},
+		{"NaN", map[string]float64{"Binance": math.NaN(), "Bitso": 100}, false},
+	}
+	for _, c := range cases {
+		if got := validAllocation(c.alloc); got != c.want {
+			t.Errorf("%s: validAllocation=%v, esperado %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestInitSession_CustomAllocation: el modo experto reparte el capital según los
+// porcentajes del usuario — incluida una distribución DISTINTA para el BTC — y
+// Kraken puede nacer fondeado (antes solo recibía capital por depósitos).
+func TestInitSession_CustomAllocation(t *testing.T) {
+	s := newClientSession("experto-40-40-20", nil)
+	usdAlloc := map[string]float64{"Binance": 40, "Bitso": 40, "Kraken": 20}
+	btcAlloc := map[string]float64{"Binance": 70, "Bitso": 30} // BTC no sigue al cash
+	initSession(s, 10_000, 1.0, usdAlloc, btcAlloc)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if !almostEqual(s.Wallets.Get("Binance", "USDT"), 4_000) ||
+		!almostEqual(s.Wallets.Get("Bitso", "USD"), 4_000) ||
+		!almostEqual(s.Wallets.Get("Kraken", "USD"), 2_000) {
+		t.Fatalf("cash mal repartido: %+v", s.Wallets)
+	}
+	if !almostEqual(s.Wallets.Get("Binance", "BTC"), 0.7) ||
+		!almostEqual(s.Wallets.Get("Bitso", "BTC"), 0.3) ||
+		s.Wallets.Get("Kraken", "BTC") != 0 {
+		t.Fatalf("BTC mal repartido: %+v", s.Wallets)
+	}
+	// El capital total es exactamente el declarado (nada se infla ni se pierde).
+	sumUSD, sumBTC := 0.0, 0.0
+	for _, v := range Venues {
+		sumUSD += s.Wallets.Get(v.Name, v.QuoteAsset)
+		sumBTC += s.Wallets.Get(v.Name, v.BaseAsset)
+	}
+	if !almostEqual(sumUSD, 10_000) || !almostEqual(sumBTC, 1.0) {
+		t.Fatalf("capital total=%v USD / %v BTC, esperado 10000 / 1.0 exactos", sumUSD, sumBTC)
+	}
+}
+
+// TestInitSession_ResetPreservesAllocation: reset con la distribución almacenada
+// en la sesión (el camino de reset_session) NO degrada al 50/50 clásico.
+func TestInitSession_ResetPreservesAllocation(t *testing.T) {
+	s := newClientSession("experto-reset", nil)
+	alloc := map[string]float64{"Binance": 25, "Bitso": 25, "Kraken": 50}
+	initSession(s, 8_000, 0.4, alloc, alloc)
+
+	// El bot movió fondos durante la sesión…
+	s.Mu.Lock()
+	s.Wallets.Set("Kraken", "USD", 123)
+	s.Mu.Unlock()
+
+	// …y el reset (mismo camino que el handler: usa la distro de la sesión)
+	// vuelve a la elección del usuario, no al 50/50.
+	initSession(s, s.InitialUSD, s.InitialBTC, s.UsdAlloc, s.BtcAlloc)
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if !almostEqual(s.Wallets.Get("Kraken", "USD"), 4_000) ||
+		!almostEqual(s.Wallets.Get("Binance", "USDT"), 2_000) {
+		t.Fatalf("el reset degradó la distribución del usuario: %+v", s.Wallets)
+	}
+}
+
 // TestRebalance_PreservesNonClassicVenues: el reequilibrio 50/50 opera SOLO sobre
 // el par clásico; los saldos en Kraken (u otros activos) se quedan donde están.
 func TestRebalance_PreservesNonClassicVenues(t *testing.T) {
 	e := &HFTEngine{Tracker: NewSpreadTracker()}
 	s := newClientSession("rebal-3-venues", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	s.Mu.Lock()
 	s.Wallets.Set("Binance", "USDT", 9_000) // par desbalanceado a propósito
@@ -500,7 +581,7 @@ func TestRebalance_PreservesNonClassicVenues(t *testing.T) {
 func TestActivateCredit_ClassicPairOnly(t *testing.T) {
 	e := &HFTEngine{Tracker: NewSpreadTracker()}
 	s := newClientSession("credito-3-venues", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	e.activateCreditSession(s)
 
@@ -528,7 +609,7 @@ func TestActivateCredit_ClassicPairOnly(t *testing.T) {
 func TestExecuteForSession_UniverseGovernsClassicExecutor(t *testing.T) {
 	e := &HFTEngine{Tracker: NewSpreadTracker()}
 	s := newClientSession("universo-par", nil)
-	initSession(s, 100_000, 2)
+	initSession(s, 100_000, 2, nil, nil)
 
 	p := s.Params()
 	p.EnabledVenues = []string{"Kraken"} // el par clásico queda fuera del universo
@@ -571,7 +652,7 @@ func TestExecuteForSession_UniverseGovernsClassicExecutor(t *testing.T) {
 func TestExecuteForSession_SessionSpikeGate(t *testing.T) {
 	e := &HFTEngine{Tracker: NewSpreadTracker()}
 	s := newClientSession("spike-sesion", nil)
-	initSession(s, 100_000, 2)
+	initSession(s, 100_000, 2, nil, nil)
 
 	p := s.Params()
 	p.SpikeTickDeviation = 0.01 // usuario estricto: 1 % (el default global es 5 %)

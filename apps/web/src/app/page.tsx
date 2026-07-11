@@ -560,9 +560,13 @@ export default function Home() {
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const calculateHealth = (ownedUsd: number) => {
-    const maxUSD = state.initialUsd ? state.initialUsd / 2 : 60000;
-    if (maxUSD === 0) return 0;
+  // Salud de fondos de un venue: saldo propio vs lo que ESE venue recibió al
+  // inicio — con distribución personalizada (onboarding experto) el 100 % de
+  // cada casa es su porcentaje real, no el 50/50 asumido.
+  const calculateHealth = (ownedUsd: number, venue: string) => {
+    const pct = state.usdAllocation ? (state.usdAllocation[venue] ?? 0) : 50;
+    const maxUSD = state.initialUsd ? (state.initialUsd * pct) / 100 : 60000;
+    if (maxUSD <= 0) return 0;
     return Math.min(100, Math.max(0, (Math.max(0, ownedUsd) / maxUSD) * 100));
   };
 
@@ -589,7 +593,7 @@ export default function Home() {
         </div>
       );
     }
-    return <OnboardingModal onInit={initSession} />;
+    return <OnboardingModal onInit={initSession} initError={state.initError} />;
   }
 
   const { wallets, totalWealth, trades } = state;
@@ -1014,12 +1018,12 @@ export default function Home() {
               <div>
                 <div className="flex justify-between text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 mb-2">
                   <span>NIVEL DE FONDOS (PROPIOS)</span>
-                  <span className={calculateHealth(ownedBinanceUsd) < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBinanceUsd))}%</span>
+                  <span className={calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBinanceUsd, "Binance"))}%</span>
                 </div>
                 <div className="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden">
                   <div 
-                    className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBinanceUsd) < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
-                    style={{ width: `${calculateHealth(ownedBinanceUsd)}%` }}
+                    className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                    style={{ width: `${calculateHealth(ownedBinanceUsd, "Binance")}%` }}
                   />
                 </div>
               </div>
@@ -1080,12 +1084,12 @@ export default function Home() {
               <div>
                 <div className="flex justify-between text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 mb-2">
                   <span>NIVEL DE FONDOS (PROPIOS)</span>
-                  <span className={calculateHealth(ownedBitsoUsd) < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBitsoUsd))}%</span>
+                  <span className={calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBitsoUsd, "Bitso"))}%</span>
                 </div>
                 <div className="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden">
                   <div 
-                    className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBitsoUsd) < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
-                    style={{ width: `${calculateHealth(ownedBitsoUsd)}%` }}
+                    className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                    style={{ width: `${calculateHealth(ownedBitsoUsd, "Bitso")}%` }}
                   />
                 </div>
               </div>

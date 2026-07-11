@@ -18,27 +18,45 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func initSession(s *ClientSession, usd, btc float64) {
+// initSession inicializa (o resetea) los fondos de una sesión. usdAlloc/btcAlloc
+// son la distribución por venue elegida por el usuario (porcentajes ya validados
+// por validAllocation, o nil = reparto clásico 50/50 entre el par).
+func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[string]float64) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
-	half := usd / 2.0
-	halfBTC := btc / 2.0
-
-	// Saldos multi-activo creados desde el registro de venues. El capital inicial
-	// se reparte 50/50 SOLO entre el par clásico (Binance/Bitso): repartir usd/2
-	// a cada venue del registro inflaría el capital al agregar un tercero. Los
-	// demás venues (Kraken…) nacen en cero y se fondean por depósitos del usuario
-	// o por ciclos del autopiloto.
+	// Saldos multi-activo creados desde el registro de venues, todos en cero.
 	s.Wallets = make(Balances, len(Venues))
 	for _, v := range Venues {
 		s.Wallets.Set(v.Name, v.QuoteAsset, 0)
 		s.Wallets.Set(v.Name, v.BaseAsset, 0)
 	}
-	for _, v := range classicVenues() {
-		s.Wallets.Set(v.Name, v.QuoteAsset, half)
-		s.Wallets.Set(v.Name, v.BaseAsset, halfBTC)
+
+	if usdAlloc != nil {
+		// Distribución del usuario (modo experto): cada venue recibe su
+		// porcentaje del capital — cash al quote del venue, BTC a su base.
+		// Kraken (o cualquier venue fuera del par) puede nacer fondeado.
+		for venue, pct := range usdAlloc {
+			if v, ok := venueByName(venue); ok {
+				s.Wallets.Add(v.Name, v.QuoteAsset, usd*pct/100)
+			}
+		}
+		for venue, pct := range btcAlloc {
+			if v, ok := venueByName(venue); ok {
+				s.Wallets.Add(v.Name, v.BaseAsset, btc*pct/100)
+			}
+		}
+	} else {
+		// Reparto clásico: 50/50 SOLO entre el par (repartir usd/2 a cada venue
+		// del registro inflaría el capital al agregar un tercero). Los demás
+		// venues nacen en cero y se fondean por depósitos o por el autopiloto.
+		for _, v := range classicVenues() {
+			s.Wallets.Set(v.Name, v.QuoteAsset, usd/2.0)
+			s.Wallets.Set(v.Name, v.BaseAsset, btc/2.0)
+		}
 	}
+	s.UsdAlloc = usdAlloc
+	s.BtcAlloc = btcAlloc
 
 	btcPrice := DefaultBTCPriceFallback
 	if book, ok := currentMarket.Get("Binance:BTC/USDT"); ok && book.Ask > 0 {
@@ -70,6 +88,25 @@ func isFinitePositive(x float64) bool {
 // validInitFunds acepta solo capital inicial finito, positivo y por debajo de topes sanos.
 func validInitFunds(usd, btc float64) bool {
 	return isFinitePositive(usd) && isFinitePositive(btc) && usd <= MaxInitialUSD && btc <= MaxInitialBTC
+}
+
+// validAllocation valida una distribución de capital por venue (modo experto del
+// onboarding): solo venues registrados, porcentajes finitos no negativos y suma
+// exacta de 100 (tolerancia de redondeo flotante). El backend NO corrige una
+// distribución inválida — la rechaza: los números de un experto se respetan al
+// centavo o no se aceptan.
+func validAllocation(alloc map[string]float64) bool {
+	if len(alloc) == 0 {
+		return false
+	}
+	sum := 0.0
+	for venue, pct := range alloc {
+		if !isKnownVenue(venue) || math.IsNaN(pct) || math.IsInf(pct, 0) || pct < 0 {
+			return false
+		}
+		sum += pct
+	}
+	return math.Abs(sum-100) < 0.01
 }
 
 // sanitizeDemoInject valida y CLAMPEA los parámetros de una inyección del simulador.
@@ -255,14 +292,30 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			switch msg.Action {
 			case "init_session":
 				// Validación de backend: rechazamos capital inválido en vez de inicializar
-				// una sesión con estado corrupto. El frontend legítimo siempre envía valores
-				// válidos (mín. $1 000 / 0.1 BTC), así que su flujo feliz no se ve afectado.
+				// una sesión con estado corrupto. El frontend legítimo siempre envía
+				// valores válidos, así que su flujo feliz no se ve afectado.
 				if !validInitFunds(msg.InitialUSD, msg.InitialBTC) {
 					log.Printf("⚠️ [VALIDACIÓN] init_session rechazado: usd=%v btc=%v", msg.InitialUSD, msg.InitialBTC)
 					sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Capital inicial inválido: usa montos positivos y razonables."})
 					continue
 				}
-				initSession(session, msg.InitialUSD, msg.InitialBTC)
+				// Distribución por venue (modo experto): opcional; si viene, se valida
+				// estricta. BTC sin distribución propia sigue a la de USD.
+				usdAlloc, btcAlloc := msg.UsdAllocation, msg.BtcAllocation
+				if usdAlloc != nil || btcAlloc != nil {
+					if usdAlloc == nil {
+						usdAlloc = btcAlloc
+					}
+					if btcAlloc == nil {
+						btcAlloc = usdAlloc
+					}
+					if !validAllocation(usdAlloc) || !validAllocation(btcAlloc) {
+						log.Printf("⚠️ [VALIDACIÓN] init_session rechazado: distribución inválida usd=%v btc=%v", msg.UsdAllocation, msg.BtcAllocation)
+						sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Distribución inválida: usa casas de cambio registradas y porcentajes que sumen 100."})
+						continue
+					}
+				}
+				initSession(session, msg.InitialUSD, msg.InitialBTC, usdAlloc, btcAlloc)
 				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada", Params: &p})
@@ -303,7 +356,9 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				sendLog(session, "💾 [SESIÓN] Bienvenido de vuelta: saldos, estrategia e historial recuperados de la base de datos.")
 
 			case "reset_session":
-				initSession(session, session.InitialUSD, session.InitialBTC)
+				// El reset conserva la DISTRIBUCIÓN elegida en el onboarding: el
+				// 40/40/20 de un experto no se degrada al 50/50 clásico.
+				initSession(session, session.InitialUSD, session.InitialBTC, session.UsdAlloc, session.BtcAlloc)
 				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada", Params: &p})

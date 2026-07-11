@@ -214,7 +214,7 @@ func TestCommitCycle_ConservesBalances(t *testing.T) {
 	cycle := g.FindBestCycle(now)
 
 	s := newClientSession("ciclo", nil)
-	initSession(s, 10_000, 0.5) // 5 000 quote + 0.25 BTC por venue
+	initSession(s, 10_000, 0.5, nil, nil) // 5 000 quote + 0.25 BTC por venue
 
 	s.Mu.Lock()
 	before := s.Wallets.Clone()
@@ -264,7 +264,7 @@ func TestCommitCycle_HardBlock(t *testing.T) {
 	cycle := g.FindBestCycle(now)
 
 	s := newClientSession("ciclo-block", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	s.Mu.Lock()
 	snapshot := s.Wallets.Clone()

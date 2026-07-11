@@ -48,6 +48,18 @@ type SessionRecord struct {
 	// activos): un crédito vivo no debe sobrevivir a un reinicio como si fuera
 	// capital del usuario.
 	Balances map[string]map[string]float64
+
+	// UsdAlloc / BtcAlloc: la distribución del capital del onboarding (porcentaje
+	// por venue; nil = clásico 50/50). Persiste para que reset_session tras una
+	// reanudación respete la elección del usuario.
+	UsdAlloc map[string]float64
+	BtcAlloc map[string]float64
+}
+
+// allocPayload es el shape de la columna sessions.alloc_json.
+type allocPayload struct {
+	Usd map[string]float64 `json:"usd,omitempty"`
+	Btc map[string]float64 `json:"btc,omitempty"`
 }
 
 // SessionStore es el contrato de persistencia de sesiones.
@@ -98,6 +110,11 @@ func initSessionStore(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
+	// Migración aditiva (distribución del onboarding): bases anteriores no tienen
+	// alloc_json; se agrega con DEFAULT '' (sesiones históricas = reparto clásico).
+	if err := ensureLedgerColumn(db, "sessions", "alloc_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	sessionStore = &sqliteSessionStore{db: db}
 	log.Printf("💾 [STORE] Persistencia de sesiones activa (SQLite, esquema multi-activo)")
 	return nil
@@ -107,6 +124,15 @@ func (s *sqliteSessionStore) SaveSession(rec SessionRecord) error {
 	paramsJSON, err := json.Marshal(rec.Params)
 	if err != nil {
 		return err
+	}
+	// Distribución del onboarding: '' = reparto clásico (nada que serializar).
+	allocJSON := ""
+	if rec.UsdAlloc != nil || rec.BtcAlloc != nil {
+		b, err := json.Marshal(allocPayload{Usd: rec.UsdAlloc, Btc: rec.BtcAlloc})
+		if err != nil {
+			return err
+		}
+		allocJSON = string(b)
 	}
 
 	tx, err := s.db.Begin()
@@ -118,12 +144,13 @@ func (s *sqliteSessionStore) SaveSession(rec SessionRecord) error {
 	// Upsert: created_at se conserva en actualizaciones.
 	if _, err := tx.Exec(`
 		INSERT INTO sessions
-			(id, created_at, last_seen, params_json, initial_usd, initial_btc,
+			(id, created_at, last_seen, params_json, alloc_json, initial_usd, initial_btc,
 			 initial_wealth, total_wealth, total_net_profit, auto_credit, initialized)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			last_seen        = excluded.last_seen,
 			params_json      = excluded.params_json,
+			alloc_json       = excluded.alloc_json,
 			initial_usd      = excluded.initial_usd,
 			initial_btc      = excluded.initial_btc,
 			initial_wealth   = excluded.initial_wealth,
@@ -131,7 +158,7 @@ func (s *sqliteSessionStore) SaveSession(rec SessionRecord) error {
 			total_net_profit = excluded.total_net_profit,
 			auto_credit      = excluded.auto_credit,
 			initialized      = excluded.initialized`,
-		rec.ID, rec.CreatedAt.UTC(), rec.LastSeen.UTC(), string(paramsJSON),
+		rec.ID, rec.CreatedAt.UTC(), rec.LastSeen.UTC(), string(paramsJSON), allocJSON,
 		rec.InitialUSD, rec.InitialBTC, rec.InitialWealth,
 		rec.TotalWealth, rec.TotalNetProfit, rec.AutoCredit, rec.Initialized,
 	); err != nil {
@@ -158,13 +185,13 @@ func (s *sqliteSessionStore) SaveSession(rec SessionRecord) error {
 
 func (s *sqliteSessionStore) LoadSession(id string) (SessionRecord, bool, error) {
 	var rec SessionRecord
-	var paramsJSON string
+	var paramsJSON, allocJSON string
 
 	err := s.db.QueryRow(`
-		SELECT id, created_at, last_seen, params_json, initial_usd, initial_btc,
+		SELECT id, created_at, last_seen, params_json, alloc_json, initial_usd, initial_btc,
 		       initial_wealth, total_wealth, total_net_profit, auto_credit, initialized
 		FROM sessions WHERE id = ?`, id,
-	).Scan(&rec.ID, &rec.CreatedAt, &rec.LastSeen, &paramsJSON,
+	).Scan(&rec.ID, &rec.CreatedAt, &rec.LastSeen, &paramsJSON, &allocJSON,
 		&rec.InitialUSD, &rec.InitialBTC, &rec.InitialWealth,
 		&rec.TotalWealth, &rec.TotalNetProfit, &rec.AutoCredit, &rec.Initialized)
 	if err == sql.ErrNoRows {
@@ -179,6 +206,15 @@ func (s *sqliteSessionStore) LoadSession(id string) (SessionRecord, bool, error)
 		// usuario los reconfigura desde el panel.
 		log.Printf("⚠️ [STORE] params_json corrupto en sesión %s — usando defaults: %v", id, err)
 		rec.Params = DefaultTradingParameters()
+	}
+	if allocJSON != "" {
+		var alloc allocPayload
+		if err := json.Unmarshal([]byte(allocJSON), &alloc); err != nil {
+			// Distribución corrupta → reparto clásico (los saldos reales viajan aparte).
+			log.Printf("⚠️ [STORE] alloc_json corrupto en sesión %s — reparto clásico: %v", id, err)
+		} else {
+			rec.UsdAlloc, rec.BtcAlloc = alloc.Usd, alloc.Btc
+		}
 	}
 
 	rec.Balances = make(map[string]map[string]float64)
@@ -238,6 +274,10 @@ func snapshotSessionRecord(s *ClientSession) (SessionRecord, bool) {
 		AutoCredit:     s.Credit.AutoMode,
 		Initialized:    true,
 		Balances:       make(map[string]map[string]float64, len(Venues)),
+		// Los mapas de distribución son solo-lectura tras publicarse: compartirlos
+		// con la goroutine de escritura es seguro por convención (como TakerFees).
+		UsdAlloc: s.UsdAlloc,
+		BtcAlloc: s.BtcAlloc,
 	}
 
 	// Fotografía multi-activo COMPLETA (hito 3): todos los activos de todos los
@@ -315,6 +355,18 @@ func applySessionRecord(s *ClientSession, rec SessionRecord) {
 	s.TotalWealth = rec.TotalWealth
 	s.TotalNetProfit = rec.TotalNetProfit
 	s.Credit = CreditState{AutoMode: rec.AutoCredit} // sin préstamos fantasma
+
+	// Distribución del onboarding: se restaura VALIDADA (una fila manipulada no
+	// inyecta venues fantasma ni sumas rotas); inválida → reparto clásico.
+	s.UsdAlloc, s.BtcAlloc = nil, nil
+	if rec.UsdAlloc != nil && validAllocation(rec.UsdAlloc) {
+		s.UsdAlloc = rec.UsdAlloc
+		if rec.BtcAlloc != nil && validAllocation(rec.BtcAlloc) {
+			s.BtcAlloc = rec.BtcAlloc
+		} else {
+			s.BtcAlloc = rec.UsdAlloc
+		}
+	}
 	s.IsReplenishing = false
 	s.ReplenishExpiresAt = time.Time{}
 	s.InsufficientFundsPending = false

@@ -109,6 +109,48 @@ func TestStore_UpsertReplacesSnapshot(t *testing.T) {
 	}
 }
 
+// TestStore_AllocationRoundtrip: la distribución del onboarding viaja a disco y
+// vuelve; una sesión sin distribución (histórica) regresa con nil (= clásico).
+func TestStore_AllocationRoundtrip(t *testing.T) {
+	st := newTestStore(t)
+
+	rec := sampleRecord("con-distro")
+	rec.UsdAlloc = map[string]float64{"Binance": 40, "Bitso": 40, "Kraken": 20}
+	rec.BtcAlloc = map[string]float64{"Binance": 70, "Bitso": 30}
+	if err := st.SaveSession(rec); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := st.LoadSession("con-distro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UsdAlloc["Kraken"] != 20 || got.BtcAlloc["Binance"] != 70 || len(got.BtcAlloc) != 2 {
+		t.Fatalf("distribución alterada en el viaje: usd=%+v btc=%+v", got.UsdAlloc, got.BtcAlloc)
+	}
+
+	// Sin distribución: '' en disco → nil al cargar.
+	classic := sampleRecord("sin-distro")
+	if err := st.SaveSession(classic); err != nil {
+		t.Fatal(err)
+	}
+	got2, _, err := st.LoadSession("sin-distro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.UsdAlloc != nil || got2.BtcAlloc != nil {
+		t.Fatalf("sesión clásica cargó una distribución fantasma: %+v %+v", got2.UsdAlloc, got2.BtcAlloc)
+	}
+
+	// applySessionRecord VALIDA la distribución restaurada: una fila manipulada
+	// (suma rota) cae al reparto clásico, no a un estado corrupto.
+	rec.UsdAlloc = map[string]float64{"Binance": 90} // suma 90: inválida
+	s := newClientSession("restaurar-manipulada", nil)
+	applySessionRecord(s, rec)
+	if s.UsdAlloc != nil {
+		t.Fatalf("distribución manipulada aceptada al reanudar: %+v", s.UsdAlloc)
+	}
+}
+
 // TestStore_LoadMissing: una sesión inexistente devuelve found=false sin error.
 func TestStore_LoadMissing(t *testing.T) {
 	st := newTestStore(t)
@@ -125,7 +167,7 @@ func TestStore_LoadMissing(t *testing.T) {
 // como capital del usuario — al reanudar tras un reinicio no hay crédito fantasma.
 func TestSnapshotSessionRecord_ExcludesBorrowed(t *testing.T) {
 	s := newClientSession("con-credito", nil)
-	initSession(s, 10_000, 0.5)
+	initSession(s, 10_000, 0.5, nil, nil)
 
 	s.Mu.Lock()
 	s.Credit.Active = true
@@ -190,7 +232,7 @@ func TestStore_RoundtripViaSessionHelpers(t *testing.T) {
 	st := newTestStore(t)
 
 	orig := newClientSession("viaje-completo", nil)
-	initSession(orig, 20_000, 1.0)
+	initSession(orig, 20_000, 1.0, nil, nil)
 	orig.Mu.Lock()
 	orig.Wallets.Set("Binance", "USDT", 8_123.45)
 	orig.Wallets.Set("Binance", "ETH", 2.5) // activo no-par: también debe viajar

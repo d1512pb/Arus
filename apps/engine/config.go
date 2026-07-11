@@ -170,6 +170,22 @@ func configHandler(w http.ResponseWriter, r *http.Request) {
 			"radar_autopilot": "bool: ejecutar el mejor ciclo del universo (apaga el ejecutor clásico)",
 		},
 
+		// Contrato de init_session (onboarding): el capital y su DISTRIBUCIÓN
+		// por venue también son del usuario.
+		"init_session": map[string]string{
+			"initial_usd":    "capital inicial en USD (finito, > 0, tope 1e12)",
+			"initial_btc":    "capital inicial en BTC (finito, > 0, tope 1e6)",
+			"usd_allocation": "opcional: % del cash por venue ({\"Binance\":40,...}), suma 100; ausente = 50/50 en el par clásico",
+			"btc_allocation": "opcional: % del BTC por venue; ausente = sigue a usd_allocation; inválida = INIT_REJECTED",
+		},
+
+		// Referencia informativa para UIs (no es configuración): el precio del
+		// libro Binance:BTC/USDT o el fallback si aún no hay feed. El modo
+		// Guiado del onboarding lo usa para derivar el BTC de un total en USD.
+		"reference": map[string]float64{
+			"btc_price_usd": getBTCPrice(),
+		},
+
 		// El catálogo vigente (compilado o cargado de ARUS_CATALOG).
 		"venues":         Venues,
 		"instruments":    Instruments,
