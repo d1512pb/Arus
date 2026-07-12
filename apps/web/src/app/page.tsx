@@ -40,6 +40,25 @@ function VenueBadge({ name }: { name: string }) {
   );
 }
 
+// Estado de una casa de cambio en el dashboard: INACTIVO (fuera del universo del
+// usuario), SIN FONDOS (activa pero sin saldo propio) o ACTIVO. Antes las tarjetas
+// no distinguían estos casos y una casa vacía/desactivada se veía como un bloque de
+// ceros sin explicación.
+type VenueStatus = "active" | "inactive" | "empty";
+function VenueStatusPill({ status }: { status: VenueStatus }) {
+  const map: Record<VenueStatus, { label: string; cls: string }> = {
+    active: { label: "ACTIVO", cls: "border-emerald-300 dark:border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10" },
+    inactive: { label: "INACTIVO", cls: "border-gray-300 dark:border-gray-600 text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800" },
+    empty: { label: "SIN FONDOS", cls: "border-amber-300 dark:border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10" },
+  };
+  const s = map[status];
+  return (
+    <span className={`text-[9px] font-bold uppercase tracking-widest rounded-full px-2 py-0.5 border ${s.cls}`}>
+      {s.label}
+    </span>
+  );
+}
+
 function CreditToggle({ autoMode, onToggle }: { autoMode: boolean, onToggle: () => void }) {
   return (
     <div className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm mt-4">
@@ -613,13 +632,29 @@ export default function Home() {
 
   // Salud de fondos de un venue: saldo propio vs lo que ESE venue recibió al
   // inicio — con distribución personalizada (onboarding experto) el 100 % de
-  // cada casa es su porcentaje real, no el 50/50 asumido.
-  const calculateHealth = (ownedUsd: number, venue: string) => {
-    const pct = state.usdAllocation ? (state.usdAllocation[venue] ?? 0) : 50;
-    const maxUSD = state.initialUsd ? (state.initialUsd * pct) / 100 : 60000;
+  // cada casa es su porcentaje real, no el 50/50 asumido. Para venues FUERA del
+  // par clásico sin una asignación explícita (p. ej. Kraken en modo guiado,
+  // fondeado luego por depósito o por un ciclo), se usa fallbackMaxUsd (su valor
+  // total actual) como referencia — así una casa recién fondeada lee ~100 %.
+  const calculateHealth = (ownedUsd: number, venue: string, fallbackMaxUsd?: number) => {
+    const isClassic = venue === "Binance" || venue === "Bitso";
+    const pct = state.usdAllocation ? (state.usdAllocation[venue] ?? 0) : (isClassic ? 50 : 0);
+    let maxUSD = state.initialUsd ? (state.initialUsd * pct) / 100 : (isClassic ? 60000 : 0);
+    if (maxUSD <= 0) maxUSD = fallbackMaxUsd ?? 0;
     if (maxUSD <= 0) return 0;
     return Math.min(100, Math.max(0, (Math.max(0, ownedUsd) / maxUSD) * 100));
   };
+
+  // ¿El venue está activo en el universo del usuario? enabled_venues vacío/undefined = todos.
+  const isVenueActive = (venue: string) => {
+    const ev = state.params?.enabled_venues;
+    return !ev || ev.length === 0 || ev.includes(venue);
+  };
+
+  // Estado visual de una casa de cambio: INACTIVO si la sacaste del universo,
+  // SIN FONDOS si está activa pero sin saldo, ACTIVO en otro caso.
+  const venueStatusOf = (venue: string, hasFunds: boolean): VenueStatus =>
+    !isVenueActive(venue) ? "inactive" : hasFunds ? "active" : "empty";
 
   if (!sessionReady) {
     // Continuidad: si hay una sesión persistida, se recupera de la base de datos
@@ -1020,7 +1055,7 @@ export default function Home() {
             </div>
             
             {/* Binance Wallet */}
-            <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group" style={{ animationDelay: '0.4s' }}>
+            <div className={`bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group ${!isVenueActive("Binance") ? "opacity-60" : ""}`} style={{ animationDelay: '0.4s' }}>
               <div className="absolute inset-0 bg-yellow-400/0 group-hover:bg-yellow-400/5 transition-colors duration-500 pointer-events-none"></div>
               <div className="flex justify-between items-center mb-6">
                 <div className="flex items-center gap-3">
@@ -1028,6 +1063,7 @@ export default function Home() {
                     B
                   </div>
                   <h3 className="text-gray-900 dark:text-gray-100 font-bold tracking-widest">BINANCE</h3>
+                  <VenueStatusPill status={venueStatusOf("Binance", wallets.binance.usd > 0.01 || wallets.binance.btc > 1e-6)} />
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -1077,16 +1113,21 @@ export default function Home() {
                   <span className={calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBinanceUsd, "Binance"))}%</span>
                 </div>
                 <div className="w-full bg-gray-100 dark:bg-gray-800 h-1.5 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBinanceUsd, "Binance") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
                     style={{ width: `${calculateHealth(ownedBinanceUsd, "Binance")}%` }}
                   />
                 </div>
               </div>
+              {!isVenueActive("Binance") && (
+                <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
+                  Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
+                </p>
+              )}
             </div>
 
             {/* Bitso Wallet */}
-            <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group" style={{ animationDelay: '0.5s' }}>
+            <div className={`bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group ${!isVenueActive("Bitso") ? "opacity-60" : ""}`} style={{ animationDelay: '0.5s' }}>
               <div className="absolute inset-0 bg-blue-600/0 group-hover:bg-blue-600/5 transition-colors duration-500 pointer-events-none"></div>
               <div className="flex justify-between items-center mb-6">
                 <div className="flex items-center gap-3">
@@ -1094,6 +1135,7 @@ export default function Home() {
                     S
                   </div>
                   <h3 className="text-gray-900 dark:text-gray-100 font-bold tracking-widest">BITSO</h3>
+                  <VenueStatusPill status={venueStatusOf("Bitso", wallets.bitso.usd > 0.01 || wallets.bitso.btc > 1e-6)} />
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -1143,12 +1185,17 @@ export default function Home() {
                   <span className={calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(calculateHealth(ownedBitsoUsd, "Bitso"))}%</span>
                 </div>
                 <div className="w-full bg-gray-100 dark:bg-gray-800 h-1.5 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className={`h-full rounded-full transition-all duration-500 ${calculateHealth(ownedBitsoUsd, "Bitso") < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
                     style={{ width: `${calculateHealth(ownedBitsoUsd, "Bitso")}%` }}
                   />
                 </div>
               </div>
+              {!isVenueActive("Bitso") && (
+                <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
+                  Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
+                </p>
+              )}
             </div>
 
             {/* Venues FUERA del par clásico (Kraken…): sus saldos viven en el wire
@@ -1165,8 +1212,14 @@ export default function Home() {
                 const nodes = (state.graph?.nodes ?? []).filter(n => n.venue === venue);
                 const holdings = nodes.filter(n => n.balance > 0);
                 const totalVenueUSD = nodes.reduce((s, n) => s + n.balance_usd, 0);
+                // USD cash del venue (para la barra de Nivel de Fondos, idéntica a
+                // Binance/Bitso). Kraken no recibe crédito, así que su cash es propio.
+                const venueCashUsd = nodes.filter(n => n.kind === "cash").reduce((s, n) => s + n.balance, 0);
+                const active = isVenueActive(venue);
+                const status = venueStatusOf(venue, holdings.length > 0);
+                const healthPct = calculateHealth(venueCashUsd, venue, totalVenueUSD);
                 return (
-                  <div key={venue} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group" style={{ animationDelay: '0.55s' }}>
+                  <div key={venue} className={`bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 relative overflow-hidden shadow-sm hover:shadow-lg transition-all duration-500 animate-fade-in-up group ${!active ? "opacity-60" : ""}`} style={{ animationDelay: '0.55s' }}>
                     <div className="absolute inset-0 bg-violet-600/0 group-hover:bg-violet-600/5 transition-colors duration-500 pointer-events-none"></div>
                     <div className="flex justify-between items-center mb-4">
                       <div className="flex items-center gap-3">
@@ -1174,6 +1227,7 @@ export default function Home() {
                           {venue.charAt(0).toUpperCase()}
                         </div>
                         <h3 className="text-gray-900 dark:text-gray-100 font-bold tracking-widest uppercase">{venue}</h3>
+                        <VenueStatusPill status={status} />
                       </div>
                       <div className="flex items-center gap-2">
                         <button
@@ -1210,6 +1264,26 @@ export default function Home() {
                     {totalVenueUSD > 0 && (
                       <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
                         Valor total aquí: <span className="font-bold text-gray-600 dark:text-gray-300">${totalVenueUSD.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                      </p>
+                    )}
+                    {/* Barra "Nivel de Fondos (propios)" — idéntica a Binance/Bitso:
+                        el USD cash del venue contra su asignación (o su valor total
+                        si no tiene asignación explícita). FASE 3.2. */}
+                    <div className="mt-4">
+                      <div className="flex justify-between text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 mb-2">
+                        <span>NIVEL DE FONDOS (PROPIOS)</span>
+                        <span className={healthPct < 20 ? 'text-red-500' : 'text-emerald-600'}>{Math.round(healthPct)}%</span>
+                      </div>
+                      <div className="w-full bg-gray-100 dark:bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${healthPct < 20 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                          style={{ width: `${healthPct}%` }}
+                        />
+                      </div>
+                    </div>
+                    {!active && (
+                      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
+                        Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
                       </p>
                     )}
                   </div>
