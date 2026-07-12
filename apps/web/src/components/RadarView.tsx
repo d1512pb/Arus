@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, X } from "lucide-react";
-import { GraphSnapshot, GraphEdge, Trade, LogEntry } from "../hooks/useArusEngine";
+import { GraphSnapshot, GraphEdge, Trade, LogEntry, OmniPulse } from "../hooks/useArusEngine";
 import { layoutRadar, routeEdges, pairKey, LayoutNode, LayoutEdge, NODE_R } from "../lib/radarLayout";
 
 // RadarView — LA PANTALLA PRINCIPAL del rediseño Radar-first (fases R2+R3).
@@ -37,6 +37,15 @@ interface Props {
   creditActive?: boolean;
   borrowedVenues?: string[];
   loanResult?: { earnings: number; cost: number } | null;
+  // FASE 1 — arbitraje omnidireccional: cada inyección ("Oportunidad normal")
+  // llega con un id nuevo y dispara una luz verde que recorre el camino del ciclo
+  // (cash → BTC → ETH → cash…) vértice por vértice, con la ruta resaltada en
+  // verde y un cobro flotante al cerrar. null = ninguna inyección aún.
+  omniPulse?: OmniPulse | null;
+  // FASE 2 — mientras dura la ráfaga de volatilidad el lienzo entra en "modo
+  // tormenta": viñeta ámbar palpitante + narración dedicada. Las luces de cada
+  // operación las disparan los flares de trade (storm_trade → trades).
+  stormActive?: boolean;
 }
 
 const INK = "var(--radar-ink)", INK2 = "var(--radar-ink2)", INK3 = "var(--radar-ink3)";
@@ -76,7 +85,7 @@ interface FloatProfit {
 
 // memo: el lienzo solo se re-renderiza cuando cambian SUS datos (graph ~1/s,
 // trades, spike, universo) — no con cada log o ping del feed de mercado.
-export const RadarView = memo(function RadarView({ graph, trades, spike, enabledVenues, enabledAssets, onEditFunds, creditActive, borrowedVenues, loanResult }: Props) {
+export const RadarView = memo(function RadarView({ graph, trades, spike, enabledVenues, enabledAssets, onEditFunds, creditActive, borrowedVenues, loanResult, omniPulse, stormActive }: Props) {
   const venueAllowed = useCallback(
     (v: string) => !enabledVenues || enabledVenues.length === 0 || enabledVenues.includes(v),
     [enabledVenues]
@@ -105,6 +114,10 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   // Burst de ganancia por préstamo (se limpia solo a los 6 s, independiente del
   // parent que limpia loanResult a los 10 s).
   const [loanBurst, setLoanBurst] = useState<{ earnings: number; cost: number; net: number } | null>(null);
+  // FASE 1 — ruta del ciclo omnidireccional resaltada mientras viaja la luz:
+  // aristas y nodos del camino brillan en verde y la barra narra la ruta. Se
+  // limpia al terminar la animación.
+  const [omniRoute, setOmniRoute] = useState<{ pairs: Set<string>; nodes: Set<string>; route: string; net: number } | null>(null);
 
   // Venues con capital prestado (lookup O(1) para el anillo azul de los nodos).
   const borrowedSet = useMemo(() => new Set(borrowedVenues ?? []), [borrowedVenues]);
@@ -270,6 +283,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   useEffect(() => {
     const t = trades[0];
     if (!t || !graph) return;
+    if (t.storm) return; // tormenta (FASE 2): la luz sí, el cobro flotante no (evita spam)
     const sig = `${t.timestamp}|${t.net_profit_usd}`;
     if (prevTradeRef.current === sig) return;
     const isFirst = prevTradeRef.current === null;
@@ -359,6 +373,149 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     // Sin cleanup por-trade: las luces se solapan y se autolimpian; el desmontaje
     // las cancela abajo.
   }, [trades, reduced]);
+
+  // ── FASE 1: arbitraje OMNIDIRECCIONAL — luz secuencial por el camino ───────
+  //    Al inyectar "Oportunidad normal", una luz verde recorre el ciclo pierna a
+  //    pierna (cash → BTC → ETH → cash…): viaja sobre las aristas REALES del
+  //    grafo (getPointAtLength), enciende cada vértice al llegar, resalta toda la
+  //    ruta en verde y suelta el cobro al cerrar. Ilustra el flujo del dinero
+  //    entre nodos que pide la fase. Si una arista del camino no está dibujada
+  //    (universo podado), esa pierna se recorre en línea recta entre centros.
+  const prevOmniRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!omniPulse || prevOmniRef.current === omniPulse.id) return;
+    prevOmniRef.current = omniPulse.id;
+    const path = omniPulse.path;
+    if (!path || path.length < 2) return;
+
+    // Ruta resaltada mientras dura la animación (aristas + nodos en verde).
+    const pairs = new Set<string>();
+    for (let i = 0; i < path.length - 1; i++) pairs.add(pairKey(path[i], path[i + 1]));
+    setOmniRoute({ pairs, nodes: new Set(path), route: omniPulse.route, net: omniPulse.net });
+
+    const posMap = layout?.pos;
+    const svgns = "http://www.w3.org/2000/svg";
+    const endId = path[path.length - 1];
+
+    // Cobro flotante "+$net" anclado a un nodo (reutiliza la capa de floats).
+    const floatAtNode = (nodeId: string, amount: number) => {
+      const el = nodeRefs.current.get(nodeId);
+      const inner = innerRef.current;
+      if (!el || !inner) return;
+      const nb = el.getBoundingClientRect();
+      const ib = inner.getBoundingClientRect();
+      const fid = Date.now() + Math.random();
+      setFloats((f) => [...f, { id: fid, x: nb.left - ib.left + nb.width / 2, y: nb.top - ib.top - 10, amount }]);
+      setTimeout(() => setFloats((f) => f.filter((p) => p.id !== fid)), 2400);
+    };
+    const pulseNode = (nodeId: string) => {
+      if (reduced || document.hidden) return;
+      pulseRefs.current.get(nodeId)?.animate(
+        [{ opacity: 0.95, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.5)" }],
+        { duration: 720, easing: "ease-out" }
+      );
+    };
+
+    // Movimiento reducido: sin viaje, solo el resalte y el cobro; se limpia solo.
+    if (reduced) {
+      pulseNode(endId);
+      floatAtNode(endId, omniPulse.net);
+      const to = setTimeout(() => setOmniRoute(null), 2400);
+      return () => clearTimeout(to);
+    }
+
+    // Segmentos del camino: arista real (path) o línea recta de respaldo.
+    type Seg =
+      | { kind: "path"; el: SVGPathElement; rev: boolean; len: number }
+      | { kind: "line"; ax: number; ay: number; bx: number; by: number; len: number };
+    const segs: Seg[] = [];
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i], b = path[i + 1];
+      const k = pairKey(a, b);
+      const el = pathRefs.current.get(k);
+      if (el) {
+        segs.push({ kind: "path", el, rev: k.split("|")[0] !== a, len: el.getTotalLength() });
+        continue;
+      }
+      const pa = posMap?.get(a), pb = posMap?.get(b);
+      if (pa && pb) {
+        segs.push({ kind: "line", ax: pa.x, ay: pa.y, bx: pb.x, by: pb.y, len: Math.hypot(pb.x - pa.x, pb.y - pa.y) });
+      }
+    }
+    const g = flareRef.current;
+    if (!g || segs.length === 0) {
+      pulseNode(endId);
+      floatAtNode(endId, omniPulse.net);
+      const to = setTimeout(() => setOmniRoute(null), 2400);
+      return () => clearTimeout(to);
+    }
+
+    const posAt = (seg: Seg, d: number) => {
+      if (seg.kind === "path") {
+        const at = Math.max(0, Math.min(seg.len, seg.rev ? seg.len - d : d));
+        const pt = seg.el.getPointAtLength(at);
+        return { x: pt.x, y: pt.y };
+      }
+      const t = seg.len > 0 ? d / seg.len : 0;
+      return { x: seg.ax + (seg.bx - seg.ax) * t, y: seg.ay + (seg.by - seg.ay) * t };
+    };
+
+    // Cometa: cabeza brillante + estela corta (dos círculos concéntricos).
+    const halo = document.createElementNS(svgns, "circle");
+    halo.setAttribute("r", "11");
+    halo.style.fill = ACCENT;
+    halo.style.opacity = "0.22";
+    halo.style.pointerEvents = "none";
+    const dot = document.createElementNS(svgns, "circle");
+    dot.setAttribute("r", "6.5");
+    dot.style.fill = ACCENT;
+    dot.style.filter = `drop-shadow(0 0 12px ${ACCENT})`;
+    dot.style.pointerEvents = "none";
+    g.appendChild(halo);
+    g.appendChild(dot);
+
+    const LEG = 640; // ms por pierna
+    const totalDur = LEG * segs.length;
+    const holder = { raf: 0 };
+    flareHolders.current.push(holder);
+    let litLeg = 0;
+    pulseNode(path[0]); // enciende el nodo de arranque (el resto, al llegar)
+    const t0 = performance.now();
+
+    const step = (now: number) => {
+      const elapsed = now - t0;
+      const done = elapsed >= totalDur;
+      const legIdx = done ? segs.length - 1 : Math.floor(elapsed / LEG);
+      // Al pasar a una pierna nueva, la cabeza acaba de llegar a su nodo inicial.
+      if (legIdx > litLeg) { litLeg = legIdx; pulseNode(path[legIdx]); }
+      const legT = done ? 1 : (elapsed - legIdx * LEG) / LEG;
+      const eased = legT < 0.5 ? 2 * legT * legT : 1 - Math.pow(-2 * legT + 2, 2) / 2; // easeInOutQuad
+      const seg = segs[legIdx];
+      const p = posAt(seg, seg.len * eased);
+      const gp = totalDur > 0 ? elapsed / totalDur : 1;
+      const op = gp < 0.06 ? gp / 0.06 : gp > 0.9 ? Math.max(0, (1 - gp) / 0.1) : 1;
+      dot.setAttribute("cx", String(p.x)); dot.setAttribute("cy", String(p.y));
+      halo.setAttribute("cx", String(p.x)); halo.setAttribute("cy", String(p.y));
+      dot.style.opacity = String(op); halo.style.opacity = String(op * 0.22);
+      if (!done) {
+        holder.raf = requestAnimationFrame(step);
+      } else {
+        pulseNode(endId);
+        floatAtNode(endId, omniPulse.net);
+        halo.remove(); dot.remove();
+        flareHolders.current = flareHolders.current.filter((h) => h !== holder);
+        setTimeout(() => setOmniRoute((r) => (r && r.route === omniPulse.route ? null : r)), 500);
+      }
+    };
+    holder.raf = requestAnimationFrame(step);
+
+    return () => {
+      cancelAnimationFrame(holder.raf);
+      halo.remove(); dot.remove();
+      flareHolders.current = flareHolders.current.filter((h) => h !== holder);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [omniPulse]);
 
   // Limpieza al desmontar: cancela cualquier luz en vuelo y vacía el grupo.
   useEffect(() => {
@@ -502,7 +659,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
             {/* Aristas mudas (libros sólidos, supuestos punteados) + hit areas */}
             <g>
               {routed.map((r) => {
-                const inCycle = cyclePairs.has(r.key);
+                const inCycle = cyclePairs.has(r.key) || (omniRoute?.pairs.has(r.key) ?? false);
                 const isBook = r.kind === "book";
                 return (
                   <g key={r.key}>
@@ -541,7 +698,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
             {shownNodes.map((n) => {
               const p = pos.get(n.id);
               if (!p) return null;
-              const inCycle = cycleNodes.has(n.id);
+              const inCycle = cycleNodes.has(n.id) || (omniRoute?.nodes.has(n.id) ?? false);
               const seld = selNode === n.id;
               return (
                 <g
@@ -614,6 +771,23 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                 ["--sweep-dist" as string]: `${w + 140}px`,
               }}
             />
+          )}
+
+          {/* FASE 2 — MODO TORMENTA: viñeta ámbar palpitante + distintivo. Las
+              luces de cada operación viajan por las aristas (flares de trade). */}
+          {stormActive && (
+            <>
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 pointer-events-none z-20 animate-pulse"
+                style={{ boxShadow: "inset 0 0 130px 24px rgba(245,158,11,0.30)", border: "2px solid rgba(245,158,11,0.55)" }}
+              />
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+                <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500 text-white text-[11px] font-black uppercase tracking-widest shadow-lg animate-pulse">
+                  ⚡ Tormenta de volatilidad · ejecución concurrente
+                </span>
+              </div>
+            </>
           )}
 
           {/* Tooltip de arista (nivel hover) */}
@@ -722,11 +896,15 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
       <div className="flex items-center gap-4 px-4 sm:px-5 h-10 border-t border-[var(--radar-border)] bg-[var(--radar-bar)] font-mono text-[11px] flex-shrink-0">
         <p
           className="truncate"
-          style={{ color: spikeMsg ? DANGER : cyclePath ? ACCENT : INK2 }}
+          style={{ color: spikeMsg ? DANGER : stormActive ? "#f59e0b" : omniRoute ? ACCENT : cyclePath ? ACCENT : INK2 }}
           aria-live="polite"
         >
           {spikeMsg
             ? `⚠️ ${spikeMsg}`
+            : stormActive
+              ? "⚡ Tormenta de volatilidad — Arus ejecuta múltiples arbitrajes en paralelo por todo el grafo…"
+            : omniRoute
+              ? `🔺 Arbitraje omnidireccional: ${omniRoute.route} · +${fmtUSD(omniRoute.net)}`
             : cyclePath
               ? `📡 Ciclo rentable: ${cyclePath.join(" → ")} (${netPct >= 0 ? "+" : ""}${netPct.toFixed(3)} % neto por vuelta${
                   (graph.best_cycle?.max_volume_btc ?? 0) > 0

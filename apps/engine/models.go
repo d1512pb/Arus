@@ -373,6 +373,9 @@ type ClientSession struct {
 	// PausedUntil bloquea la operativa de la sesión hasta este instante; lo fija el circuit
 	// breaker cuando una orden Fill-or-Kill falla, para no reintentar contra un libro roto.
 	PausedUntil time.Time
+	// StormActive marca que una ráfaga de volatilidad (FASE 2, inject_storm) está en
+	// curso: impide lanzar dos tormentas solapadas sobre la misma sesión. Bajo Mu.
+	StormActive bool
 }
 
 // newClientSession construye una sesión con los parámetros por defecto ya

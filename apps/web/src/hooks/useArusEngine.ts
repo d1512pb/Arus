@@ -10,6 +10,10 @@ export interface Trade {
   timestamp: string | number;
   volume?: number;
   credit_active?: boolean;
+  // FASE 2: marca las operaciones de la ráfaga de volatilidad. El radar les
+  // dispara la luz verde (flare) pero NO el cobro flotante individual, para no
+  // saturar de números la tormenta (el P&L trepa en la cabecera).
+  storm?: boolean;
 }
 
 export interface LogEntry {
@@ -92,6 +96,28 @@ export interface GraphSnapshot {
   updated_at: string;
 }
 
+// --- Arbitraje omnidireccional (FASE 1): ciclo triangular/espacial inyectado ---
+
+// Una pierna del ciclo: convierte `in` unidades del nodo `from` en `out` del `to`.
+export interface OmniLeg {
+  from: string; // "USDT@Binance"
+  to: string;   // "BTC@Binance"
+  in: number;
+  out: number;
+  asset: string; // activo ganado (el de `to`)
+  kind: "book" | "inventory" | "parity";
+}
+
+// omni_executed → el radar anima una luz verde recorriendo `path` secuencialmente.
+// `id` es un contador local (cambia en cada inyección) que dispara la animación.
+export interface OmniPulse {
+  id: number;
+  path: string[]; // IDs de nodo en orden, cerrado (primero == último)
+  legs: OmniLeg[];
+  route: string;
+  net: number;
+}
+
 // Distribución del capital por venue (porcentajes, suman 100).
 export type Allocation = Record<string, number>;
 
@@ -99,6 +125,16 @@ export interface EngineState {
   sessionId: string;
   params: TradingParams | null;
   graph: GraphSnapshot | null;
+  // Última inyección omnidireccional (FASE 1): el radar la anima como una luz
+  // verde recorriendo el camino. null = ninguna aún.
+  omniPulse: OmniPulse | null;
+  // FASE 2 — ráfaga de volatilidad: stormActive mientras dura la tormenta;
+  // stormResult trae el resumen (operaciones + ganancia) al terminar.
+  stormActive: boolean;
+  stormResult: { trades: number; profit: number } | null;
+  // FASE 3 — escudo de robustez: alerta efímera del circuit breaker (spread
+  // irreal, timeout o divergencia). La UI la muestra ~3 s y se limpia sola.
+  circuitBreaker: { id: number; scenario: string; message: string } | null;
   // Distribución elegida en el onboarding (undefined = 50/50 clásico o sesión
   // reanudada): la usa la barra de salud de fondos para calibrar el 100 %.
   usdAllocation?: Allocation;
@@ -165,6 +201,10 @@ const INITIAL_ENGINE_STATE: EngineState = {
   sessionId: "",
   params: null,
   graph: null,
+  omniPulse: null,
+  stormActive: false,
+  stormResult: null,
+  circuitBreaker: null,
   trades: [],
   totalWealth: 0,
   initialWealth: 0,
@@ -197,6 +237,9 @@ export function useArusEngine() {
   const [state, setState] = useState<EngineState>(INITIAL_ENGINE_STATE);
 
   const wsRef = useRef<WebSocket | null>(null);
+  // Contador para la alerta del circuit breaker (FASE 3): identifica cada alerta
+  // para que su auto-descarte a los 3 s no borre una alerta posterior.
+  const cbCounterRef = useRef(0);
   const configRef = useRef<{ usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation } | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Universo elegido en la checklist del onboarding (exchanges/monedas activos).
@@ -321,6 +364,32 @@ export function useArusEngine() {
   const demoInject = useCallback((exchange: string, spread: number, liquidity: number) => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ action: "demo_inject", exchange, spread, liquidity }));
+    }
+  }, []);
+
+  // FASE 1: "Oportunidad normal" → arbitraje omnidireccional. El backend arma y
+  // ejecuta un ciclo triangular/espacial sobre el universo del usuario y responde
+  // con omni_executed (el radar anima la luz verde recorriendo el camino).
+  const injectOmni = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ action: "inject_omni" }));
+    }
+  }, []);
+
+  // FASE 2: "Evento poco común" → ráfaga de volatilidad. El backend lanza varias
+  // goroutines que ejecutan mini-arbitrajes concurrentemente ~4 s; el radar lo
+  // pinta como una tormenta de luces y el P&L trepa (storm_started/trade/ended).
+  const injectStorm = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ action: "inject_storm" }));
+    }
+  }, []);
+
+  // FASE 3: "Precio falso / error" → escudo de robustez. El backend rechaza una
+  // oportunidad envenenada y responde CIRCUIT_BREAKER (alerta efímera, no luces).
+  const injectFake = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ action: "inject_fake" }));
     }
   }, []);
 
@@ -541,6 +610,60 @@ export function useArusEngine() {
         creditActiveState: { active: false, expiresAt: null },
         borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
       }));
+    } else if (data.type === "CIRCUIT_BREAKER") {
+      // FASE 3: rechazo por gestión de riesgo. Anuncio efímero centrado, sin luces
+      // verdes (no hay operación). Se auto-descarta a los 3 s (id-guarded para no
+      // borrar una alerta posterior si el usuario pulsa varias veces seguidas).
+      const id = ++cbCounterRef.current;
+      setState(prev => ({
+        ...prev,
+        circuitBreaker: { id, scenario: (data.scenario as string) ?? "spread", message: (data.message as string) ?? "Operación abortada por seguridad." },
+      }));
+      setTimeout(() => setState(prev => (prev.circuitBreaker?.id === id ? { ...prev, circuitBreaker: null } : prev)), 3000);
+    } else if (data.type === "storm_started") {
+      // FASE 2: comienza la ráfaga de volatilidad (modo tormenta en el radar).
+      setState(prev => ({ ...prev, stormActive: true, stormResult: null }));
+    } else if (data.type === "storm_trade") {
+      // Cada operación de la tormenta: se empuja al feed (tag storm → el radar le
+      // dispara la luz verde pero omite el cobro flotante) y el P&L trepa.
+      setState(prev => ({
+        ...prev,
+        totalWealth: (data.total_wealth as number) ?? prev.totalWealth,
+        totalNetProfit: (data.total_net_profit as number) ?? prev.totalNetProfit,
+        opsCount: prev.opsCount + 1,
+        trades: [{
+          event: "arbitrage_executed",
+          exchange_buy: data.buy_venue as string,
+          exchange_sell: data.sell_venue as string,
+          net_profit_usd: (data.net_profit_usd as number) ?? 0,
+          new_total_usd: (data.total_wealth as number) ?? prev.totalWealth,
+          timestamp: (data.timestamp as string) ?? "",
+          storm: true,
+        } as Trade, ...prev.trades].slice(0, 15),
+      }));
+    } else if (data.type === "storm_ended") {
+      // Fin de la tormenta: resumen efímero (operaciones + ganancia acumulada).
+      setState(prev => ({
+        ...prev,
+        stormActive: false,
+        stormResult: { trades: (data.trades as number) ?? 0, profit: (data.profit as number) ?? 0 },
+      }));
+      setTimeout(() => setState(prev => ({ ...prev, stormResult: null })), 8000);
+    } else if (data.event === "omni_executed") {
+      // FASE 1: ciclo omnidireccional ejecutado. Se cuenta como una operación y se
+      // dispara la animación de la luz verde (omniPulse). Los saldos y el patrimonio
+      // llegan en el wallet_update que el backend emite justo después.
+      setState(prev => ({
+        ...prev,
+        opsCount: prev.opsCount + 1,
+        omniPulse: {
+          id: (prev.omniPulse?.id ?? 0) + 1,
+          path: (data.path as string[]) ?? [],
+          legs: (data.legs as OmniLeg[]) ?? [],
+          route: (data.route as string) ?? "",
+          net: (data.net_profit_usd as number) ?? 0,
+        },
+      }));
     } else if (data.event === "arbitrage_executed") {
       setState(prev => ({
         ...prev,
@@ -572,6 +695,9 @@ export function useArusEngine() {
     initSession,
     resetSession,
     demoInject,
+    injectOmni,
+    injectStorm,
+    injectFake,
     toggleAutoCredit,
     requestCredit,
     waitRebalance,

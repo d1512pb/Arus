@@ -393,6 +393,26 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				}
 				go engine.runDemoInjection(session, ex, spread, liq)
 
+			case "inject_omni":
+				// FASE 1: "Oportunidad normal" → arbitraje OMNIDIRECCIONAL. Inyecta
+				// y ejecuta un ciclo que atraviesa varios nodos del grafo del usuario
+				// (triangular intra-venue o espacial entre exchanges); el frontend
+				// anima la luz verde recorriendo el camino (ver omni.go).
+				go engine.runOmniInjection(session)
+
+			case "inject_storm":
+				// FASE 2: "Evento poco común" → RÁFAGA DE VOLATILIDAD. Lanza varias
+				// goroutines que ejecutan mini-arbitrajes concurrentemente durante
+				// ~4 s; el frontend lo pinta como una tormenta de luces (ver storm.go).
+				go engine.runStormInjection(session)
+
+			case "inject_fake":
+				// FASE 3: "Precio falso / error" → ESCUDO DE ROBUSTEZ. Inyecta una
+				// oportunidad envenenada (spread irreal, timeout o divergencia), la
+				// RECHAZA sin tocar saldos y emite una alerta CIRCUIT_BREAKER que el
+				// frontend muestra como anuncio efímero — no luces verdes (ver circuit.go).
+				go engine.runFakeInjection(session)
+
 			case "adjust_funds":
 				go engine.adjustFunds(session, msg.Exchange, msg.Currency, msg.Amount)
 

@@ -524,8 +524,32 @@ function FundsModal({ exchange, usd, btc, onClose, onSubmit }: {
   );
 }
 
+// FASE 3 — anuncio efímero centrado del circuit breaker: aparece cuando Arus
+// RECHAZA una oportunidad envenenada y se descarta solo a los 3 s (el hook limpia
+// el estado). Rojo, con escudo: comunica que se protegió al usuario, sin luces
+// verdes (no hubo operación). key={id} en el padre remonta y reanima cada alerta.
+function CircuitBreakerAlert({ scenario, message }: { scenario: string; message: string }) {
+  const label =
+    scenario === "timeout" ? "Timeout de API bloqueado"
+      : scenario === "divergence" ? "Divergencia de precio bloqueada"
+        : "Spread irreal bloqueado";
+  return (
+    <div className="fixed inset-x-0 top-20 sm:top-24 z-[130] flex justify-center px-4 pointer-events-none">
+      <div className="pointer-events-auto max-w-lg w-full bg-white dark:bg-gray-900 border-2 border-red-500 rounded-2xl shadow-2xl p-5 flex items-start gap-4 animate-modal-scale">
+        <div className="w-11 h-11 rounded-full bg-red-500/10 flex items-center justify-center flex-shrink-0">
+          <ShieldAlert className="w-6 h-6 text-red-500 animate-pulse" />
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-red-600 mb-1">🛡️ Escudo de robustez · {label}</p>
+          <p className="text-sm font-bold text-gray-900 dark:text-gray-100 leading-relaxed">{message}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
-  const { sessionReady, resuming, cancelResume, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, dismissShortfall, adjustFunds, setParams, shutdownEngine } = useArusEngine();
+  const { sessionReady, resuming, cancelResume, state, initSession, resetSession, demoInject, injectOmni, injectStorm, injectFake, toggleAutoCredit, requestCredit, waitRebalance, dismissShortfall, adjustFunds, setParams, shutdownEngine } = useArusEngine();
   
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showInjectionModal, setShowInjectionModal] = useState(false);
@@ -664,6 +688,37 @@ export default function Home() {
     setTimeout(() => setInjectionToastMessage(""), 5000);
   };
 
+  // FASE 1 — "Oportunidad normal": inyecta un arbitraje OMNIDIRECCIONAL (ciclo
+  // triangular/espacial) y lleva al radar para ver la luz verde recorrer el
+  // camino nodo a nodo. El backend construye el ciclo sobre el universo activo.
+  const handleInjectOmni = () => {
+    setShowInjectionModal(false);
+    changeView("radar");
+    injectOmni();
+    setInjectionToastMessage("🔺 Oportunidad omnidireccional inyectada — sigue la luz verde por el grafo");
+    setTimeout(() => setInjectionToastMessage(""), 5000);
+  };
+
+  // FASE 2 — "Evento poco común": ráfaga de volatilidad. Lleva al radar para ver
+  // la tormenta de luces cruzar el grafo mientras el P&L trepa a gran velocidad.
+  const handleInjectStorm = () => {
+    setShowInjectionModal(false);
+    changeView("radar");
+    injectStorm();
+    setInjectionToastMessage("⚡ Tormenta de volatilidad iniciada — el motor ejecuta en paralelo por todo el grafo");
+    setTimeout(() => setInjectionToastMessage(""), 5000);
+  };
+
+  // FASE 3 — "Precio falso / error": inyecta una oportunidad envenenada. El
+  // backend la RECHAZA (circuit breaker) y responde con la alerta efímera; NO hay
+  // luces verdes porque no hay operación. Se va al radar para que el contraste con
+  // el flujo normal sea evidente. Sin toast rojo aquí: la alerta central es la voz.
+  const handleInjectFake = () => {
+    setShowInjectionModal(false);
+    changeView("radar");
+    injectFake();
+  };
+
   const formatTime = (ts: string | number) => {
     if (typeof ts === 'number') {
       return new Date(ts * 1000).toLocaleTimeString('es-ES', { hour12: false });
@@ -763,6 +818,15 @@ export default function Home() {
             <button onClick={() => window.location.reload()} className="px-6 py-3 bg-white text-gray-900 font-bold uppercase tracking-widest text-sm rounded-lg hover:bg-gray-200 transition-colors">Reiniciar</button>
           </div>
         </div>
+      )}
+
+      {/* FASE 3 — anuncio efímero del circuit breaker (rechazo de precio falso) */}
+      {state.circuitBreaker && (
+        <CircuitBreakerAlert
+          key={state.circuitBreaker.id}
+          scenario={state.circuitBreaker.scenario}
+          message={state.circuitBreaker.message}
+        />
       )}
 
       <InsufficientFundsModal
@@ -879,42 +943,42 @@ export default function Home() {
 
                 <div className="flex flex-col gap-4 flex-1">
                   <button
-                    onClick={() => handleInjectSpread("Bitso", 800, 0.1)}
+                    onClick={handleInjectOmni}
                     className="w-full bg-white dark:bg-gray-900 hover:bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 hover:border-emerald-400 p-4 rounded-lg text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg group shadow-sm flex flex-col h-full"
                   >
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-gray-900 dark:text-gray-100 font-bold text-sm flex items-center gap-2">
-                        ⚡ Oportunidad normal
+                        🔺 Oportunidad normal <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 rounded-full px-2 py-0.5">Omnidireccional</span>
                       </span>
                     </div>
-                    <div className="text-[10px] text-gray-500 dark:text-gray-400 font-mono mb-2 bg-gray-100 dark:bg-gray-800 p-1.5 rounded inline-block">Casa: Bitso | Diferencia: $800 | Vol: 0.1 BTC</div>
-                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">Una diferencia de precio razonable. El bot debería aprovecharla sin problema y ganar dinero.</p>
+                    <div className="text-[10px] text-gray-500 dark:text-gray-400 font-mono mb-2 bg-gray-100 dark:bg-gray-800 p-1.5 rounded inline-block">Ciclo triangular sobre tus casas activas · USD → BTC → ETH → USD</div>
+                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">El bot no solo compra barato y vende caro: encuentra un <strong>camino completo</strong> entre varios activos y casas, y el dinero fluye por el grafo hasta volver con ganancia. Míralo viajar en el radar.</p>
                   </button>
 
                   <button
-                    onClick={() => handleInjectSpread("Bitso", 1300, 0.3)}
+                    onClick={handleInjectStorm}
                     className="w-full bg-white dark:bg-gray-900 hover:bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 hover:border-amber-400 p-4 rounded-lg text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg group shadow-sm flex flex-col h-full"
                   >
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-amber-600 font-bold text-sm flex items-center gap-2">
-                        ⚠️ Evento poco común
+                        ⚡ Evento poco común <span className="text-[9px] font-black uppercase tracking-widest text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full px-2 py-0.5">Tormenta HFT</span>
                       </span>
                     </div>
-                    <div className="text-[10px] text-amber-700 dark:text-amber-400 font-mono mb-2 bg-amber-50 dark:bg-amber-900/30 p-1.5 rounded inline-block">Casa: Bitso | Diferencia: $1300 | Vol: 0.3 BTC</div>
-                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">Una diferencia grande pero todavía real. El bot opera, pero avisa de que es algo inusual.</p>
+                    <div className="text-[10px] text-amber-700 dark:text-amber-400 font-mono mb-2 bg-amber-50 dark:bg-amber-900/30 p-1.5 rounded inline-block">Ráfaga de ~4 s · múltiples arbitrajes en paralelo</div>
+                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">Una tormenta de volatilidad: el motor recibe <strong>decenas de oportunidades a la vez</strong> y las procesa concurrentemente en varias casas. Verás luces por todo el grafo y el balance subiendo a gran velocidad — prueba de que Arus aguanta el caos de la alta frecuencia.</p>
                   </button>
 
                   <button
-                    onClick={() => handleInjectSpread("Binance", 10000, 0.1)}
+                    onClick={handleInjectFake}
                     className="w-full bg-white dark:bg-gray-900 hover:bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 hover:border-red-400 p-4 rounded-lg text-left transition-all duration-300 hover:-translate-y-1 hover:shadow-lg group shadow-sm flex flex-col h-full"
                   >
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-red-600 font-bold text-sm flex items-center gap-2">
-                        🛑 Precio falso (error)
+                        🛡️ Precio falso (error) <span className="text-[9px] font-black uppercase tracking-widest text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-full px-2 py-0.5">Circuit Breaker</span>
                       </span>
                     </div>
-                    <div className="text-[10px] text-red-700 dark:text-red-400 font-mono mb-2 bg-red-50 dark:bg-red-900/30 p-1.5 rounded inline-block">Casa: Binance | Diferencia: $10000 | Vol: 0.1 BTC</div>
-                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">Una diferencia enorme, casi seguro un error del mercado. El bot debe bloquearla para proteger tu dinero.</p>
+                    <div className="text-[10px] text-red-700 dark:text-red-400 font-mono mb-2 bg-red-50 dark:bg-red-900/30 p-1.5 rounded inline-block">Spread irreal +500 % · timeout · divergencia</div>
+                    <p className="text-gray-600 dark:text-gray-400 text-xs mt-auto leading-relaxed">Inyecta una oportunidad envenenada (error de precio o feed caído). En vez de operar, Arus la <strong>rechaza al instante</strong> con su circuit breaker y te explica por qué te protegió — gestión de riesgo institucional en acción.</p>
                   </button>
                 </div>
               </div>
@@ -982,12 +1046,40 @@ export default function Home() {
         </div>
       )}
 
+      {/* FASE 2 — banner de tormenta (ráfaga de volatilidad en curso) */}
+      {state.stormActive && (
+        <div className="relative z-10 overflow-hidden">
+          <div className="bg-amber-500 text-white font-bold px-4 py-3 flex items-center justify-center gap-3 shadow-md border-b border-amber-600">
+            <span className="w-2.5 h-2.5 rounded-full bg-white animate-pulse shadow-[0_0_8px_rgba(255,255,255,0.85)]" />
+            <span className="tracking-widest text-xs sm:text-sm uppercase text-center">
+              ⚡ Tormenta de volatilidad — Arus ejecutando múltiples arbitrajes en paralelo
+            </span>
+          </div>
+        </div>
+      )}
+
       {state.isRebalancing && (
         <ReplenishingBanner expiresAt={state.rebalanceExpiresAt} message="Traslado de capital en curso" />
       )}
 
       {state.creditActiveState?.active && (
         <CreditActiveBanner expiresAt={state.creditActiveState.expiresAt} depleted={state.creditActiveState.depleted} />
+      )}
+
+      {/* FASE 2 — resumen efímero al terminar la tormenta */}
+      {state.stormResult && (
+        <div className="fixed bottom-8 right-8 z-50 transition-all duration-500 transform translate-y-0 opacity-100">
+          <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-500/20 text-amber-900 dark:text-amber-100 px-6 py-5 rounded-xl shadow-md flex items-start gap-4 max-w-md backdrop-blur-md">
+            <Zap className="w-6 h-6 text-amber-600 dark:text-amber-500 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-bold tracking-widest text-sm">⚡ Tormenta superada</p>
+              <p className="text-amber-800 dark:text-amber-300 text-xs mt-2 leading-relaxed">
+                Arus procesó <span className="font-black">{state.stormResult.trades} operaciones</span> concurrentes sin romperse.
+                Ganancia acumulada: <span className="font-black text-emerald-600 dark:text-emerald-400">+${state.stormResult.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>.
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {state.rebalanceSuccessAmount !== null && (
@@ -1064,6 +1156,8 @@ export default function Home() {
           creditActive={state.creditActiveState?.active}
           borrowedVenues={borrowedVenues}
           loanResult={state.loanResults}
+          omniPulse={state.omniPulse}
+          stormActive={state.stormActive}
         />
       )}
 
