@@ -20,6 +20,12 @@ import { ENGINE_HTTP_URL } from '../lib/config';
 
 export type Allocation = Record<string, number>;
 
+// AllocForm es la distribución MIENTRAS se edita: cada porcentaje puede quedar
+// en '' (input vacío) sin forzar un 0 pegado. Al enviar se coacciona a número
+// (pickSelected). Antes el estado era number puro y borrar dejaba un "0" fijo:
+// el usuario tenía que escribir "020" y luego borrar el cero.
+type AllocForm = Record<string, number | ''>;
+
 interface OnboardingModalProps {
   onInit: (
     usd: number,
@@ -47,8 +53,8 @@ interface StoredPrefs {
   total?: number | '';
   usd?: number | '';
   btc?: number | '';
-  usdAlloc?: Allocation;
-  btcAlloc?: Allocation | null;
+  usdAlloc?: AllocForm;
+  btcAlloc?: AllocForm | null;
   selectedVenues?: string[];
   selectedAssets?: string[];
 }
@@ -62,14 +68,16 @@ function toggleIn(selected: string[], catalog: string[], item: string): string[]
 
 // Distribución inicial del modo experto: el 50/50 clásico explícito; los venues
 // extra del catálogo aparecen en 0 listos para recibir su porcentaje.
-function defaultAlloc(venues: string[]): Allocation {
-  const alloc: Allocation = {};
+function defaultAlloc(venues: string[]): AllocForm {
+  const alloc: AllocForm = {};
   for (const v of venues) alloc[v] = v === 'Binance' || v === 'Bitso' ? 50 : 0;
   return alloc;
 }
 
-const sumOf = (a: Allocation) => Object.values(a).reduce((s, v) => s + (Number.isFinite(v) ? v : 0), 0);
-const sumOk = (a: Allocation) => Math.abs(sumOf(a) - 100) < 0.01 && Object.values(a).every(v => v >= 0);
+// sumOf/sumOk tratan '' como 0 (Number.isFinite('') es false; '' >= 0 es true):
+// un input vacío no rompe la suma, solo no aporta hasta que se escriba un número.
+const sumOf = (a: AllocForm) => Object.values(a).reduce<number>((s, v) => s + (typeof v === 'number' && Number.isFinite(v) ? v : 0), 0);
+const sumOk = (a: AllocForm) => Math.abs(sumOf(a) - 100) < 0.01 && Object.values(a).every(v => v === '' || v >= 0);
 
 // Monedas "cash": el medio de intercambio, no un activo a operar. Se mantienen
 // SIEMPRE en el universo (sin efectivo no hay ciclos), así que en la checklist se
@@ -97,9 +105,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   // Modo experto: totales + porcentajes.
   const [usd, setUsd] = useState<number | ''>('');
   const [btc, setBtc] = useState<number | ''>('');
-  const [usdAlloc, setUsdAlloc] = useState<Allocation>(defaultAlloc(['Binance', 'Bitso']));
+  const [usdAlloc, setUsdAlloc] = useState<AllocForm>(defaultAlloc(['Binance', 'Bitso']));
   // null = el BTC sigue a la distribución del cash (el caso común).
-  const [btcAlloc, setBtcAlloc] = useState<Allocation | null>(null);
+  const [btcAlloc, setBtcAlloc] = useState<AllocForm | null>(null);
 
   useEffect(() => {
     // Preferencias de la última vez (localStorage es del NAVEGADOR: solo la
@@ -165,9 +173,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   const btcNum = Number(btc) || 0;
   const effectiveBtcAlloc = btcAlloc ?? usdAlloc;
   // El reparto se acota a los exchanges SELECCIONADOS: el capital solo va a los
-  // venues activos, y su suma (100 %) se valida sobre ese subconjunto.
-  const pickSelected = (a: Allocation): Allocation =>
-    Object.fromEntries(selectedVenues.map(v => [v, a[v] ?? 0])) as Allocation;
+  // venues activos, y su suma (100 %) se valida sobre ese subconjunto. Coacciona
+  // '' → 0 (Number('') === 0) para que el input a medio escribir no rompa el tipo.
+  const pickSelected = (a: AllocForm): Allocation =>
+    Object.fromEntries(selectedVenues.map(v => [v, Number(a[v]) || 0])) as Allocation;
   const usdAllocSel = pickSelected(usdAlloc);
   const btcAllocSel = pickSelected(effectiveBtcAlloc);
   const usdSumOk = sumOk(usdAllocSel);
@@ -201,16 +210,18 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
     }
   };
 
-  const editAlloc = (set: React.Dispatch<React.SetStateAction<Allocation>>) =>
+  const editAlloc = (set: React.Dispatch<React.SetStateAction<AllocForm>>) =>
     (venue: string, value: string) =>
-      set(prev => ({ ...prev, [venue]: value === '' ? 0 : parseFloat(value) || 0 }));
+      // Vacío → '' (el input queda en blanco, no en 0); si no, parseFloat descarta
+      // ceros a la izquierda ("020" → 20) y cae a 0 ante texto no numérico.
+      set(prev => ({ ...prev, [venue]: value === '' ? '' : parseFloat(value) || 0 }));
 
   const inputCls = 'w-full bg-gray-50 dark:bg-gray-950 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-gray-100 p-3 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono font-bold shadow-sm';
   const labelCls = 'text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 uppercase';
 
   // allocEditor solo muestra los exchanges SELECCIONADOS en la checklist: el
   // capital se reparte entre los venues activos y su suma se valida sobre ellos.
-  const allocEditor = (alloc: Allocation, onEdit: (venue: string, value: string) => void, ok: boolean) => {
+  const allocEditor = (alloc: AllocForm, onEdit: (venue: string, value: string) => void, ok: boolean) => {
     const shown = pickSelected(alloc);
     return (
       <div>
@@ -219,10 +230,12 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
             <div key={v}>
               <label className={labelCls}>{v} (%)</label>
               {/* step="any": la validación nativa ancla step a min y bloquearía
-                  porcentajes legítimos (33.333); la suma exacta la valida sumOk. */}
+                  porcentajes legítimos (33.333); la suma exacta la valida sumOk.
+                  value={alloc[v] ?? ''}: al borrar queda VACÍO (no un 0 pegado),
+                  así el usuario escribe el número directo sin ceros a la izquierda. */}
               <input
                 type="number" min="0" max="100" step="any"
-                value={alloc[v] ?? 0}
+                value={alloc[v] ?? ''}
                 onChange={e => onEdit(v, e.target.value)}
                 className={`${inputCls} mt-1 p-2.5 text-sm`}
               />
@@ -237,8 +250,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   };
 
   return (
-    <div className="fixed inset-0 z-[200] overflow-y-auto bg-gray-900/80 backdrop-blur-md flex items-center justify-center p-4 font-mono">
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl max-w-xl w-full p-6 sm:p-8 shadow-2xl transform transition-all relative my-8">
+    // Contenedor de scroll (overflow-y-auto) SEPARADO del centrado: con
+    // `flex items-center` directamente sobre el contenedor con scroll, un modal
+    // más alto que el viewport se recorta por ARRIBA (el centrado empuja el tope
+    // fuera del área desplazable). El wrapper `min-h-full` centra cuando cabe y
+    // permite desplazar desde el borde superior cuando no cabe.
+    <div className="fixed inset-0 z-[200] overflow-y-auto bg-gray-900/80 backdrop-blur-md font-mono">
+      <div className="flex min-h-full items-center justify-center p-4">
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl max-w-xl w-full p-6 sm:p-8 shadow-2xl transform transition-all relative my-8">
 
         <div className="flex items-center gap-4 mb-5 border-b border-gray-100 dark:border-gray-800 pb-5">
           <div className="w-12 h-12 rounded-lg flex items-center justify-center shadow-lg overflow-hidden bg-white flex-shrink-0">
@@ -369,7 +388,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
                   Distribución <strong>distinta</strong> para el BTC {btcAlloc === null && '(apagado: el bitcoin sigue los mismos porcentajes que el efectivo)'}
                 </p>
               </div>
-              {btcAlloc !== null && allocEditor(btcAlloc, editAlloc(setBtcAlloc as React.Dispatch<React.SetStateAction<Allocation>>), btcSumOk)}
+              {btcAlloc !== null && allocEditor(btcAlloc, editAlloc(setBtcAlloc as React.Dispatch<React.SetStateAction<AllocForm>>), btcSumOk)}
 
               <p className="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed">
                 El motor valida esta distribución tal cual: casas de cambio registradas y suma exacta de 100. Ten presente que la línea de crédito y el reequilibrio automático operan sobre Binance+Bitso (el par clásico); lo asignado a otras casas lo opera el radar.
@@ -474,6 +493,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
             <span>Tu cuenta (saldos, estrategia e historial) queda guardada en la base de datos local del motor: cierra el navegador o reinicia el servidor y sigues exactamente donde estabas. Dinero 100 % simulado.</span>
           </p>
         </form>
+        </div>
       </div>
     </div>
   );

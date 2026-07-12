@@ -777,9 +777,13 @@ function LoanBurst({ earnings, cost, net, reduced }: { earnings: number; cost: n
   }, [net, reduced]);
 
   return (
-    <div className="absolute z-40 pointer-events-none animate-loan-burst" style={{ left: "50%", top: "42%" }}>
+    // fixed (no absolute): así el destello NO lo recorta el `overflow-auto` del
+    // lienzo del radar — se posiciona sobre el viewport y su altura se adapta al
+    // contenido (h-auto por defecto: flex-col + padding, sin altura fija). Antes,
+    // dentro del contenedor con scroll, la tarjeta se veía cortada por arriba.
+    <div className="fixed z-[60] pointer-events-none animate-loan-burst" style={{ left: "50%", top: "34%" }}>
       <div
-        className="flex flex-col items-center gap-1.5 px-7 py-5 rounded-2xl backdrop-blur-md"
+        className="flex flex-col items-center gap-1.5 px-7 py-5 rounded-2xl backdrop-blur-md max-w-[92vw]"
         style={{
           background: "var(--radar-panel)",
           border: `1.5px solid ${color}`,

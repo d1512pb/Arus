@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { ShieldAlert, CheckCircle, Loader2, ArrowRight, HelpCircle, X, Pencil } from "lucide-react";
+import { ShieldAlert, CheckCircle, Loader2, ArrowRight, HelpCircle, X, Pencil, Zap } from "lucide-react";
 import { useArusEngine } from "../hooks/useArusEngine";
 import { OnboardingModal } from "../components/OnboardingModal";
 import { LedgerPanel } from "../components/LedgerPanel";
@@ -44,18 +44,40 @@ function VenueBadge({ name }: { name: string }) {
 // usuario), SIN FONDOS (activa pero sin saldo propio) o ACTIVO. Antes las tarjetas
 // no distinguían estos casos y una casa vacía/desactivada se veía como un bloque de
 // ceros sin explicación.
-type VenueStatus = "active" | "inactive" | "empty";
+// "hold" = fuera del universo PERO con fondos: el dinero está aquí en modo
+// custodia, el bot no lo opera hasta que el usuario active la casa (FASE 7).
+type VenueStatus = "active" | "inactive" | "empty" | "hold";
 function VenueStatusPill({ status }: { status: VenueStatus }) {
   const map: Record<VenueStatus, { label: string; cls: string }> = {
     active: { label: "ACTIVO", cls: "border-emerald-300 dark:border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10" },
     inactive: { label: "INACTIVO", cls: "border-gray-300 dark:border-gray-600 text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800" },
     empty: { label: "SIN FONDOS", cls: "border-amber-300 dark:border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10" },
+    hold: { label: "SOLO HOLD", cls: "border-violet-300 dark:border-violet-500/40 text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-500/10" },
   };
   const s = map[status];
   return (
     <span className={`text-[9px] font-bold uppercase tracking-widest rounded-full px-2 py-0.5 border ${s.cls}`}>
       {s.label}
     </span>
+  );
+}
+
+// InactiveVenueCTA: bloque para una casa fuera del universo — explica el modo
+// "Solo Hold" (el dinero está pero el bot no lo usa) y ofrece activarla en el
+// motor de arbitraje con un click, sin ir hasta el drawer de Estrategia (FASE 7).
+function InactiveVenueCTA({ onActivate }: { onActivate: () => void }) {
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+      <p className="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed mb-2">
+        Tu dinero está aquí en modo <strong>Solo Hold</strong>: el bot no lo usa para arbitraje hasta que actives esta casa (o hazlo desde ⚙ Estrategia).
+      </p>
+      <button
+        onClick={onActivate}
+        className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest border border-emerald-300 dark:border-emerald-500/40 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 transition-colors"
+      >
+        <Zap className="w-3 h-3" /> Activar en el Motor de Arbitraje
+      </button>
+    </div>
   );
 }
 
@@ -158,7 +180,7 @@ function ReplenishingBanner({ expiresAt, message }: { expiresAt: Date | null; me
 }
 
 function InsufficientFundsModal({
-  open, profitPotential, creditCost, creditRequired, onRequestCredit, onWaitRebalance, onShutdown
+  open, profitPotential, creditCost, creditRequired, onRequestCredit, onWaitRebalance, onContinue, onShutdown
 }: {
   open: boolean;
   profitPotential: number;
@@ -166,6 +188,7 @@ function InsufficientFundsModal({
   creditRequired: number;
   onRequestCredit: () => void;
   onWaitRebalance: () => void;
+  onContinue: () => void;
   onShutdown: () => void;
 }) {
   const [loading, setLoading] = useState<"credit" | "wait" | null>(null);
@@ -224,20 +247,45 @@ function InsufficientFundsModal({
           </div>
         </div>
         <div className="flex flex-col gap-3">
-          <button 
-            className="w-full bg-orange-500 hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed text-white p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300 flex justify-center items-center gap-2"
+          {/* Préstamo: si no supera el umbral de riesgo, el botón lo DICE (texto
+              dinámico), se atenúa a gris y queda explícitamente deshabilitado — ya
+              no depende de un tooltip al pasar el cursor. */}
+          <button
+            className={`w-full p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300 flex justify-center items-center gap-2 disabled:cursor-not-allowed ${
+              isProfitable
+                ? "bg-orange-500 hover:bg-orange-400 text-white"
+                : "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
+            }`}
             onClick={handleRequestCredit}
             disabled={loading !== null || !isProfitable}
-            title={!isProfitable ? "La ganancia no supera tu umbral de riesgo para endeudarte" : undefined}
           >
-            {loading === "credit" ? <><Loader2 className="w-4 h-4 animate-spin" /> Procesando...</> : "Pedir préstamo y seguir operando"}
+            {loading === "credit"
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Procesando...</>
+              : isProfitable
+                ? "Pedir préstamo y seguir operando"
+                : "Préstamo No Rentable"}
           </button>
+          {!isProfitable && (
+            <p className="text-[10px] text-gray-500 dark:text-gray-400 text-center -mt-1.5 leading-relaxed">
+              La ganancia (${profitPotential?.toFixed(2)}) no cubre tu umbral de riesgo (${threshold.toFixed(2)}). Baja el multiplicador de riesgo en <strong>Estrategia</strong> si quieres permitir este préstamo.
+            </p>
+          )}
           <button
             className="w-full bg-blue-600 hover:bg-blue-500 text-white p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300 flex justify-center items-center gap-2"
             onClick={handleWait}
             disabled={loading !== null}
           >
             {loading === "wait" ? <><Loader2 className="w-4 h-4 animate-spin" /> Iniciando...</> : "Esperar reequilibrio (1 min demo)"}
+          </button>
+          {/* Decisión final del usuario (préstamo automático apagado): seguir sin
+              endeudarse ni reequilibrar — el bot abandona ESTA oportunidad y sigue
+              buscando otras con los fondos actuales. */}
+          <button
+            className="w-full bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300"
+            onClick={onContinue}
+            disabled={loading !== null}
+          >
+            Continuar sin rebalancear
           </button>
           <button
             className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 p-3 rounded-lg font-bold text-xs uppercase tracking-widest transition-all duration-300"
@@ -477,7 +525,7 @@ function FundsModal({ exchange, usd, btc, onClose, onSubmit }: {
 }
 
 export default function Home() {
-  const { sessionReady, resuming, cancelResume, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, adjustFunds, setParams, shutdownEngine } = useArusEngine();
+  const { sessionReady, resuming, cancelResume, state, initSession, resetSession, demoInject, toggleAutoCredit, requestCredit, waitRebalance, dismissShortfall, adjustFunds, setParams, shutdownEngine } = useArusEngine();
   
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showInjectionModal, setShowInjectionModal] = useState(false);
@@ -651,10 +699,22 @@ export default function Home() {
     return !ev || ev.length === 0 || ev.includes(venue);
   };
 
-  // Estado visual de una casa de cambio: INACTIVO si la sacaste del universo,
-  // SIN FONDOS si está activa pero sin saldo, ACTIVO en otro caso.
+  // Estado visual de una casa de cambio: fuera del universo → SOLO HOLD si tiene
+  // fondos (custodia, sin operar) o INACTIVO si está vacía; dentro del universo →
+  // ACTIVO con fondos o SIN FONDOS.
   const venueStatusOf = (venue: string, hasFunds: boolean): VenueStatus =>
-    !isVenueActive(venue) ? "inactive" : hasFunds ? "active" : "empty";
+    !isVenueActive(venue) ? (hasFunds ? "hold" : "inactive") : hasFunds ? "active" : "empty";
+
+  // Activar una casa en el motor de arbitraje (FASE 7): la agrega a enabled_venues
+  // y aplica los parámetros. Fondear una casa NO la activa sola (adjust_funds solo
+  // toca la wallet) — el usuario decide explícitamente cuándo el bot puede usar esa
+  // liquidez. Si enabled_venues está vacío ("todos"), no hay casas inactivas.
+  const activateVenue = (venue: string) => {
+    if (!state.params) return;
+    const current = state.params.enabled_venues ?? [];
+    if (current.length === 0 || current.includes(venue)) return;
+    setParams({ ...state.params, enabled_venues: [...current, venue] });
+  };
 
   if (!sessionReady) {
     // Continuidad: si hay una sesión persistida, se recupera de la base de datos
@@ -712,6 +772,7 @@ export default function Home() {
         creditRequired={state.insufficientFundsModal?.creditRequired}
         onRequestCredit={requestCredit}
         onWaitRebalance={waitRebalance}
+        onContinue={dismissShortfall}
         onShutdown={shutdownEngine}
       />
       
@@ -942,10 +1003,11 @@ export default function Home() {
       )}
 
       {/* En la vista RADAR la ganancia del préstamo la comunica el burst centrado
-          (LoanBurst); este toast queda para la vista DASHBOARD, que no tiene radar. */}
+          (LoanBurst); este toast queda para la vista DASHBOARD, que no tiene radar.
+          Posición responsiva + h-auto: no se desborda ni se corta en móvil. */}
       {state.loanResults && view === "dashboard" && (
-        <div className={`fixed bottom-32 right-8 z-50 transition-all duration-500 transform translate-y-0 opacity-100`}>
-          <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/20 text-emerald-900 dark:text-emerald-100 px-6 py-5 rounded-xl shadow-md flex items-start gap-4 max-w-md backdrop-blur-md">
+        <div className={`fixed bottom-4 sm:bottom-32 right-4 left-4 sm:left-auto sm:right-8 z-50 transition-all duration-500 transform translate-y-0 opacity-100`}>
+          <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/20 text-emerald-900 dark:text-emerald-100 px-6 py-5 rounded-xl shadow-md flex items-start gap-4 w-full sm:max-w-md backdrop-blur-md">
             <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-500 mt-0.5 flex-shrink-0" />
             <div>
               <p className="font-bold tracking-widest text-sm">✅ Resultados del Préstamo</p>
@@ -1120,9 +1182,7 @@ export default function Home() {
                 </div>
               </div>
               {!isVenueActive("Binance") && (
-                <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
-                  Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
-                </p>
+                <InactiveVenueCTA onActivate={() => activateVenue("Binance")} />
               )}
             </div>
 
@@ -1192,9 +1252,7 @@ export default function Home() {
                 </div>
               </div>
               {!isVenueActive("Bitso") && (
-                <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
-                  Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
-                </p>
+                <InactiveVenueCTA onActivate={() => activateVenue("Bitso")} />
               )}
             </div>
 
@@ -1282,9 +1340,7 @@ export default function Home() {
                       </div>
                     </div>
                     {!active && (
-                      <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800 leading-relaxed">
-                        Fuera de tu universo — el bot no opera aquí. Reactívalo en <strong>⚙ Estrategia</strong>.
-                      </p>
+                      <InactiveVenueCTA onActivate={() => activateVenue(venue)} />
                     )}
                   </div>
                 );

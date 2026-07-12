@@ -399,6 +399,19 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			case "wait_rebalance":
 				go engine.startReplenishing(session, "Esperando traslado de capital entre exchanges (1 min en demo; ~30+ min en producción).")
 
+			case "dismiss_shortfall":
+				// "Continuar sin rebalancear": el usuario decide NO endeudarse ni
+				// reequilibrar. Se limpia el estado de falta de fondos (para que el
+				// próximo faltante vuelva a preguntar) y se descarta la inyección
+				// pendiente (abandona ESA oportunidad); el bot sigue vivo buscando
+				// otras con los fondos actuales. Respeta "la decisión final es del
+				// usuario" cuando el préstamo automático está apagado.
+				session.Mu.Lock()
+				session.InsufficientFundsPending = false
+				session.PendingInjection = nil
+				session.Mu.Unlock()
+				sendLog(session, "▶️ [SIN FONDOS] Continuar sin reequilibrar: el bot sigue buscando otras oportunidades con los fondos actuales.")
+
 			case "request_credit":
 				go func() {
 					sendEvent(session, ServerEvent{Type: "CREDIT_PROCESSING", Message: "Procesando solicitud de préstamo..."})

@@ -5,7 +5,7 @@
 ### Motor de arbitraje omnidireccional de alta frecuencia · multi-exchange · multi-activo
 
 > ### 🚧 TRABAJO EN CURSO — pendiente a continuación
-> Rama `feat/arbitraje-omnidireccional`. Este README es la **referencia completa del proyecto** (documento de handoff: se puede retomar el trabajo leyendo solo esto): qué hay construido, cómo funciona y qué sigue. Los Sprints C y D (Kraken, SOL, crédito para ciclos, analítica) **y el rediseño Radar-first de la UI** (el grafo es ahora la pantalla principal) ya están integrados y verificados. Queda: desplegar la rama, **actualizar las capturas** (las actuales son de la versión anterior) y la sesión de revisión multi-agente. Ver [Estado de la rama](#-estado-de-la-rama-bitácora) y [Qué sigue](#-qué-sigue--plan-de-evolución).
+> Rama `feat/arbitraje-omnidireccional`. Este README es la **referencia completa del proyecto** (documento de handoff: se puede retomar el trabajo leyendo solo esto): qué hay construido, cómo funciona y qué sigue. Los Sprints C y D (Kraken, SOL, crédito para ciclos, analítica), **el rediseño Radar-first de la UI** (el grafo es la pantalla principal) y una **ronda de endurecimiento production-ready** guiada por pruebas de usuario (grafo dinámico que poda el subgrafo, corrección de lógica y contabilidad del crédito, custodia vs. autorización de trading en casas inactivas, y varios fixes de UX) ya están integrados. Ver [De demo a operable](#-de-demo-a-operable--endurecimiento-production-ready) para la síntesis técnica. Queda: desplegar la rama, **actualizar las capturas** (las actuales son de la versión anterior) y la sesión de revisión multi-agente. Ver [Estado de la rama](#-estado-de-la-rama-bitácora) y [Qué sigue](#-qué-sigue--plan-de-evolución).
 
 *Un grafo de liquidez en vivo detecta ciclos de arbitraje —espaciales entre exchanges y triangulares dentro de uno— con datos 100 % reales de **Binance, Bitso y Kraken**, descuenta cada fricción (fees + slippage) y ejecuta solo cuando la ganancia neta supera el margen que **cada usuario** define. Sesiones completas persistidas: el bot te recuerda.*
 
@@ -35,15 +35,16 @@
 6. [Velocidad y eficiencia](#-velocidad-y-eficiencia-detección-de-oportunidades)
 7. [Precisión del cálculo de rentabilidad neta](#-precisión-del-cálculo-de-rentabilidad-neta)
 8. [Robustez y gestión de riesgo](#-robustez-y-gestión-de-riesgo-circuit-breakers)
-9. [Persistencia y continuidad](#-persistencia-y-continuidad-sesiones-completas--trade-ledger)
-10. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
-11. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
-12. [Parámetros y configuración — referencia completa](#️-parámetros-y-configuración--referencia-completa)
-13. [Instalación y ejecución local](#-instalación-y-ejecución-local)
-14. [Despliegue](#-despliegue)
-15. [Qué sigue — plan de evolución](#-qué-sigue--plan-de-evolución)
-16. [Capturas de pantalla](#-capturas-de-pantalla)
-17. [Licencia](#-licencia)
+9. [De demo a operable — endurecimiento production-ready](#-de-demo-a-operable--endurecimiento-production-ready)
+10. [Persistencia y continuidad](#-persistencia-y-continuidad-sesiones-completas--trade-ledger)
+11. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
+12. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
+13. [Parámetros y configuración — referencia completa](#️-parámetros-y-configuración--referencia-completa)
+14. [Instalación y ejecución local](#-instalación-y-ejecución-local)
+15. [Despliegue](#-despliegue)
+16. [Qué sigue — plan de evolución](#-qué-sigue--plan-de-evolución)
+17. [Capturas de pantalla](#-capturas-de-pantalla)
+18. [Licencia](#-licencia)
 
 ---
 
@@ -72,6 +73,9 @@ El proyecto partió de un bot de arbitraje del par BTC entre Binance y Bitso (ra
 | **FASE 1 — Préstamo que no perdía la oportunidad + ganancia visible** | Reporte de pruebas: «Pedir préstamo» activaba el crédito pero **no volvía a operar** (cobraba el costo y nada más). Causa: `runDemoInjection` es una goroutine one-shot; al agotarse los fondos con auto-crédito OFF, rompía el loop y la liquidez restante (variable local) se perdía. Fix: `PendingInjection` en la sesión guarda la oportunidad pausada y `resumePendingInjection` la reanuda tras conceder crédito (`request_credit`) o completar el reequilibrio. Bugs de contabilidad relacionados: el costo del crédito se cobra a una **wallet real** (antes se "devolvía" al recalcular el patrimonio al vencer); el radar ya no abandona en silencio un ciclo sin fondos (`notifyCycleUnfundable`); el log "inyección completada" solo sale en agotamiento real. Animación: al vencer el préstamo, un **burst centrado** (`LoanBurst`) muestra la ganancia NETA contando hacia arriba + desglose, y los nodos con capital prestado laten en **azul** mientras el crédito está activo | `engine.go`/`server.go`/`cycle.go` · `RadarView.tsx` (`LoanBurst`) |
 | **FASE 2 — Onboarding con checklist + grafo verdaderamente dinámico** | El demo estaba "estático en 3 exchanges". Ahora el onboarding incluye una **checklist** de exchanges y monedas (desde `/api/config`): lo marcado define el universo (`enabled_venues`/`enabled_assets`, aplicado por `set_params` tras el init y **persistido**). El cash (USD/USDT) es base fija (sin efectivo no hay ciclo); solo las cripto son opt-in. El radar **oculta** (ya no atenúa) lo no seleccionado: el layout se deriva de `shownNodes`/`shownEdges` y colapsa a las columnas elegidas. En modo Experto, la matriz de reparto se acota a los exchanges seleccionados. Restaurada la **luz verde que viaja entre vértices** en cada compra/venta (recorre la arista compra→venta sobre el grafo dinámico), además de las partículas del ciclo | `OnboardingModal.tsx` · `useArusEngine.ts` · `RadarView.tsx` (`shownNodes`/`flareRef`) |
 | **FASE 3 — Estado de las tarjetas del dashboard + barra de Kraken** | Cada tarjeta de exchange muestra ahora un **pill de estado**: `INACTIVO` (fuera del universo → tarjeta atenuada + nota "reactívalo en Estrategia"), `SIN FONDOS` (activa pero sin saldo) o `ACTIVO` — antes una casa vacía o desactivada se veía como un bloque de ceros sin explicación. Fix: la tarjeta de venues fuera del par (Kraken) tenía saldos pero **le faltaba la barra "Nivel de Fondos (propios)"**; ahora la lleva idéntica a Binance/Bitso (`calculateHealth` generalizado: usa la asignación del venue, o su valor total como referencia si no tiene una — p. ej. Kraken fondeado por un ciclo en modo guiado). Verificado E2E: experto 40/40/20 → las 3 casas al 100 %; deseleccionar Kraken → tarjeta INACTIVO + columna fuera del radar | `page.tsx` (`VenueStatusPill`, `isVenueActive`, `calculateHealth`) |
+| **FASE 5 — UX de onboarding e inputs de capital** | El modal de onboarding se **cortaba por arriba** cuando el contenido excedía el viewport: `flex items-center` **sobre** el contenedor con `overflow-y-auto` empuja el tope fuera del área desplazable. Fix: patrón scroll-container + wrapper `min-h-full flex` (centra cuando cabe, desplaza desde arriba cuando no). Segundo fix: los inputs de % de la distribución dejaban un `0` pegado al borrar (obligando a escribir "020"). El estado de edición pasa a `AllocForm` (`number \| ''`): borrar deja el campo **vacío**, `parseFloat` descarta ceros a la izquierda, y `pickSelected` coacciona `''`→`0` solo al enviar | `OnboardingModal.tsx` (`AllocForm`) |
+| **FASE 6 — Refinamiento del flujo de crédito** | Cuando el préstamo no supera el umbral de riesgo, el botón lo **DICE**: texto dinámico "Préstamo No Rentable", gris atenuado, `disabled` explícito (ya no un tooltip al hover) + una línea que explica el porqué con los números. Nuevo botón **"Continuar sin rebalancear"**: nueva acción WS `dismiss_shortfall` que limpia `InsufficientFundsPending`+`PendingInjection` (abandona ESA oportunidad, el bot sigue con los fondos actuales) — respeta que la decisión final es del usuario con auto-crédito apagado. Fix de corte: el destello de fin de préstamo (`LoanBurst`) pasó de `absolute` (recortado por el `overflow-auto` del lienzo) a `fixed` con altura al contenido | `page.tsx` · `server.go` (`dismiss_shortfall`) · `useArusEngine.ts` · `RadarView.tsx` |
+| **FASE 7 — Fondeo de exchanges inactivos ("Solo Hold")** | Fondear una casa fuera del universo **no la agrega al grafo de trading** (`adjust_funds` solo toca la wallet; `enabled_venues` es ortogonal). La casa aparece en el dashboard con el pill **`SOLO HOLD`** (violeta) — el dinero está en custodia, el bot no lo opera — y un botón **⚡ "Activar en el Motor de Arbitraje"** (`activateVenue` → añade a `enabled_venues` vía `set_params`) para que el usuario autorice esa liquidez cuando decida. Separación explícita entre **custodia y autorización de trading** | `page.tsx` (`InactiveVenueCTA`, `activateVenue`, estado `hold`) |
 
 **Decisiones de diseño que hay que conocer para seguir trabajando:**
 
@@ -265,6 +269,48 @@ Neto = (P_venta × V × (1 − fee_venta)) − (P_compra × V × (1 + fee_compra
 - **Ritmo anti-*overtrading*:** cooldown de **3 s** por sesión + flag `IsExecuting` que serializa (cierra la ventana TOCTOU de doble ejecución en el mismo tick).
 - **Apalancamiento disciplinado:** nunca se pide un préstamo que no cubra `costo × RiskMultiplier`; el crédito agotado pausa hasta el vencimiento y se devuelve solo.
 - **Validación de entradas SIEMPRE en backend:** capital inicial, inyecciones del simulador, parámetros de estrategia y universo — todo se sanea contra NaN/Inf, rangos y registros conocidos, aunque el frontend ya valide.
+
+---
+
+## 🚀 De demo a operable — endurecimiento production-ready
+
+> Esta sección resume el **endurecimiento** disparado por una ronda de pruebas de usuario: cada punto cierra una brecha concreta entre "demo que se ve bien" y "sistema que se comporta como en producción". El hilo común es que las mejoras viven en el **mismo camino de código** que operaría con dinero real, no en atajos de demo.
+
+### 1. Grafo de liquidez dinámico (el universo poda el subgrafo, no solo lo pinta)
+
+El universo del usuario (`enabled_venues` / `enabled_assets`) dejó de ser cosmético: **poda topológicamente** el grafo que se renderiza y se opera. El layout del radar se deriva de `shownNodes`/`shownEdges` (filtrados por el universo) y **colapsa** a las columnas elegidas — una casa deseleccionada no ocupa lugar. La poda se decide en el onboarding (checklist → `set_params` → **persistida** con la sesión) y se cambia en vivo desde el drawer de Estrategia.
+
+- **Multi-tenant real:** el snapshot del motor trae el catálogo completo; cada sesión proyecta SU subgrafo (sus fees, su universo) en el cliente. Dos evaluadores con el mismo mercado ven radares distintos.
+- **Base estructural vs. activos opt-in:** el cash (USD/USDT) es siempre parte del universo (sin efectivo no hay ciclo); solo las cripto son seleccionables — se evita el footgun de deseleccionar el quote y romper la casa entera.
+- **Data-céntrico:** el layout es paramétrico (1..N venues); agregar una casa es dato + adaptador de feed, nunca lógica de dibujo.
+
+### 2. Inyección de escenarios por WebSocket (banco de pruebas sobre el camino real)
+
+El módulo "Probar el bot" empuja **cargas simuladas** (`demo_inject`) por el **mismo WebSocket** y hacia el **mismo pipeline** que los feeds reales: idéntica fórmula `computeNetProfit`, idénticos circuit breakers (Spike Filter, staleness, Fill-or-Kill), idéntico ejecutor por sesión y persistencia write-behind. No hay una rama de código "de test" divergente.
+
+- **Determinismo para el evaluador:** los tres escenarios (oportunidad normal / evento extremo / precio falso) disparan a voluntad la ejecución rentable, la alerta de spike y el bloqueo del circuit breaker — y dejan **ver el dinero fluir** por los nodos (luz verde por trade) mientras la ganancia se acumula.
+- **Confianza por construcción:** como el simulador comparte el camino de producción, lo que se observa ES la lógica de decisión que correría en real; el único componente declaradamente simulado es el *fill* (instantáneo al top-of-book, slippage estimado, probabilidad de fallo configurable por sesión).
+
+### 3. Manejo de crédito (préstamos): corrección de lógica, contabilidad y control
+
+El préstamo —"nunca perder una oportunidad por falta de fondos"— era el punto más frágil. Se endureció en cuatro frentes:
+
+- **La oportunidad no se pierde:** máquina de estados `PendingInjection` — cuando una inyección se queda sin saldo con auto-crédito apagado, la oportunidad restante se **guarda** en la sesión y se **reanuda** (`resumePendingInjection`) al conceder el crédito o completar el reequilibrio. Toma-y-limpia atómica: si crédito y reequilibrio compitieran, solo uno reanuda (sin doble ejecución). Antes, la goroutine one-shot del simulador rompía el loop y perdía la liquidez restante — el botón "parecía roto".
+- **Contabilidad sin dinero fantasma:** el costo del crédito (fee + interés) se **cobra a una wallet real** en la activación, no solo a los acumuladores escalares. Así el invariante `TotalWealth = InitialWealth + TotalNetProfit` se mantiene a lo largo de todo el ciclo de crédito; antes, el recálculo del patrimonio desde las wallets al vencer "devolvía" el costo (el crédito parecía gratis, rompiendo la premisa de que endeudarse cuesta).
+- **La decisión final es del usuario:** con auto-crédito apagado, el diálogo de fondos insuficientes es inequívoco — botón "Préstamo No Rentable" (gris, `disabled`, con el porqué numérico) cuando la ganancia no cubre `costo × RiskMultiplier`, y un botón explícito "Continuar sin rebalancear" (`dismiss_shortfall`) que abandona esa oportunidad y deja al bot vivo buscando otras. Ningún camino omite en silencio: en modo radar, `notifyCycleUnfundable` avisa cuando un ciclo no es fondeable ni con crédito.
+- **Feedback honesto:** al vencer el préstamo, un destello (`LoanBurst`) reporta la ganancia NETA real (operado − interés) con su desglose y color por signo (si no rindió, se ve en rojo, sin maquillar).
+
+### 4. Control de riesgo de exchanges inactivos (custodia ≠ autorización de trading)
+
+Fondear una casa **no** la habilita para operar. `adjust_funds` (depósito/retiro) solo mueve saldo en la wallet; el universo de trading (`enabled_venues`) es **ortogonal**. Una casa fuera del universo pero con fondos aparece en el dashboard con el estado **`SOLO HOLD`** (custodia, atenuada) y el radar la mantiene oculta. La activación es una acción **explícita y auditable** del usuario: el botón "⚡ Activar en el Motor de Arbitraje" (`activateVenue` → añade la casa a `enabled_venues` vía `set_params`) autoriza al bot a usar esa liquidez solo cuando el usuario lo decide.
+
+- **Por qué importa en producción:** es una separación de responsabilidades de riesgo real — el capital puede reposar en una casa que el bot **no** está autorizado a operar (recién integrada, en revisión, con límites pendientes), y habilitarla exige una decisión deliberada, no un efecto colateral de un depósito.
+
+### Pulido operativo
+
+- **RESET repetible:** "Borrar todo" abandona la sesión limpiamente (olvida el token, cierra el socket sin reconexión — el motor la saca del Hub) y vuelve al onboarding cuantas veces se quiera, con ledger/analítica en cero para la sesión nueva.
+- **Onboarding robusto:** el modal ya no se corta por arriba en viewports pequeños (scroll-container + `min-h-full`), y los inputs de distribución permiten vaciarse (`AllocForm`, `number | ''`) sin el "0" pegado.
+- **Sin cortes de pantalla:** las tarjetas de información de crédito adaptan su altura al contenido y escapan de contenedores con `overflow` (posición `fixed`), visibles completas en cualquier pantalla.
 
 ---
 

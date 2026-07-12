@@ -343,6 +343,16 @@ export function useArusEngine() {
     }
   }, []);
 
+  // "Continuar sin rebalancear": ni préstamo ni reequilibrio. El backend limpia
+  // el estado de falta de fondos y la inyección pendiente; aquí cerramos el modal
+  // (no hay evento de servidor que lo cierre, a diferencia de crédito/reequilibrio).
+  const dismissShortfall = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.send(JSON.stringify({ action: "dismiss_shortfall" }));
+    }
+    setState(prev => ({ ...prev, insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 } }));
+  }, []);
+
   // Depósito (amount > 0) o retiro (amount < 0) de USD/BTC en un exchange.
   const adjustFunds = useCallback((exchange: string, currency: "USD" | "BTC", amount: number) => {
     if (wsRef.current && amount !== 0) {
@@ -565,6 +575,7 @@ export function useArusEngine() {
     toggleAutoCredit,
     requestCredit,
     waitRebalance,
+    dismissShortfall,
     adjustFunds,
     setParams,
     shutdownEngine,
