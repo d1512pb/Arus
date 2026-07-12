@@ -304,6 +304,19 @@ type CreditState struct {
 	LastCost              float64
 }
 
+// PendingInjection guarda una inyección del simulador ("Probar el bot") que se
+// PAUSÓ por falta de fondos en la ruta manual (auto-crédito OFF): el usuario aún
+// debe decidir entre pedir préstamo, esperar reequilibrio o detener. La goroutine
+// de runDemoInjection se corta al quedarse sin saldo, así que la liquidez restante
+// se guarda aquí para REANUDAR el consumo en cuanto haya fondos nuevos (crédito o
+// reequilibrio). Sin esto, "Pedir préstamo" agregaba fondos pero no volvía a
+// operar la oportunidad — el préstamo parecía roto y solo cobraba su costo.
+type PendingInjection struct {
+	Exchange  string
+	Spread    float64
+	Liquidity float64
+}
+
 type ClientSession struct {
 	ID     string
 	Conn   *websocket.Conn
@@ -337,6 +350,16 @@ type ClientSession struct {
 	ReplenishExpiresAt       time.Time
 	InsufficientFundsPending bool
 	LastTradeTime            time.Time
+
+	// PendingInjection: inyección del simulador pausada por falta de fondos, a la
+	// espera de la decisión del usuario (préstamo/reequilibrio). Se reanuda al
+	// conceder crédito o completar el reequilibrio. nil = nada pendiente. Bajo Mu.
+	PendingInjection *PendingInjection
+	// LastUnfundableLogAt limita (throttle) el aviso del radar cuando detecta un
+	// ciclo rentable cuyo nodo de inicio está fuera del par clásico: ni el crédito
+	// ni el reequilibrio pueden fondearlo, así que se avisa una vez cada tanto en
+	// vez de omitir en silencio (el radar seguiría pintando el ciclo verde). Bajo Mu.
+	LastUnfundableLogAt time.Time
 
 	// IsExecuting serializa la ejecución por sesión: se fija bajo el mismo lock que valida
 	// el cooldown, de modo que solo una goroutine puede operar a la vez por sesión (cierra

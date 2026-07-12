@@ -29,6 +29,14 @@ interface Props {
   enabledVenues?: string[];
   enabledAssets?: string[];
   onEditFunds: (venue: string) => void;
+  // Crédito: mientras un préstamo está activo, los nodos de los venues con capital
+  // prestado laten en azul. Al vencer, loanResult trae la ganancia neta que rindió
+  // esa inyección de capital → burst centrado en el radar (el usuario ve DE UN
+  // VISTAZO cuánto ganó gracias al préstamo). loanResult cambia de referencia en
+  // cada vencimiento (null entre préstamos).
+  creditActive?: boolean;
+  borrowedVenues?: string[];
+  loanResult?: { earnings: number; cost: number } | null;
 }
 
 const INK = "var(--radar-ink)", INK2 = "var(--radar-ink2)", INK3 = "var(--radar-ink3)";
@@ -68,7 +76,7 @@ interface FloatProfit {
 
 // memo: el lienzo solo se re-renderiza cuando cambian SUS datos (graph ~1/s,
 // trades, spike, universo) — no con cada log o ping del feed de mercado.
-export const RadarView = memo(function RadarView({ graph, trades, spike, enabledVenues, enabledAssets, onEditFunds }: Props) {
+export const RadarView = memo(function RadarView({ graph, trades, spike, enabledVenues, enabledAssets, onEditFunds, creditActive, borrowedVenues, loanResult }: Props) {
   const venueAllowed = useCallback(
     (v: string) => !enabledVenues || enabledVenues.length === 0 || enabledVenues.includes(v),
     [enabledVenues]
@@ -90,6 +98,12 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   const [cardPos, setCardPos] = useState<{ left: number; top: number } | null>(null);
   const [floats, setFloats] = useState<FloatProfit[]>([]);
   const [spikeMsg, setSpikeMsg] = useState<string | null>(null);
+  // Burst de ganancia por préstamo (se limpia solo a los 6 s, independiente del
+  // parent que limpia loanResult a los 10 s).
+  const [loanBurst, setLoanBurst] = useState<{ earnings: number; cost: number; net: number } | null>(null);
+
+  // Venues con capital prestado (lookup O(1) para el anillo azul de los nodos).
+  const borrowedSet = useMemo(() => new Set(borrowedVenues ?? []), [borrowedVenues]);
 
   const reduced = useMemo(
     () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -258,6 +272,22 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     }]);
     setTimeout(() => setFloats((f) => f.filter((p) => p.id !== id)), 2400);
   }, [trades, graph, cyclePath, reduced]);
+
+  // ── Ganancia por préstamo: burst centrado al vencer el crédito ───────────
+  // loanResult cambia de referencia en cada CREDIT_EXPIRED (null entre préstamos);
+  // el ref evita re-disparar por re-renders con el mismo resultado.
+  const lastLoanRef = useRef<{ earnings: number; cost: number } | null>(null);
+  useEffect(() => {
+    if (!loanResult || lastLoanRef.current === loanResult) return;
+    lastLoanRef.current = loanResult;
+    setLoanBurst({
+      earnings: loanResult.earnings,
+      cost: loanResult.cost,
+      net: loanResult.earnings - loanResult.cost,
+    });
+    const to = setTimeout(() => setLoanBurst(null), 6000);
+    return () => clearTimeout(to);
+  }, [loanResult]);
 
   // ── Seguridad visible: SPIKE/CIRCUIT BREAKER en rojo por unos segundos ───
   const lastSpikeRef = useRef<string | null>(null);
@@ -430,6 +460,16 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                   onClick={(ev) => openNodeCard(n.id, ev)}
                   onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openNodeCard(n.id, ev); } }}
                 >
+                  {/* Anillo azul: este venue sostiene capital prestado (préstamo
+                      activo). Late suave mientras dura el crédito. */}
+                  {creditActive && borrowedSet.has(n.venue) && (
+                    <circle
+                      cx={p.x} cy={p.y} r={NODE_R + 5}
+                      fill="none" strokeWidth={2}
+                      className="animate-credit-ring"
+                      style={{ stroke: "var(--radar-credit)", filter: "drop-shadow(0 0 6px var(--radar-credit-glow))", pointerEvents: "none" }}
+                    />
+                  )}
                   <circle
                     ref={(el) => { if (el) pulseRefs.current.set(n.id, el); else pulseRefs.current.delete(n.id); }}
                     cx={p.x} cy={p.y} r={NODE_R}
@@ -508,6 +548,9 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
               {f.amount >= 0 ? "+" : "-"}{fmtUSD(Math.abs(f.amount))}
             </div>
           ))}
+
+          {/* Burst: ganancia neta que rindió el préstamo (centrado en el radar) */}
+          {loanBurst && <LoanBurst earnings={loanBurst.earnings} cost={loanBurst.cost} net={loanBurst.net} reduced={reduced} />}
 
           {/* Card de nodo: flotante en desktop, sheet inferior en móvil */}
           {sel && (
@@ -612,3 +655,53 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     </div>
   );
 });
+
+// LoanBurst — destello centrado que, al vencer un préstamo, resume DE UN VISTAZO
+// cuánto NETO rindió la inyección de capital (el fuerte de Arus: no perder
+// oportunidades por falta de fondos). El neto cuenta hacia arriba (imán visual) y
+// debajo va el desglose operado/interés. Color por signo: honesto — si el préstamo
+// no rindió, se ve en rojo, sin maquillar. Overlay HTML: no repinta el lienzo SVG.
+function LoanBurst({ earnings, cost, net, reduced }: { earnings: number; cost: number; net: number; reduced: boolean }) {
+  const netRef = useRef<HTMLSpanElement>(null);
+  const positive = net >= 0;
+  const color = positive ? ACCENT : DANGER;
+  const signed = (v: number) => `${v >= 0 ? "+" : "-"}${fmtUSD(Math.abs(v))}`;
+
+  useEffect(() => {
+    const el = netRef.current;
+    if (!el || reduced) return;
+    const t0 = performance.now();
+    const DUR = 1100;
+    let raf = requestAnimationFrame(function step(t: number) {
+      const k = Math.min(1, (t - t0) / DUR);
+      const eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = signed(net * eased);
+      if (k < 1) raf = requestAnimationFrame(step);
+    });
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [net, reduced]);
+
+  return (
+    <div className="absolute z-40 pointer-events-none animate-loan-burst" style={{ left: "50%", top: "42%" }}>
+      <div
+        className="flex flex-col items-center gap-1.5 px-7 py-5 rounded-2xl backdrop-blur-md"
+        style={{
+          background: "var(--radar-panel)",
+          border: `1.5px solid ${color}`,
+          boxShadow: `0 0 44px ${positive ? "var(--radar-accent-glow)" : "rgba(220,38,38,0.4)"}`,
+        }}
+      >
+        <span className="text-[10px] font-sans font-black tracking-[0.22em] uppercase" style={{ color: INK2 }}>
+          🏦 {positive ? "Ganancia con el préstamo" : "Resultado del préstamo"}
+        </span>
+        <span ref={netRef} className="font-mono font-black text-4xl leading-none" style={{ color, textShadow: `0 0 24px ${color}` }}>
+          {signed(reduced ? net : 0)}
+        </span>
+        <span className="text-[11px] font-mono" style={{ color: INK3 }}>
+          <span style={{ color: ACCENT }}>+{fmtUSD(earnings)}</span> generados · <span style={{ color: DANGER }}>−{fmtUSD(cost)}</span> interés
+        </span>
+      </div>
+    </div>
+  );
+}

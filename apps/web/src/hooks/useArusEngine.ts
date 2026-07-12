@@ -159,38 +159,42 @@ function borrowedFromData(data: Record<string, unknown>) {
 // historial) tras cerrar el navegador o tras un reinicio del motor.
 const SESSION_KEY = "arus_session_id";
 
+// Estado limpio del hook: el arranque y el reset ("Borrar todo") parten del
+// MISMO cero — nadie lo muta en sitio (el reducer siempre copia con spread).
+const INITIAL_ENGINE_STATE: EngineState = {
+  sessionId: "",
+  params: null,
+  graph: null,
+  trades: [],
+  totalWealth: 0,
+  initialWealth: 0,
+  initialUsd: 0,
+  totalNetProfit: 0,
+  wallets: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+  borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+  opsCount: 0,
+  uptimeSeconds: 0,
+  livePrices: { binance: 0, bitso: 0 },
+  ping: false,
+  isRebalancing: false,
+  rebalanceExpiresAt: null,
+  rebalanceMessage: "",
+  rebalanceSuccessAmount: null,
+  logs: [],
+  autoCreditMode: false,
+  insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
+  creditActiveState: { active: false, expiresAt: null, depleted: false },
+  loanResults: null,
+  engineRunning: true,
+};
+
 export function useArusEngine() {
   const [sessionReady, setSessionReady] = useState(false);
   // resuming: hay un token guardado y estamos recuperando la sesión del servidor
   // (la UI muestra "recuperando..." en vez del onboarding).
   const [resuming, setResuming] = useState(false);
   const sessionIdRef = useRef<string | null>(null);
-  const [state, setState] = useState<EngineState>({
-    sessionId: "",
-    params: null,
-    graph: null,
-    trades: [],
-    totalWealth: 0,
-    initialWealth: 0,
-    initialUsd: 0,
-    totalNetProfit: 0,
-    wallets: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
-    borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
-    opsCount: 0,
-    uptimeSeconds: 0,
-    livePrices: { binance: 0, bitso: 0 },
-    ping: false,
-    isRebalancing: false,
-    rebalanceExpiresAt: null,
-    rebalanceMessage: "",
-    rebalanceSuccessAmount: null,
-    logs: [],
-    autoCreditMode: false,
-    insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 },
-    creditActiveState: { active: false, expiresAt: null, depleted: false },
-    loanResults: null,
-    engineRunning: true,
-  });
+  const [state, setState] = useState<EngineState>(INITIAL_ENGINE_STATE);
 
   const wsRef = useRef<WebSocket | null>(null);
   const configRef = useRef<{ usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation } | null>(null);
@@ -278,14 +282,29 @@ export function useArusEngine() {
     setResuming(false);
   }, []);
 
+  // resetSession — «Borrar todo y volver al inicio»: abandona la sesión actual
+  // (token fuera, socket cerrado SIN reconexión — el motor la saca del Hub y
+  // deja de operarla, igual que al cerrar la pestaña) y deja la UI en el
+  // onboarding hasta que el usuario envíe capital nuevo; ese init abre una
+  // conexión nueva → sesión con identidad fresca (saldos, historial y analítica
+  // en cero). OJO: no enviar aquí la acción `reset_session` — su respuesta es un
+  // `state_update` que re-activa sessionReady y expulsa al usuario del
+  // onboarding antes de que pueda escribir.
   const resetSession = useCallback(() => {
-    if (wsRef.current && configRef.current) {
-      wsRef.current.send(JSON.stringify({
-        action: "reset_session",
-        initial_usd: configRef.current.usd,
-        initial_btc: configRef.current.btc,
-      }));
+    if (typeof window !== "undefined") localStorage.removeItem(SESSION_KEY);
+    sessionIdRef.current = null;
+    configRef.current = null;
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // el abandono es deliberado: sin reconexión
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setState(INITIAL_ENGINE_STATE);
+    setResuming(false);
     setSessionReady(false);
   }, []);
 

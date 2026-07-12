@@ -256,7 +256,7 @@ func TestActivateCredit_UserTerms(t *testing.T) {
 	p.CreditAPR = 0 // interés cero: el costo debe ser exactamente la originación
 	s.SetParams(p)
 
-	e.activateCreditSession(s)
+	e.activateCreditSession(s, false)
 
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -583,7 +583,7 @@ func TestActivateCredit_ClassicPairOnly(t *testing.T) {
 	s := newClientSession("credito-3-venues", nil)
 	initSession(s, 10_000, 0.5, nil, nil)
 
-	e.activateCreditSession(s)
+	e.activateCreditSession(s, false)
 
 	s.Mu.Lock()
 	defer s.Mu.Unlock()

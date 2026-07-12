@@ -74,6 +74,9 @@ func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[stri
 	s.IsReplenishing = false
 	s.ReplenishExpiresAt = time.Time{}
 	s.InsufficientFundsPending = false
+	// Un reset/init limpia cualquier inyección pendiente: la oportunidad vieja no
+	// debe reanudarse sobre una sesión recién reinicializada.
+	s.PendingInjection = nil
 }
 
 // --- Validación de entradas del cliente (Hallazgo #5) -----------------------------
@@ -400,7 +403,11 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				go func() {
 					sendEvent(session, ServerEvent{Type: "CREDIT_PROCESSING", Message: "Procesando solicitud de préstamo..."})
 					time.Sleep(2 * time.Second)
-					engine.activateCreditSession(session)
+					engine.activateCreditSession(session, false) // manual: el usuario lo pidió en el diálogo
+					// Reanuda la oportunidad que disparó el diálogo de fondos
+					// insuficientes: sin esto, el préstamo agregaba capital pero no
+					// volvía a operar — el botón "parecía roto" y solo cobraba su costo.
+					engine.resumePendingInjection(session)
 				}()
 
 			case "toggle_auto_credit":

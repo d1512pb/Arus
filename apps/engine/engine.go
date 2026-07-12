@@ -869,6 +869,11 @@ func (e *HFTEngine) completeReplenishing(session *ClientSession) {
 		Message:   "Inventario reequilibrado. El bot puede volver a operar.",
 	})
 	sendLog(session, "✅ [LISTO] Reequilibrio completado — operaciones reanudadas.")
+
+	// Si había una inyección del simulador pausada por falta de fondos (el usuario
+	// eligió "esperar reequilibrio"), ahora que el inventario está 50/50 se reanuda
+	// el consumo de la liquidez restante en vez de dejar la oportunidad abandonada.
+	e.resumePendingInjection(session)
 }
 
 func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedProfit float64) {
@@ -904,7 +909,7 @@ func (e *HFTEngine) handleLiquidityShortfall(session *ClientSession, projectedPr
 
 	if autoMode && creditWorthIt(projectedProfit, creditCost, p.RiskMultiplier) {
 		sendLog(session, fmt.Sprintf("🏦 [AUTO-CRÉDITO] Ganancia +$%.2f > umbral $%.2f (costo $%.2f × riesgo %.1fx) — activando línea de crédito...", projectedProfit, required, creditCost, p.RiskMultiplier))
-		e.activateCreditSession(session)
+		e.activateCreditSession(session, true)
 		return
 	}
 
@@ -947,7 +952,7 @@ func calculateCreditCost(p TradingParameters) float64 {
 	return p.CreditOriginationFee + interest
 }
 
-func (e *HFTEngine) activateCreditSession(s *ClientSession) {
+func (e *HFTEngine) activateCreditSession(s *ClientSession, auto bool) {
 	// Términos del préstamo de ESTA sesión (línea, APR, fee, plazo): snapshot
 	// consistente para toda la activación aunque el usuario edite a mitad.
 	p := s.Params()
@@ -971,12 +976,20 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	pair := classicVenues()
 	perVenueUSD := p.CreditLineUSD / float64(len(pair))
 	perVenueBTC := p.CreditLineBTC / float64(len(pair))
+	costPerVenue := cost / float64(len(pair))
 
 	s.Credit.BorrowedUSD = make(map[string]float64, len(pair))
 	s.Credit.BorrowedBTC = make(map[string]float64, len(pair))
 	for _, v := range pair {
 		s.Wallets.Add(v.Name, v.QuoteAsset, perVenueUSD)
 		s.Wallets.Add(v.Name, v.BaseAsset, perVenueBTC)
+		// El costo del crédito (fee + interés) se cobra de una wallet REAL — no
+		// solo de los acumuladores escalares. Si únicamente restáramos de
+		// TotalWealth, el recálculo desde wallets en rebalanceWallets50_50 al
+		// vencer "devolvería" el costo (préstamo aparentemente gratis, rompiendo
+		// la premisa de que endeudarse cuesta). Se resta DESPUÉS de inyectar el
+		// principal, así el saldo nunca queda negativo.
+		s.Wallets.Add(v.Name, v.QuoteAsset, -costPerVenue)
 		s.Credit.BorrowedUSD[v.Name] = perVenueUSD
 		s.Credit.BorrowedBTC[v.Name] = perVenueBTC
 	}
@@ -997,11 +1010,20 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession) {
 	expiresAt := s.Credit.ExpiresAt
 	s.Mu.Unlock()
 
-	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO ACTIVADO] +$%.0f USD +%.1f BTC prestados | Costo: $%.2f (APR %.1f %% · fee $%.2f) | Plazo: %.2g min",
+	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO %s] +$%.0f USD +%.1f BTC prestados | Costo: $%.2f (APR %.1f %% · fee $%.2f) | Plazo: %.2g min",
+		map[bool]string{true: "AUTO-ACTIVADO", false: "ACTIVADO"}[auto],
 		p.CreditLineUSD, p.CreditLineBTC, cost, p.CreditAPR*100, p.CreditOriginationFee, p.CreditDurationMin))
 
+	// El tipo distingue préstamo automático (el bot decidió por la inecuación
+	// ganancia > costo × riesgo) de manual (el usuario lo pidió en el diálogo):
+	// el frontend puede narrar/animar cada uno distinto. Ambos comparten la misma
+	// activación (una sola función), solo cambia el tipo emitido.
+	approvedType := "CREDIT_APPROVED"
+	if auto {
+		approvedType = "CREDIT_AUTO_APPROVED"
+	}
 	sendEvent(s, ServerEvent{
-		Type:               "CREDIT_APPROVED",
+		Type:               approvedType,
 		SessionID:          s.ID,
 		Message:            "Línea de crédito activa — operando con fondos prestados",
 		ExpiresAt:          expiresAt.Format(time.RFC3339),
@@ -1161,8 +1183,17 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 			session.Mu.Unlock()
 
 			if nowCredit {
-				continue
+				continue // auto-crédito activado en el acto: se sigue consumiendo aquí mismo
 			}
+			// La goroutine va a terminar: o el bot pausó para reequilibrar (auto sin
+			// margen), o pidió la decisión al usuario (INSUFFICIENT_FUNDS). Guardamos
+			// la liquidez restante para REANUDAR esta misma oportunidad cuando haya
+			// fondos nuevos (crédito manual o fin del reequilibrio). Sin esto, "Pedir
+			// préstamo" agregaba fondos pero no volvía a operar → el préstamo parecía
+			// roto y solo cobraba su costo. Ver resumePendingInjection.
+			session.Mu.Lock()
+			session.PendingInjection = &PendingInjection{Exchange: exchange, Spread: targetSpread, Liquidity: liquidezRestante}
+			session.Mu.Unlock()
 			break
 		}
 
@@ -1216,5 +1247,31 @@ func (e *HFTEngine) runDemoInjection(session *ClientSession, exchange string, ta
 		time.Sleep(DemoOrderLatency)
 	}
 
-	sendLog(session, "✅ [DEMO] Order book consumido. Inyección completada.")
+	// Solo declaramos "completada" en la salida NATURAL del loop (liquidity==0).
+	// Los demás cortes (sin fondos, reequilibrio, spread insuficiente, circuit
+	// breaker) ya emiten su propio log; antes este mensaje verde salía SIEMPRE, y
+	// aparecía "Inyección completada" al mismo tiempo que el diálogo de fondos
+	// insuficientes — feedback contradictorio.
+	if liquidity <= 0 {
+		sendLog(session, "✅ [DEMO] Order book consumido. Inyección completada.")
+	}
+}
+
+// resumePendingInjection reanuda una inyección del simulador que se pausó por
+// falta de fondos, una vez que la sesión consiguió liquidez (crédito manual o fin
+// del reequilibrio). Toma-y-limpia PendingInjection de forma atómica, así que si
+// crédito y reequilibrio compitieran, solo uno reanuda (nunca doble ejecución).
+// Sin esto, "Pedir préstamo" / "Esperar reequilibrio" añadían fondos pero no
+// volvían a operar la oportunidad pendiente — el fuerte de Arus (no perder
+// oportunidades) quedaba roto en el camino manual.
+func (e *HFTEngine) resumePendingInjection(session *ClientSession) {
+	session.Mu.Lock()
+	pending := session.PendingInjection
+	session.PendingInjection = nil
+	session.Mu.Unlock()
+	if pending == nil {
+		return
+	}
+	sendLog(session, fmt.Sprintf("▶️ [DEMO] Reanudando la oportunidad pendiente con los fondos nuevos: %s · %.4f BTC restantes.", pending.Exchange, pending.Liquidity))
+	e.runDemoInjection(session, pending.Exchange, pending.Spread, pending.Liquidity)
 }

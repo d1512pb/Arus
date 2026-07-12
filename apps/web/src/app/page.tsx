@@ -196,7 +196,10 @@ function InsufficientFundsModal({
           )}
           <div className="flex justify-between border-t border-gray-200 dark:border-gray-800 pt-2 mt-2">
             <span className="text-gray-900 dark:text-gray-100 font-bold">Te quedaría</span>
-            <span className={`font-black ${isProfitable ? "text-emerald-500" : "text-red-500"}`}>
+            {/* El color sigue el SIGNO del neto mostrado (ganancia − costo), no el
+                umbral de riesgo: un neto positivo pintado en rojo se contradecía con
+                el propio número. El umbral vive en su fila ámbar y en el botón. */}
+            <span className={`font-black ${profitPotential - creditCost >= 0 ? "text-emerald-500" : "text-red-500"}`}>
               ${(profitPotential - creditCost).toFixed(2)}
             </span>
           </div>
@@ -492,6 +495,16 @@ export default function Home() {
     return venues.length > 0 ? venues : ["Binance", "Bitso"];
   }, [state.graph]);
 
+  // Venues con capital prestado mientras un préstamo está activo: el radar los
+  // resalta con un anillo azul. El wire mantiene el borrowed por par clásico.
+  const borrowedVenues = useMemo(() => {
+    const v: string[] = [];
+    const b = state.borrowed;
+    if (b.binance.usd > 0 || b.binance.btc > 0) v.push("Binance");
+    if (b.bitso.usd > 0 || b.bitso.btc > 0) v.push("Bitso");
+    return v;
+  }, [state.borrowed]);
+
   // Tutorial automático en la primera visita (se recuerda con localStorage).
   useEffect(() => {
     if (sessionReady && typeof window !== "undefined" && !localStorage.getItem("arus_tutorial_seen")) {
@@ -549,6 +562,20 @@ export default function Home() {
   const changeView = (v: AppView) => {
     setView(v);
     if (typeof window !== 'undefined') localStorage.setItem('arus_view', v);
+  };
+
+  // «Borrar todo y volver al inicio»: además de abandonar la sesión (hook),
+  // cierra el estado LOCAL de la página — Home no se desmonta durante el
+  // onboarding, así que un drawer/modal abierto reaparecería sobre la sesión
+  // nueva. La vista vuelve a RADAR: la sesión fresca aterriza como la primera.
+  const handleReset = () => {
+    setStrategyOpen(false);
+    setShowInjectionModal(false);
+    setShowGuideModal(false);
+    setShowTutorial(false);
+    setFundsModal(null);
+    changeView("radar");
+    resetSession();
   };
 
   useEffect(() => {
@@ -879,7 +906,9 @@ export default function Home() {
         </div>
       )}
 
-      {state.loanResults && (
+      {/* En la vista RADAR la ganancia del préstamo la comunica el burst centrado
+          (LoanBurst); este toast queda para la vista DASHBOARD, que no tiene radar. */}
+      {state.loanResults && view === "dashboard" && (
         <div className={`fixed bottom-32 right-8 z-50 transition-all duration-500 transform translate-y-0 opacity-100`}>
           <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-500/20 text-emerald-900 dark:text-emerald-100 px-6 py-5 rounded-xl shadow-md flex items-start gap-4 max-w-md backdrop-blur-md">
             <CheckCircle className="w-6 h-6 text-emerald-600 dark:text-emerald-500 mt-0.5 flex-shrink-0" />
@@ -910,7 +939,7 @@ export default function Home() {
         onProbar={() => setShowInjectionModal(true)}
         onEstrategia={() => setStrategyOpen(true)}
         onTutorial={() => setShowTutorial(true)}
-        onReset={resetSession}
+        onReset={handleReset}
         isDarkMode={isDarkMode}
         onToggleDark={toggleDarkMode}
       />
@@ -935,6 +964,9 @@ export default function Home() {
           enabledVenues={state.params?.enabled_venues}
           enabledAssets={state.params?.enabled_assets}
           onEditFunds={openFundsModal}
+          creditActive={state.creditActiveState?.active}
+          borrowedVenues={borrowedVenues}
+          loanResult={state.loanResults}
         />
       )}
 

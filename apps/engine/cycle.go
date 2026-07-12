@@ -209,6 +209,34 @@ func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btc
 	return plan.NetProfit, true
 }
 
+// notifyCycleUnfundable avisa (con throttle de 15 s para no spamear cada tick)
+// que el radar detectó un ciclo rentable cuyo nodo de inicio está FUERA del par
+// clásico: ni el crédito ni el reequilibrio pueden fondearlo (ambos operan solo
+// sobre Binance/Bitso). Sin este aviso el autopiloto parecía congelado —
+// dibujaba el ciclo verde y no ejecutaba nada. La acción del usuario es depositar
+// fondos en el exchange donde arranca el ciclo.
+func (e *HFTEngine) notifyCycleUnfundable(session *ClientSession, cycle *Cycle) {
+	session.Mu.Lock()
+	if time.Since(session.LastUnfundableLogAt) < 15*time.Second {
+		session.Mu.Unlock()
+		return
+	}
+	session.LastUnfundableLogAt = time.Now()
+	session.Mu.Unlock()
+
+	seen := map[string]bool{}
+	venues := make([]string, 0, 3)
+	for _, edge := range cycle.Edges {
+		for _, v := range []string{edge.From.Venue, edge.To.Venue} {
+			if v != "" && !seen[v] {
+				seen[v] = true
+				venues = append(venues, v)
+			}
+		}
+	}
+	sendLog(session, fmt.Sprintf("💤 [RADAR] Ciclo rentable en %s pero sin fondos donde arranca — el crédito y el reequilibrio solo cubren el par clásico (Binance/Bitso). Deposita fondos en ese exchange para ejecutarlo.", strings.Join(venues, " · ")))
+}
+
 // commitCycle aplica el plan sobre la sesión: re-verifica el saldo de inicio
 // bajo el lock (hard block — el mundo pudo cambiar desde la planificación) y
 // mueve todas las piernas de una vez. Devuelve false si ya no hay fondos.
@@ -264,7 +292,17 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		// apagado. Si ni con crédito hay plan, se omite sin ruido (como antes).
 		if err == errNoFunds || err == errBelowMargin {
 			if projected, ok := cycleCreditProjection(cycle, balances, p, btcPrice); ok {
+				// El crédito (sobre el par clásico) SÍ volvería viable el ciclo:
+				// misma decisión que el modo clásico — auto-crédito, reequilibrio
+				// o diálogo asistido.
 				e.handleLiquidityShortfall(session, projected)
+			} else {
+				// El crédito y el reequilibrio operan solo sobre el par clásico, así
+				// que no pueden fondear un ciclo cuyo nodo de inicio está fuera (p. ej.
+				// un triangular interno de Kraken). Antes se omitía EN SILENCIO: el
+				// radar seguía pintando el ciclo verde mientras el bot no hacía nada y
+				// el usuario no tenía forma de enterarse. Ahora se avisa (throttled).
+				e.notifyCycleUnfundable(session, cycle)
 			}
 		}
 		return
