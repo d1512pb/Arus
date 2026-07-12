@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Sprout, SlidersHorizontal, Database, AlertTriangle } from 'lucide-react';
+import { ArrowRight, Sprout, SlidersHorizontal, Database, AlertTriangle, Check, ListChecks } from 'lucide-react';
 import { ENGINE_HTTP_URL } from '../lib/config';
 
 // OnboardingModal — la puerta de entrada se adapta a DOS clases de usuario:
@@ -21,7 +21,14 @@ import { ENGINE_HTTP_URL } from '../lib/config';
 export type Allocation = Record<string, number>;
 
 interface OnboardingModalProps {
-  onInit: (usd: number, btc: number, usdAlloc?: Allocation, btcAlloc?: Allocation) => void;
+  onInit: (
+    usd: number,
+    btc: number,
+    usdAlloc?: Allocation,
+    btcAlloc?: Allocation,
+    enabledVenues?: string[],
+    enabledAssets?: string[],
+  ) => void;
   // Rechazo del backend (INIT_REJECTED): se muestra tal cual — el experto
   // merece saber POR QUÉ no arrancó su sesión.
   initError?: string;
@@ -42,6 +49,15 @@ interface StoredPrefs {
   btc?: number | '';
   usdAlloc?: Allocation;
   btcAlloc?: Allocation | null;
+  selectedVenues?: string[];
+  selectedAssets?: string[];
+}
+
+// toggleIn: agrega/quita un elemento de la selección conservando el ORDEN del
+// catálogo (para que los chips y las columnas del radar no salten de sitio).
+function toggleIn(selected: string[], catalog: string[], item: string): string[] {
+  const next = selected.includes(item) ? selected.filter(x => x !== item) : [...selected, item];
+  return catalog.filter(x => next.includes(x));
 }
 
 // Distribución inicial del modo experto: el 50/50 clásico explícito; los venues
@@ -55,12 +71,25 @@ function defaultAlloc(venues: string[]): Allocation {
 const sumOf = (a: Allocation) => Object.values(a).reduce((s, v) => s + (Number.isFinite(v) ? v : 0), 0);
 const sumOk = (a: Allocation) => Math.abs(sumOf(a) - 100) < 0.01 && Object.values(a).every(v => v >= 0);
 
+// Monedas "cash": el medio de intercambio, no un activo a operar. Se mantienen
+// SIEMPRE en el universo (sin efectivo no hay ciclos), así que en la checklist se
+// muestran como base fija; solo las cripto son opt-in.
+const CASH_ASSETS = new Set(['USD', 'USDT', 'USDC', 'DAI', 'BUSD']);
+const isCashAsset = (a: string) => CASH_ASSETS.has(a);
+
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initError }) => {
   const [mode, setMode] = useState<Mode>('guided');
 
   // Catálogo real del motor (+ precio de referencia para derivar BTC).
   const [venues, setVenues] = useState<string[]>(['Binance', 'Bitso']);
+  const [assets, setAssets] = useState<string[]>([]);
   const [btcPrice, setBtcPrice] = useState<number>(0);
+
+  // Checklist del universo: con qué exchanges y monedas quiere operar el usuario.
+  // Vacío hasta que carga el catálogo; por defecto TODO seleccionado. Lo que quede
+  // fuera no se renderiza en el radar y el bot no lo opera (enabled_venues/assets).
+  const [selectedVenues, setSelectedVenues] = useState<string[]>(['Binance', 'Bitso']);
+  const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
 
   // Modo guiado: UN número.
   const [total, setTotal] = useState<number | ''>('');
@@ -102,6 +131,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
             }
             return next;
           });
+          // Selección de exchanges: prefs guardadas (filtradas al catálogo real)
+          // o TODO por defecto.
+          const storedV = stored?.selectedVenues?.filter(v => names.includes(v));
+          setSelectedVenues(storedV && storedV.length > 0 ? names.filter(v => storedV.includes(v)) : names);
+        }
+        const catalogAssets: string[] = Array.isArray(cfg.assets) ? cfg.assets : [];
+        if (catalogAssets.length > 0) {
+          setAssets(catalogAssets);
+          const storedA = stored?.selectedAssets?.filter(a => catalogAssets.includes(a));
+          setSelectedAssets(storedA && storedA.length > 0 ? catalogAssets.filter(a => storedA.includes(a)) : catalogAssets);
         }
         if (cfg.reference?.btc_price_usd > 0) setBtcPrice(cfg.reference.btc_price_usd);
       })
@@ -114,19 +153,32 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   const guidedBtc = btcPrice > 0 ? guidedUsd / btcPrice : 0;
   const guidedOk = totalNum >= 100 && guidedBtc > 0;
 
+  // Universo elegido en la checklist: al menos un exchange, y al menos una moneda
+  // CRIPTO a operar cuando el catálogo ya cargó (el cash no cuenta: es la base). Si
+  // el motor no respondió, assets está vacío y no bloqueamos (no arrancaría igual).
+  const universeOk =
+    selectedVenues.length >= 1 &&
+    (assets.length === 0 || selectedAssets.some(a => !isCashAsset(a)));
+
   // ── Validación del modo experto ───────────────────────────────────────────
   const usdNum = Number(usd) || 0;
   const btcNum = Number(btc) || 0;
   const effectiveBtcAlloc = btcAlloc ?? usdAlloc;
-  const usdSumOk = sumOk(usdAlloc);
-  const btcSumOk = sumOk(effectiveBtcAlloc);
-  const expertOk = usdNum > 0 && btcNum > 0 && usdSumOk && btcSumOk;
+  // El reparto se acota a los exchanges SELECCIONADOS: el capital solo va a los
+  // venues activos, y su suma (100 %) se valida sobre ese subconjunto.
+  const pickSelected = (a: Allocation): Allocation =>
+    Object.fromEntries(selectedVenues.map(v => [v, a[v] ?? 0])) as Allocation;
+  const usdAllocSel = pickSelected(usdAlloc);
+  const btcAllocSel = pickSelected(effectiveBtcAlloc);
+  const usdSumOk = sumOk(usdAllocSel);
+  const btcSumOk = sumOk(btcAllocSel);
+  const expertOk = usdNum > 0 && btcNum > 0 && usdSumOk && btcSumOk && universeOk;
 
-  const canSubmit = mode === 'guided' ? guidedOk : expertOk;
+  const canSubmit = (mode === 'guided' ? guidedOk : expertOk) && universeOk;
 
   const persistPrefs = () => {
     try {
-      const prefs: StoredPrefs = { mode, total, usd, btc, usdAlloc, btcAlloc };
+      const prefs: StoredPrefs = { mode, total, usd, btc, usdAlloc, btcAlloc, selectedVenues, selectedAssets };
       localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
     } catch { /* almacenamiento lleno/bloqueado: no es crítico */ }
   };
@@ -135,11 +187,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
     e.preventDefault();
     if (!canSubmit) return;
     persistPrefs();
+    // Universo para el motor: se envía la lista solo cuando es un SUBCONJUNTO del
+    // catálogo (undefined = todo, para no podar de más). Vacío nunca llega aquí:
+    // universeOk exige ≥1 de cada.
+    const univVenues = selectedVenues.length < venues.length ? selectedVenues : undefined;
+    const univAssets = assets.length > 0 && selectedAssets.length < assets.length ? selectedAssets : undefined;
     if (mode === 'guided') {
-      // Guiado = el 50/50 clásico del motor (sin distribución explícita).
-      onInit(guidedUsd, guidedBtc);
+      // Guiado = el 50/50 clásico del motor (sin distribución explícita) + universo.
+      onInit(guidedUsd, guidedBtc, undefined, undefined, univVenues, univAssets);
     } else {
-      onInit(usdNum, btcNum, usdAlloc, btcAlloc ?? undefined);
+      // Experto: el reparto va acotado a los exchanges seleccionados.
+      onInit(usdNum, btcNum, usdAllocSel, btcAlloc ? btcAllocSel : undefined, univVenues, univAssets);
     }
   };
 
@@ -150,28 +208,33 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   const inputCls = 'w-full bg-gray-50 dark:bg-gray-950 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-gray-100 p-3 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono font-bold shadow-sm';
   const labelCls = 'text-[10px] font-bold tracking-widest text-gray-500 dark:text-gray-400 uppercase';
 
-  const allocEditor = (alloc: Allocation, onEdit: (venue: string, value: string) => void, ok: boolean) => (
-    <div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-2">
-        {venues.map(v => (
-          <div key={v}>
-            <label className={labelCls}>{v} (%)</label>
-            {/* step="any": la validación nativa ancla step a min y bloquearía
-                porcentajes legítimos (33.333); la suma exacta la valida sumOk. */}
-            <input
-              type="number" min="0" max="100" step="any"
-              value={alloc[v] ?? 0}
-              onChange={e => onEdit(v, e.target.value)}
-              className={`${inputCls} mt-1 p-2.5 text-sm`}
-            />
-          </div>
-        ))}
+  // allocEditor solo muestra los exchanges SELECCIONADOS en la checklist: el
+  // capital se reparte entre los venues activos y su suma se valida sobre ellos.
+  const allocEditor = (alloc: Allocation, onEdit: (venue: string, value: string) => void, ok: boolean) => {
+    const shown = pickSelected(alloc);
+    return (
+      <div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-2">
+          {selectedVenues.map(v => (
+            <div key={v}>
+              <label className={labelCls}>{v} (%)</label>
+              {/* step="any": la validación nativa ancla step a min y bloquearía
+                  porcentajes legítimos (33.333); la suma exacta la valida sumOk. */}
+              <input
+                type="number" min="0" max="100" step="any"
+                value={alloc[v] ?? 0}
+                onChange={e => onEdit(v, e.target.value)}
+                className={`${inputCls} mt-1 p-2.5 text-sm`}
+              />
+            </div>
+          ))}
+        </div>
+        <p className={`text-[10px] mt-1.5 font-bold ${ok ? 'text-emerald-600' : 'text-red-500'}`}>
+          Suma: {sumOf(shown).toFixed(2)} % {ok ? '✓' : '— debe sumar exactamente 100'}
+        </p>
       </div>
-      <p className={`text-[10px] mt-1.5 font-bold ${ok ? 'text-emerald-600' : 'text-red-500'}`}>
-        Suma: {sumOf(alloc).toFixed(2)} % {ok ? '✓' : '— debe sumar exactamente 100'}
-      </p>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-[200] overflow-y-auto bg-gray-900/80 backdrop-blur-md flex items-center justify-center p-4 font-mono">
@@ -313,6 +376,82 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
               </p>
             </>
           )}
+
+          {/* Checklist del universo: con qué exchanges y monedas quiere operar el
+              usuario. Solo lo marcado se dibuja en el radar y lo opera el bot. */}
+          <div className="border-t border-gray-100 dark:border-gray-800 pt-5">
+            <div className="flex items-center gap-2 mb-3">
+              <ListChecks className="w-4 h-4 text-emerald-600" />
+              <p className={labelCls}>¿Con qué exchanges y monedas quieres operar?</p>
+            </div>
+
+            <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 dark:text-gray-500 mb-2">Exchanges</p>
+            <div className="flex flex-wrap gap-2">
+              {venues.map(v => {
+                const on = selectedVenues.includes(v);
+                return (
+                  <button
+                    key={v} type="button" aria-pressed={on}
+                    onClick={() => setSelectedVenues(prev => toggleIn(prev, venues, v))}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${
+                      on
+                        ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                        : 'border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500 hover:border-gray-300'
+                    }`}
+                  >
+                    {on ? <Check className="w-3 h-3" /> : <span className="w-3 h-3 rounded-sm border border-current opacity-50" />}
+                    {v}
+                  </button>
+                );
+              })}
+            </div>
+
+            {assets.length > 0 && (
+              <>
+                <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 dark:text-gray-500 mt-3 mb-2">Monedas</p>
+                <div className="flex flex-wrap gap-2">
+                  {assets.map(a => {
+                    // Cash = base fija (siempre activa, no toggleable): sin efectivo
+                    // el bot no puede formar un ciclo. Solo las cripto son opt-in.
+                    if (isCashAsset(a)) {
+                      return (
+                        <span
+                          key={a}
+                          title="Moneda base (efectivo): siempre activa — el bot la necesita para operar"
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 text-gray-400 dark:text-gray-500"
+                        >
+                          {a} <span className="text-[8px] uppercase tracking-widest opacity-70">base</span>
+                        </span>
+                      );
+                    }
+                    const on = selectedAssets.includes(a);
+                    return (
+                      <button
+                        key={a} type="button" aria-pressed={on}
+                        onClick={() => setSelectedAssets(prev => toggleIn(prev, assets, a))}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${
+                          on
+                            ? 'border-blue-400 bg-blue-50 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                            : 'border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500 hover:border-gray-300'
+                        }`}
+                      >
+                        {on ? <Check className="w-3 h-3" /> : <span className="w-3 h-3 rounded-sm border border-current opacity-50" />}
+                        {a}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {!universeOk ? (
+              <p className="text-[10px] text-red-500 font-bold mt-2.5">Selecciona al menos un exchange y una moneda.</p>
+            ) : (
+              <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-2.5 leading-relaxed">
+                Solo se dibujan en el radar y se operan los exchanges y monedas marcados. Puedes cambiarlo luego en <strong>Estrategia</strong>.
+              </p>
+            )}
+          </div>
 
           {initError && (
             <div className="flex items-start gap-2 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-lg p-3">

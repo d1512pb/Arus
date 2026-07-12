@@ -199,6 +199,10 @@ export function useArusEngine() {
   const wsRef = useRef<WebSocket | null>(null);
   const configRef = useRef<{ usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation } | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Universo elegido en la checklist del onboarding (exchanges/monedas activos).
+  // Se aplica vía set_params en cuanto la sesión existe (el primer state_update),
+  // porque init_session no lleva el universo. null = sin poda (todo el catálogo).
+  const pendingUniverseRef = useRef<{ enabledVenues?: string[]; enabledAssets?: string[] } | null>(null);
 
   // initMsg arma el payload de init_session con la distribución (si la hay) —
   // lo comparten el arranque normal y la re-inicialización tras reconexión.
@@ -251,8 +255,14 @@ export function useArusEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const initSession = useCallback((usd: number, btc: number, usdAlloc?: Allocation, btcAlloc?: Allocation) => {
+  const initSession = useCallback((usd: number, btc: number, usdAlloc?: Allocation, btcAlloc?: Allocation, enabledVenues?: string[], enabledAssets?: string[]) => {
     configRef.current = { usd, btc, usdAlloc, btcAlloc };
+    // La checklist del onboarding poda el universo: se guarda para aplicarlo en
+    // cuanto la sesión exista (init_session solo lleva capital/distribución).
+    pendingUniverseRef.current =
+      (enabledVenues && enabledVenues.length > 0) || (enabledAssets && enabledAssets.length > 0)
+        ? { enabledVenues, enabledAssets }
+        : null;
     setState(prev => ({ ...prev, usdAllocation: usdAlloc, initError: undefined }));
     const msg = initMsg(configRef.current);
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -383,6 +393,20 @@ export function useArusEngine() {
       }
       setResuming(false);
       setSessionReady(true);
+      // Aplica el universo elegido en la checklist del onboarding, ahora que la
+      // sesión existe: set_params lo persiste y el radar se recalcula con él. Solo
+      // en el init (no en resume: pendingUniverseRef es null al reanudar, la
+      // sesión ya trae su universo persistido).
+      if (pendingUniverseRef.current && data.params) {
+        const u = pendingUniverseRef.current;
+        pendingUniverseRef.current = null;
+        const merged: TradingParams = {
+          ...(data.params as TradingParams),
+          enabled_venues: u.enabledVenues,
+          enabled_assets: u.enabledAssets,
+        };
+        wsRef.current?.send(JSON.stringify({ action: "set_params", params: merged }));
+      }
       setState(prev => ({
         ...prev,
         initError: undefined,

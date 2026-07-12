@@ -92,6 +92,10 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   const nodeRefs = useRef(new Map<string, SVGGElement>());
   const pulseRefs = useRef(new Map<string, SVGCircleElement>());
   const particlesRef = useRef<SVGGElement>(null);
+  // Grupo de "luces de trade": la luz verde que viaja del venue de compra al de
+  // venta en cada ejecución. Imperativo (getPointAtLength sobre el path real).
+  const flareRef = useRef<SVGGElement>(null);
+  const flareHolders = useRef<{ raf: number }[]>([]);
 
   const [tip, setTip] = useState<TipState | null>(null);
   const [selNode, setSelNode] = useState<string | null>(null);
@@ -110,21 +114,40 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     []
   );
 
-  // ── Geometría (solo cambia si cambia la TOPOLOGÍA, no con cada precio) ──
-  const topoKey = graph ? graph.nodes.map((n) => n.id).join(",") : "";
+  // ── Grafo DINÁMICO: solo se renderiza el universo del usuario ──────────────
+  // Antes los venues/monedas fuera del universo se ATENUABAN; ahora se OCULTAN
+  // (pedido del reporte de pruebas): un venue deseleccionado no ocupa columna y
+  // el lienzo colapsa a lo elegido. El snapshot del motor trae el catálogo
+  // completo, así que la poda es aquí. Fallback defensivo: si el filtro dejara
+  // todo fuera, se muestra el grafo completo (nunca un radar en blanco).
+  const shownNodes = useMemo(() => {
+    if (!graph) return [];
+    const kept = graph.nodes.filter((n) => nodeAllowed(n.venue, n.asset));
+    return kept.length > 0 ? kept : graph.nodes;
+  }, [graph, nodeAllowed]);
+
+  const shownNodeIds = useMemo(() => new Set(shownNodes.map((n) => n.id)), [shownNodes]);
+
+  const shownEdges = useMemo(
+    () => (graph ? graph.edges.filter((e) => shownNodeIds.has(e.from) && shownNodeIds.has(e.to)) : []),
+    [graph, shownNodeIds]
+  );
+
+  // ── Geometría (solo cambia si cambia la TOPOLOGÍA visible, no con cada precio) ──
+  const topoKey = shownNodes.map((n) => n.id).join(",");
   const layout = useMemo(() => {
-    if (!graph) return null;
-    const nodes: LayoutNode[] = graph.nodes.map((n) => ({
+    if (!graph || shownNodes.length === 0) return null;
+    const nodes: LayoutNode[] = shownNodes.map((n) => ({
       id: n.id, venue: n.venue, asset: n.asset, kind: n.kind,
     }));
     return layoutRadar(nodes);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topoKey]);
 
-  const edgesKey = graph ? graph.edges.map((e) => pairKey(e.from, e.to)).sort().join(",") : "";
+  const edgesKey = shownEdges.map((e) => pairKey(e.from, e.to)).sort().join(",");
   const routed = useMemo(() => {
     if (!graph || !layout) return [];
-    const edges: LayoutEdge[] = graph.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind }));
+    const edges: LayoutEdge[] = shownEdges.map((e) => ({ from: e.from, to: e.to, kind: e.kind }));
     return routeEdges(edges, layout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, edgesKey]);
@@ -273,6 +296,80 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
     setTimeout(() => setFloats((f) => f.filter((p) => p.id !== id)), 2400);
   }, [trades, graph, cyclePath, reduced]);
 
+  // ── Luz verde de trade: en cada compra/venta una luz recorre la arista que une
+  //    el venue de COMPRA con el de VENTA (el dinero fluyendo entre casas). Corre
+  //    sobre el grafo dinámico: busca la arista entre ambos venues (prefiere el
+  //    swap del mismo activo, BTC primero) en los paths REALES renderizados.
+  //    Complementa las partículas del ciclo, que solo aparecen con ciclo viable.
+  const prevFlareRef = useRef<string | null>(null);
+  useEffect(() => {
+    const t = trades[0];
+    const g = flareRef.current;
+    if (!t || !g || reduced) return;
+    const sig = `${t.timestamp}|${t.net_profit_usd}`;
+    if (prevFlareRef.current === sig) return;
+    const isFirst = prevFlareRef.current === null;
+    prevFlareRef.current = sig;
+    if (isFirst) return; // no re-animar el histórico al montar
+    const buyV = t.exchange_buy, sellV = t.exchange_sell;
+    if (!buyV || !sellV || buyV === sellV) return;
+
+    // Arista entre los dos venues: el swap de inventario del mismo activo (BTC
+    // primero) es el que representa el arbitraje; si no, cualquier par que exista.
+    let path: SVGPathElement | undefined;
+    let reversed = false;
+    for (const asset of ["BTC", "ETH", "SOL", "USDT", "USD"]) {
+      const from = `${asset}@${buyV}`;
+      const k = pairKey(from, `${asset}@${sellV}`);
+      const cand = pathRefs.current.get(k);
+      if (cand) { path = cand; reversed = k.split("|")[0] !== from; break; }
+    }
+    if (!path) return;
+    const len = path.getTotalLength();
+    if (len <= 0) return;
+
+    const p = path;
+    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    dot.setAttribute("r", "6");
+    dot.style.fill = ACCENT;
+    dot.style.filter = `drop-shadow(0 0 9px ${ACCENT})`;
+    dot.style.pointerEvents = "none";
+    g.appendChild(dot);
+
+    const holder = { raf: 0 };
+    flareHolders.current.push(holder);
+    const t0 = performance.now();
+    const DUR = 1300;
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / DUR);
+      const eased = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; // easeInOutQuad
+      const d = reversed ? len * (1 - eased) : len * eased;
+      const pt = p.getPointAtLength(d);
+      dot.setAttribute("cx", String(pt.x));
+      dot.setAttribute("cy", String(pt.y));
+      dot.style.opacity = String(k < 0.12 ? k / 0.12 : k > 0.85 ? (1 - k) / 0.15 : 1);
+      if (k < 1) {
+        holder.raf = requestAnimationFrame(step);
+      } else {
+        dot.remove();
+        flareHolders.current = flareHolders.current.filter((h) => h !== holder);
+      }
+    };
+    holder.raf = requestAnimationFrame(step);
+    // Sin cleanup por-trade: las luces se solapan y se autolimpian; el desmontaje
+    // las cancela abajo.
+  }, [trades, reduced]);
+
+  // Limpieza al desmontar: cancela cualquier luz en vuelo y vacía el grupo.
+  useEffect(() => {
+    const g = flareRef.current;
+    return () => {
+      flareHolders.current.forEach((h) => cancelAnimationFrame(h.raf));
+      flareHolders.current = [];
+      if (g) while (g.firstChild) g.removeChild(g.firstChild);
+    };
+  }, []);
+
   // ── Ganancia por préstamo: burst centrado al vencer el crédito ───────────
   // loanResult cambia de referencia en cada CREDIT_EXPIRED (null entre préstamos);
   // el ref evita re-disparar por re-renders con el mismo resultado.
@@ -359,7 +456,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
   }
 
   const { w, h, colW, offsetX, venues, pos } = layout;
-  const sel = selNode ? graph.nodes.find((n) => n.id === selNode) : null;
+  const sel = selNode ? shownNodes.find((n) => n.id === selNode) : null;
   const selBooks = sel
     ? [...books.entries()].filter(([, b]) => {
         const baseId = `${b.base}@${b.venue}`, quoteId = `${b.quote}@${b.venue}`;
@@ -380,10 +477,11 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
             role="img"
             aria-label="Radar omnidireccional: tu dinero en cada exchange y por dónde puede fluir"
           >
-            {/* Cajas por venue (atenuadas si el usuario las podó de su universo) */}
+            {/* Cajas por venue — solo los venues del universo del usuario (el
+                layout ya se derivó de shownNodes, así que estas son las columnas
+                elegidas; un venue deseleccionado no aparece). */}
             {venues.map((v, i) => (
-              <g key={v} opacity={!venueAllowed(v) ? 0.16 : staleVenues.has(v) ? 0.75 : 1}
-                 style={{ transition: "opacity .4s" }}>
+              <g key={v} opacity={staleVenues.has(v) ? 0.75 : 1} style={{ transition: "opacity .4s" }}>
                 <rect
                   x={offsetX + colW * i + 18} y={52} width={colW - 36} height={h - 108} rx={16}
                   style={{ fill: "var(--radar-panel)", stroke: "var(--radar-border)" }} strokeWidth={1}
@@ -392,12 +490,7 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                   className="text-[12px] font-black tracking-[0.3em]" style={{ fill: INK2 }}>
                   {v.toUpperCase()}
                 </text>
-                {!venueAllowed(v) ? (
-                  <text x={offsetX + colW * i + colW / 2} y={100} textAnchor="middle"
-                    className="text-[9px] font-bold" style={{ fill: INK3 }}>
-                    fuera de tu universo
-                  </text>
-                ) : staleVenues.has(v) && (
+                {staleVenues.has(v) && (
                   <text x={offsetX + colW * i + colW / 2} y={100} textAnchor="middle"
                     className="text-[9px] font-bold" style={{ fill: DANGER }}>
                     ❄ feed congelado
@@ -440,14 +533,16 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
 
             {/* Partículas del ciclo (imperativas) */}
             <g ref={particlesRef} />
+            {/* Luces verdes de trade: viajan del venue de compra al de venta */}
+            <g ref={flareRef} />
 
-            {/* Nodos: activo + saldo (+≈USD). El detalle espera al click. */}
-            {graph.nodes.map((n) => {
+            {/* Nodos: activo + saldo (+≈USD). Solo los del universo (shownNodes);
+                el detalle espera al click. */}
+            {shownNodes.map((n) => {
               const p = pos.get(n.id);
               if (!p) return null;
               const inCycle = cycleNodes.has(n.id);
               const seld = selNode === n.id;
-              const allowed = nodeAllowed(n.venue, n.asset);
               return (
                 <g
                   key={n.id}
@@ -455,7 +550,6 @@ export const RadarView = memo(function RadarView({ graph, trades, spike, enabled
                   tabIndex={0}
                   role="button"
                   aria-label={`${n.asset} en ${n.venue}: ${fmtBalance(n.kind, n.asset, n.balance)}`}
-                  opacity={allowed ? 1 : 0.16}
                   style={{ cursor: "pointer", outline: "none", transition: "opacity .4s" }}
                   onClick={(ev) => openNodeCard(n.id, ev)}
                   onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openNodeCard(n.id, ev); } }}
