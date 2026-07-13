@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,49 +18,318 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// wsWriteMutex is used to avoid concurrent writes to the same websocket connection
-var wsWriteMutex = make(map[*websocket.Conn]*time.Time) // mock map, better to lock inside session
-// actually we can just add a writeMutex to ClientSession if needed, but for simplicity let's use a global map or just not lock. 
-// Standard practice for Gorilla is a write channel or mutex. We will just use s.Mu for simplicity when writing, but it's dangerous. Let's not lock writes for now to avoid deadlocks.
-
-func initSession(s *ClientSession, usd, btc float64) {
+// initSession inicializa (o resetea) los fondos de una sesión. usdAlloc/btcAlloc
+// son la distribución por venue elegida por el usuario (porcentajes ya validados
+// por validAllocation, o nil = reparto clásico 50/50 entre el par).
+// assetInv son cantidades TOTALES de cripto mid (ETH/SOL…) a fondear además del
+// BTC — se reparte con btcAlloc (o usdAlloc) solo en venues que cotizan ese activo.
+func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc, assetInv map[string]float64) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
-	half := usd / 2.0
-	halfBTC := btc / 2.0
-
-	s.Wallets = map[string]*Wallet{
-		"Binance": {USD: half, BTC: halfBTC},
-		"Bitso":   {USD: half, BTC: halfBTC},
+	// Saldos multi-activo creados desde el registro de venues, todos en cero.
+	s.Wallets = make(Balances, len(Venues))
+	for _, v := range Venues {
+		s.Wallets.Set(v.Name, v.QuoteAsset, 0)
+		s.Wallets.Set(v.Name, v.BaseAsset, 0)
 	}
 
-	btcPrice := 60000.0
-	currentMarket.mu.Lock()
-	if currentMarket.BinanceAsk > 0 {
-		btcPrice = currentMarket.BinanceAsk
+	cryptoAlloc := btcAlloc
+	if cryptoAlloc == nil {
+		cryptoAlloc = usdAlloc
 	}
-	currentMarket.mu.Unlock()
 
-	s.TotalWealth = usd + (btc * btcPrice)
+	if usdAlloc != nil {
+		// Distribución del usuario (modo experto / guiado con checklist): cada
+		// venue recibe su porcentaje del capital — cash al quote, BTC a su base.
+		for venue, pct := range usdAlloc {
+			if v, ok := venueByName(venue); ok {
+				s.Wallets.Add(v.Name, v.QuoteAsset, usd*pct/100)
+			}
+		}
+		if cryptoAlloc != nil {
+			for venue, pct := range cryptoAlloc {
+				if v, ok := venueByName(venue); ok {
+					s.Wallets.Add(v.Name, v.BaseAsset, btc*pct/100)
+				}
+			}
+		}
+	} else {
+		// Reparto clásico: 50/50 SOLO entre el par (repartir usd/2 a cada venue
+		// del registro inflaría el capital al agregar un tercero). Los demás
+		// venues nacen en cero y se fondean por depósitos o por el autopiloto.
+		for _, v := range classicVenues() {
+			s.Wallets.Set(v.Name, v.QuoteAsset, usd/2.0)
+			s.Wallets.Set(v.Name, v.BaseAsset, btc/2.0)
+		}
+	}
+
+	// Cripto mid (ETH/SOL…): el checklist del universo las pide fondeadas, no
+	// solo visibles. Se reparte el inventario total entre venues que cotizan
+	// ese base (Bitso no tiene ETH → no recibe ETH; el % se renormaliza).
+	cleanedInv := sanitizeAssetInventory(assetInv)
+	for asset, qty := range cleanedInv {
+		distributeCryptoAsset(s.Wallets, asset, qty, cryptoAlloc)
+	}
+
+	s.UsdAlloc = usdAlloc
+	s.BtcAlloc = btcAlloc
+	s.AssetInventory = cleanedInv
+
+	btcPrice := assetPriceUSD("BTC")
+	wealth := usd + (btc * btcPrice)
+	for asset, qty := range cleanedInv {
+		wealth += qty * assetPriceUSD(asset)
+	}
+
+	s.TotalWealth = wealth
 	s.InitialWealth = s.TotalWealth // base del PnL = patrimonio al iniciar
 	s.TotalNetProfit = 0
 	s.Credit = CreditState{}
+	// NOTA: los parámetros de estrategia NO se tocan aquí: un reset de fondos no
+	// borra la configuración de riesgo que el usuario eligió (set_params).
 	s.InitialUSD = usd
 	s.InitialBTC = btc
 	s.IsReplenishing = false
 	s.ReplenishExpiresAt = time.Time{}
 	s.InsufficientFundsPending = false
+	// Un reset/init limpia cualquier inyección pendiente: la oportunidad vieja no
+	// debe reanudarse sobre una sesión recién reinicializada.
+	s.PendingInjection = nil
+}
+
+// venuesHoldingAsset: casas que cotizan `asset` como base (tienen libro).
+func venuesHoldingAsset(asset string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, in := range Instruments {
+		if in.Base != asset || seen[in.Venue] {
+			continue
+		}
+		seen[in.Venue] = true
+		out = append(out, in.Venue)
+	}
+	for _, v := range Venues {
+		if v.BaseAsset == asset && !seen[v.Name] {
+			out = append(out, v.Name)
+		}
+	}
+	return out
+}
+
+// distributeCryptoAsset reparte `qty` de un activo entre los venues del alloc
+// que realmente lo cotizan. Si el alloc es nil, partes iguales entre holders.
+func distributeCryptoAsset(w Balances, asset string, qty float64, alloc map[string]float64) {
+	if w == nil || qty <= 0 || asset == "" || isCashAsset(Asset(asset)) {
+		return
+	}
+	holders := venuesHoldingAsset(asset)
+	if len(holders) == 0 {
+		return
+	}
+	weights := make(map[string]float64, len(holders))
+	sum := 0.0
+	if alloc != nil {
+		for _, v := range holders {
+			if pct := alloc[v]; pct > 0 {
+				weights[v] = pct
+				sum += pct
+			}
+		}
+	}
+	if sum <= 0 {
+		// Sin peso usable (alloc nil, o ninguna casa del alloc cotiza el activo):
+		// partes iguales entre holders.
+		eq := 100.0 / float64(len(holders))
+		for _, v := range holders {
+			weights[v] = eq
+		}
+		sum = 100
+	}
+	for v, pct := range weights {
+		w.Add(v, asset, qty*(pct/sum))
+	}
+}
+
+// sanitizeAssetInventory acepta solo criptos mid conocidos con cantidad finita > 0.
+// BTC y cash se ignoran (van por initial_btc / initial_usd).
+func sanitizeAssetInventory(inv map[string]float64) map[string]float64 {
+	if len(inv) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(inv))
+	for asset, qty := range inv {
+		if asset == "BTC" || isCashAsset(Asset(asset)) || !isKnownAsset(asset) {
+			continue
+		}
+		if math.IsNaN(qty) || math.IsInf(qty, 0) || qty <= 0 || qty > MaxInitialBTC {
+			continue
+		}
+		out[asset] = qty
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// --- Validación de entradas del cliente (Hallazgo #5) -----------------------------
+// El frontend ya valida, pero el backend NUNCA debe confiar en el cliente: un mensaje
+// malicioso o corrupto (negativos, NaN/Inf, liquidez gigante) no debe corromper el
+// estado ni colgar el motor con un bucle de chunks casi infinito.
+
+func isFinitePositive(x float64) bool {
+	return !math.IsNaN(x) && !math.IsInf(x, 0) && x > 0
+}
+
+// validInitFunds acepta capital inicial finito: cash > 0 y cripto >= 0 (el BTC
+// puede ser 0 si el inventario mid trae ETH/SOL; se valida en el handler).
+func validInitFunds(usd, btc float64) bool {
+	return isFinitePositive(usd) && usd <= MaxInitialUSD &&
+		!math.IsNaN(btc) && !math.IsInf(btc, 0) && btc >= 0 && btc <= MaxInitialBTC
+}
+
+// validAllocation valida una distribución de capital por venue (modo experto del
+// onboarding): solo venues registrados, porcentajes finitos no negativos y suma
+// exacta de 100 (tolerancia de redondeo flotante). El backend NO corrige una
+// distribución inválida — la rechaza: los números de un experto se respetan al
+// centavo o no se aceptan.
+func validAllocation(alloc map[string]float64) bool {
+	if len(alloc) == 0 {
+		return false
+	}
+	sum := 0.0
+	for venue, pct := range alloc {
+		if !isKnownVenue(venue) || math.IsNaN(pct) || math.IsInf(pct, 0) || pct < 0 {
+			return false
+		}
+		sum += pct
+	}
+	return math.Abs(sum-100) < 0.01
+}
+
+// sanitizeDemoInject valida y CLAMPEA los parámetros de una inyección del simulador.
+// Devuelve ok=false si son irrecuperables (exchange desconocido, NaN/Inf, liquidez ≤ 0).
+func sanitizeDemoInject(exchange string, spread, liquidity float64) (string, float64, float64, bool) {
+	if !isKnownVenue(exchange) {
+		return "", 0, 0, false
+	}
+	if math.IsNaN(spread) || math.IsInf(spread, 0) || math.IsNaN(liquidity) || math.IsInf(liquidity, 0) {
+		return "", 0, 0, false
+	}
+	if liquidity <= 0 {
+		return "", 0, 0, false
+	}
+	if liquidity > MaxDemoLiquidity {
+		liquidity = MaxDemoLiquidity // clamp: nunca un order book absurdo que cuelgue el motor
+	}
+	if spread > MaxDemoSpreadUSD {
+		spread = MaxDemoSpreadUSD
+	} else if spread < -MaxDemoSpreadUSD {
+		spread = -MaxDemoSpreadUSD
+	}
+	return exchange, spread, liquidity, true
+}
+
+// clampFloat acota v a [lo, hi]; NaN/Inf caen al valor de respaldo fallback.
+func clampFloat(v, lo, hi, fallback float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fallback
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// sanitizeTradingParams construye los parámetros APLICABLES a partir de lo que pidió
+// el cliente: cada campo se clampea a su rango sano (models.go) y los fees solo se
+// aceptan para venues registrados (claves desconocidas se descartan; venues ausentes
+// reciben su fee por defecto). El resultado es siempre un snapshot completo y válido:
+// no existe forma de dejar una sesión con parámetros corruptos.
+func sanitizeTradingParams(requested TradingParameters) TradingParameters {
+	defaults := DefaultTradingParameters()
+
+	fees := make(map[string]float64, len(Venues))
+	for _, v := range Venues {
+		fee := v.DefaultTakerFee
+		if requested.TakerFees != nil {
+			if f, ok := requested.TakerFees[v.Name]; ok {
+				fee = clampFloat(f, MinTakerFee, MaxTakerFee, v.DefaultTakerFee)
+			}
+		}
+		fees[v.Name] = fee
+	}
+
+	// Universo (hito 3): solo venues y activos REGISTRADOS; duplicados fuera.
+	// Si tras el filtrado queda vacío, se interpreta como "todos" (nil) — el
+	// usuario no puede dejarse a sí mismo sin mercado por accidente.
+	var venuesU []string
+	seenV := map[string]bool{}
+	for _, v := range requested.EnabledVenues {
+		if isKnownVenue(v) && !seenV[v] {
+			seenV[v] = true
+			venuesU = append(venuesU, v)
+		}
+	}
+	var assetsU []string
+	seenA := map[string]bool{}
+	for _, a := range requested.EnabledAssets {
+		if isKnownAsset(a) && !seenA[a] {
+			seenA[a] = true
+			assetsU = append(assetsU, a)
+		}
+	}
+
+	applied := TradingParameters{
+		TakerFees:          fees,
+		MinNetProfitUSD:    clampFloat(requested.MinNetProfitUSD, MinNetProfitFloor, MaxNetProfitCeil, defaults.MinNetProfitUSD),
+		MaxOrderSizeBTC:    clampFloat(requested.MaxOrderSizeBTC, MinOrderSizeBTC, MaxOrderSizeCapBTC, defaults.MaxOrderSizeBTC),
+		SlippageRate:       clampFloat(requested.SlippageRate, MinSlippageRate, MaxSlippageRate, defaults.SlippageRate),
+		SpikeTickDeviation: clampFloat(requested.SpikeTickDeviation, MinSpikeDeviation, MaxSpikeDeviation, defaults.SpikeTickDeviation),
+		MaxDivergenceRatio: clampFloat(requested.MaxDivergenceRatio, MinDivergenceRatioLimit, MaxDivergenceRatioLimit, defaults.MaxDivergenceRatio),
+		RiskMultiplier:     clampFloat(requested.RiskMultiplier, MinRiskMultiplier, MaxRiskMultiplier, defaults.RiskMultiplier),
+		EnabledVenues:      venuesU,
+		EnabledAssets:      assetsU,
+		RadarAutopilot:     requested.RadarAutopilot,
+
+		// Bloque nuevo (préstamo + simulador): defaults salvo payload v2, abajo.
+		CreditLineUSD:        defaults.CreditLineUSD,
+		CreditLineBTC:        defaults.CreditLineBTC,
+		CreditAPR:            defaults.CreditAPR,
+		CreditOriginationFee: defaults.CreditOriginationFee,
+		CreditDurationMin:    defaults.CreditDurationMin,
+		OrderFailureProb:     defaults.OrderFailureProb,
+	}
+
+	// Versionado del wire: un payload SIN el bloque del préstamo (sesión persistida
+	// o cliente anteriores a la parametrización del crédito) llega con
+	// CreditLineUSD == 0 — todo el bloque conserva los defaults de arriba, en vez
+	// de degradar la línea al mínimo o dejar APR/fee en cero por accidente. Un
+	// payload v2 SIEMPRE trae la línea (la UI envía el struct completo) y ahí sí
+	// se respetan valores explícitos como APR 0 o fee 0.
+	if requested.CreditLineUSD != 0 {
+		applied.CreditLineUSD = clampFloat(requested.CreditLineUSD, MinCreditLineUSDParam, MaxCreditLineUSDParam, defaults.CreditLineUSD)
+		applied.CreditLineBTC = clampFloat(requested.CreditLineBTC, MinCreditLineBTCParam, MaxCreditLineBTCParam, defaults.CreditLineBTC)
+		applied.CreditAPR = clampFloat(requested.CreditAPR, 0, MaxCreditAPRParam, defaults.CreditAPR)
+		applied.CreditOriginationFee = clampFloat(requested.CreditOriginationFee, 0, MaxCreditFeeParam, defaults.CreditOriginationFee)
+		applied.CreditDurationMin = clampFloat(requested.CreditDurationMin, MinCreditDurationMin, MaxCreditDurationMin, defaults.CreditDurationMin)
+		applied.OrderFailureProb = clampFloat(requested.OrderFailureProb, 0, MaxOrderFailureProb, defaults.OrderFailureProb)
+	}
+	return applied
 }
 
 func sendEvent(s *ClientSession, ev ServerEvent) {
 	// Enrich with wallet state if initialized
 	s.Mu.Lock()
 	if s.Wallets != nil {
-		ev.BinanceUSD = s.Wallets["Binance"].USD
-		ev.BinanceBTC = s.Wallets["Binance"].BTC
-		ev.BitsoUSD = s.Wallets["Bitso"].USD
-		ev.BitsoBTC = s.Wallets["Bitso"].BTC
+		ev.BinanceUSD = s.Wallets.Get("Binance", quoteOf("Binance"))
+		ev.BinanceBTC = s.Wallets.Get("Binance", baseOf("Binance"))
+		ev.BitsoUSD = s.Wallets.Get("Bitso", quoteOf("Bitso"))
+		ev.BitsoBTC = s.Wallets.Get("Bitso", baseOf("Bitso"))
 		ev.TotalWealth = s.TotalWealth
 		ev.TotalNetProfit = s.TotalNetProfit
 		ev.InitialWealth = s.InitialWealth
@@ -71,8 +342,19 @@ func sendEvent(s *ClientSession, ev ServerEvent) {
 		return
 	}
 
-	// We ignore concurrent write errors for this demo, or we could add a dedicated write mutex.
 	s.WriteMessage(websocket.TextMessage, payload)
+}
+
+// sendParamsUpdate notifica a la sesión sus parámetros VIGENTES (post-clamps).
+// La UI pinta siempre lo aplicado, nunca lo solicitado.
+func sendParamsUpdate(s *ClientSession, eventType string, msg string) {
+	p := s.Params()
+	sendEvent(s, ServerEvent{
+		Type:      eventType,
+		SessionID: s.ID,
+		Message:   msg,
+		Params:    &p,
+	})
 }
 
 func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
@@ -82,14 +364,22 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			return
 		}
 
-		session := &ClientSession{
-			ID:   generateUUID(),
-			Conn: conn,
-		}
+		// La sesión nace con los parámetros por defecto ya publicados (snapshot
+		// atómico): cualquier lector del hot path ve parámetros válidos desde el
+		// primer instante, y set_params puede reemplazarlos en vivo sin locks.
+		session := newClientSession(generateUUID(), conn)
 		hub.Add(session)
 		defer func() {
-			hub.Remove(session.ID)
+			hub.Remove(session)
 			conn.Close()
+			// Última fotografía + last_seen al desconectar: el usuario puede
+			// cerrar el navegador y volver mañana.
+			persistSessionAsync(session)
+			if sessionStore != nil {
+				if err := sessionStore.TouchSession(session.ID, time.Now()); err != nil {
+					log.Printf("⚠️ [STORE] touch al desconectar: %v", err)
+				}
+			}
 		}()
 
 		for {
@@ -100,15 +390,138 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 
 			switch msg.Action {
 			case "init_session":
-				initSession(session, msg.InitialUSD, msg.InitialBTC)
-				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada"})
+				// Validación de backend: rechazamos capital inválido en vez de inicializar
+				// una sesión con estado corrupto. El frontend legítimo siempre envía
+				// valores válidos, así que su flujo feliz no se ve afectado.
+				if !validInitFunds(msg.InitialUSD, msg.InitialBTC) {
+					log.Printf("⚠️ [VALIDACIÓN] init_session rechazado: usd=%v btc=%v", msg.InitialUSD, msg.InitialBTC)
+					sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Capital inicial inválido: usa montos positivos y razonables."})
+					continue
+				}
+				mids := sanitizeAssetInventory(msg.AssetInventory)
+				if msg.InitialBTC <= 0 && len(mids) == 0 {
+					sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Capital inicial inválido: incluye BTC u otra cripto (ETH/SOL) con cantidad > 0."})
+					continue
+				}
+				// Distribución por venue (modo experto): opcional; si viene, se valida
+				// estricta. BTC sin distribución propia sigue a la de USD.
+				usdAlloc, btcAlloc := msg.UsdAllocation, msg.BtcAllocation
+				if usdAlloc != nil || btcAlloc != nil {
+					if usdAlloc == nil {
+						usdAlloc = btcAlloc
+					}
+					if btcAlloc == nil {
+						btcAlloc = usdAlloc
+					}
+					if !validAllocation(usdAlloc) || !validAllocation(btcAlloc) {
+						log.Printf("⚠️ [VALIDACIÓN] init_session rechazado: distribución inválida usd=%v btc=%v", msg.UsdAllocation, msg.BtcAllocation)
+						sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Distribución inválida: usa casas de cambio registradas y porcentajes que sumen 100."})
+						continue
+					}
+				}
+				initSession(session, msg.InitialUSD, msg.InitialBTC, usdAlloc, btcAlloc, msg.AssetInventory)
+				persistSessionAsync(session)
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada", Params: &p})
+
+			case "resume_session":
+				// Continuidad (Sprint A): el navegador presenta su token (UUID de la
+				// sesión persistida) y recupera saldos, parámetros y base del PnL.
+				// El historial del ledger vuelve a ser SUYO porque el ID se conserva.
+				id := msg.SessionID
+				if sessionStore == nil || id == "" || len(id) > 64 {
+					sendEvent(session, ServerEvent{Type: "RESUME_FAILED", SessionID: session.ID, Message: "Sesión no recuperable."})
+					continue
+				}
+				rec, found, err := sessionStore.LoadSession(id)
+				if err != nil || !found || !rec.Initialized {
+					if err != nil {
+						log.Printf("⚠️ [STORE] resume_session %s: %v", id, err)
+					}
+					sendEvent(session, ServerEvent{Type: "RESUME_FAILED", SessionID: session.ID, Message: "Sesión no encontrada — configura tu capital para empezar de nuevo."})
+					continue
+				}
+				// Takeover: si otra pestaña vive con este token, se desconecta.
+				// Hub.Remove es identity-aware: su defer no expulsará a esta sesión.
+				if old := hub.Get(id); old != nil && old != session {
+					log.Printf("🔁 [RESUME] Takeover de sesión %s (conexión previa desconectada)", id)
+					old.CloseConn()
+				}
+				hub.Remove(session) // suelta el ID efímero de esta conexión
+				applySessionRecord(session, rec)
+				session.ID = id
+				hub.Add(session)
+				if err := sessionStore.TouchSession(id, time.Now()); err != nil {
+					log.Printf("⚠️ [STORE] touch al reanudar: %v", err)
+				}
+				log.Printf("💾 [RESUME] Sesión %s recuperada (patrimonio $%.2f, PnL $%.4f)", id, rec.TotalWealth, rec.TotalNetProfit)
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión recuperada — tus fondos y tu estrategia siguen aquí.", Params: &p, Resumed: true})
+				sendLog(session, "💾 [SESIÓN] Bienvenido de vuelta: saldos, estrategia e historial recuperados de la base de datos.")
 
 			case "reset_session":
-				initSession(session, session.InitialUSD, session.InitialBTC)
-				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada"})
+				// El reset conserva la DISTRIBUCIÓN elegida en el onboarding: el
+				// 40/40/20 de un experto no se degrada al 50/50 clásico.
+				initSession(session, session.InitialUSD, session.InitialBTC, session.UsdAlloc, session.BtcAlloc, session.AssetInventory)
+				persistSessionAsync(session)
+				p := session.Params()
+				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada", Params: &p})
+
+			case "set_params":
+				// Personalización de estrategia EN VIVO: el usuario define su apetito
+				// de riesgo (margen mínimo, tamaño de orden, slippage estimado, fees,
+				// multiplicador de crédito). El backend clampea todo a rangos sanos.
+				if msg.Params == nil {
+					sendLog(session, "🛑 [VALIDACIÓN] set_params sin parámetros — ignorado.")
+					continue
+				}
+				applied := sanitizeTradingParams(*msg.Params)
+				prev := session.Params()
+				cap := analyzeUniverse(applied)
+				if !cap.OK {
+					// No dejar al usuario sin mercado operable: se aplican fees/márgenes
+					// pero el universo inválido se rechaza (se conserva el anterior).
+					applied.EnabledVenues = prev.EnabledVenues
+					applied.EnabledAssets = prev.EnabledAssets
+					sendLog(session, "🛑 [UNIVERSO] "+cap.Reason+" Se conservó tu universo anterior; el resto de la estrategia sí se aplicó.")
+					sendEvent(session, ServerEvent{Type: "UNIVERSE_REJECTED", Message: cap.Reason})
+				}
+				session.SetParams(applied)
+				persistSessionAsync(session)
+				log.Printf("🎛️ [PARAMS] Sesión %s: minNet=$%.2f maxOrden=%.4f BTC slip=%.1f bps riesgo=%.1fx",
+					session.ID, applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier)
+				sendLog(session, fmt.Sprintf("🎛️ [ESTRATEGIA] Parámetros actualizados: margen mín. $%.2f | orden máx. %.4f BTC | slippage %.1f bps | riesgo crédito %.1fx",
+					applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier))
+				sendParamsUpdate(session, "PARAMS_UPDATED", "Parámetros de estrategia aplicados")
 
 			case "demo_inject":
-				go engine.runDemoInjection(session, msg.Exchange, msg.Spread, msg.Liquidity)
+				// Validación + clamp de backend: exchange conocido, sin NaN/Inf, liquidez > 0
+				// y acotada (evita un bucle de chunks gigante que cuelgue el motor).
+				ex, spread, liq, ok := sanitizeDemoInject(msg.Exchange, msg.Spread, msg.Liquidity)
+				if !ok {
+					sendLog(session, "🛑 [VALIDACIÓN] Parámetros de simulación inválidos — inyección ignorada.")
+					continue
+				}
+				go engine.runDemoInjection(session, ex, spread, liq)
+
+			case "inject_omni":
+				// FASE 2: "Oportunidad normal" → arbitraje OMNIDIRECCIONAL DINÁMICO.
+				// Lee el universo activo, fabrica una ineficiencia como MarketTicks
+				// reales, el radar descubre el ciclo y lo ejecuta con fees/slippage
+				// del usuario; el frontend anima omni_executed (ver omni.go).
+				go engine.runOmniInjection(session)
+
+			case "inject_storm":
+				// FASE 3: "Evento poco común" → RÁFAGA HFT. Micro-ineficiencias
+				// inyectadas como MarketTicks; workers concurrentes + planCycle
+				// real (fees/margen); frontend: storm_started/trade/ended.
+				go engine.runStormInjection(session)
+
+			case "inject_fake":
+				// "Precio falso / error" → ESCUDO DE ROBUSTEZ. Inyecta anomalía
+				// real (tick spike / FoK timeout / divergencia); el motor la
+				// RECHAZA sin tocar saldos y emite CIRCUIT_BREAKER (ver circuit.go).
+				go engine.runFakeInjection(session)
 
 			case "adjust_funds":
 				go engine.adjustFunds(session, msg.Exchange, msg.Currency, msg.Amount)
@@ -116,11 +529,28 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			case "wait_rebalance":
 				go engine.startReplenishing(session, "Esperando traslado de capital entre exchanges (1 min en demo; ~30+ min en producción).")
 
+			case "dismiss_shortfall":
+				// "Continuar sin rebalancear": el usuario decide NO endeudarse ni
+				// reequilibrar. Se limpia el estado de falta de fondos (para que el
+				// próximo faltante vuelva a preguntar) y se descarta la inyección
+				// pendiente (abandona ESA oportunidad); el bot sigue vivo buscando
+				// otras con los fondos actuales. Respeta "la decisión final es del
+				// usuario" cuando el préstamo automático está apagado.
+				session.Mu.Lock()
+				session.InsufficientFundsPending = false
+				session.PendingInjection = nil
+				session.Mu.Unlock()
+				sendLog(session, "▶️ [SIN FONDOS] Continuar sin reequilibrar: el bot sigue buscando otras oportunidades con los fondos actuales.")
+
 			case "request_credit":
 				go func() {
 					sendEvent(session, ServerEvent{Type: "CREDIT_PROCESSING", Message: "Procesando solicitud de préstamo..."})
 					time.Sleep(2 * time.Second)
-					engine.activateCreditSession(session)
+					engine.activateCreditSession(session, false) // manual: el usuario lo pidió en el diálogo
+					// Reanuda la oportunidad que disparó el diálogo de fondos
+					// insuficientes: sin esto, el préstamo agregaba capital pero no
+					// volvía a operar — el botón "parecía roto" y solo cobraba su costo.
+					engine.resumePendingInjection(session)
 				}()
 
 			case "toggle_auto_credit":
@@ -129,6 +559,7 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				autoMode := session.Credit.AutoMode
 				session.Mu.Unlock()
 				log.Printf("🔁 [TOGGLE] Préstamo automático: %v", autoMode)
+				persistSessionAsync(session)
 				// Evento dedicado: NO usar "state_update" para no reiniciar el feed/logs del dashboard.
 				sendEvent(session, ServerEvent{Type: "AUTO_CREDIT_TOGGLED", SessionID: session.ID, AutoMode: autoMode, Message: fmt.Sprintf("Préstamo automático: %v", autoMode)})
 
@@ -140,10 +571,15 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 	}
 }
 
-// ledgerHandler expone los últimos 100 trades persistidos en SQLite como JSON.
-// Demuestra que los datos sobreviven al reinicio del motor (persistencia real).
+// ledgerHandler expone los últimos 100 trades de UNA sesión persistidos en SQLite como
+// JSON. Demuestra que los datos sobreviven al reinicio del motor (persistencia real).
+//
+// Seguridad (Hallazgo #1): el ledger es por-sesión. Antes /api/ledger devolvía los trades
+// de TODAS las sesiones (fuga de privacidad cross-sesión). Ahora exige ?session_id=<id> y
+// filtra por él. El session_id es un UUID v4 no enumerable, así que aun con CORS abierto
+// (necesario para Vercel↔Fly) un tercero no puede listar las operaciones de otra sesión.
 func ledgerHandler(w http.ResponseWriter, r *http.Request) {
-	// CORS: el frontend Next.js corre en otro puerto (3000) durante desarrollo.
+	// CORS: el frontend Next.js corre en otro origen (Vercel en prod, :3000 en dev).
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	if r.Method == http.MethodOptions {
@@ -151,11 +587,18 @@ func ledgerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	records, err := getRecentTrades(100)
-	if err != nil {
-		http.Error(w, `{"error":"no se pudo leer el ledger"}`, http.StatusInternalServerError)
-		log.Printf("⚠️ [LEDGER] Error al leer registros: %v", err)
-		return
+	records := []TradeRecord{}
+	// Sin session_id no devolvemos nada (cierra la fuga). Respondemos [] —y NO 400—
+	// como respuesta neutra para clientes viejos; el panel de auditoría actual ya
+	// envía siempre su session_id.
+	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
+		var err error
+		records, err = getTradesForSession(sessionID, 100)
+		if err != nil {
+			http.Error(w, `{"error":"no se pudo leer el ledger"}`, http.StatusInternalServerError)
+			log.Printf("⚠️ [LEDGER] Error al leer registros: %v", err)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -164,6 +607,10 @@ func ledgerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// generateUUID devuelve un identificador de sesión único. Antes usaba
+// time.Now().UnixNano(), que colisiona si dos clientes conectan en el mismo
+// nanosegundo (una sesión pisaría a la otra en el Hub). uuid.NewString() (UUID v4,
+// aleatorio) elimina ese riesgo de colisión bajo conexiones simultáneas.
 func generateUUID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uuid.NewString()
 }

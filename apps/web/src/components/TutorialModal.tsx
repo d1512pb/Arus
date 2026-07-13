@@ -12,18 +12,23 @@ interface Step {
 const STEPS: Step[] = [
   {
     emoji: "👋",
-    text: "Arus es un bot que gana con la diferencia de precio del bitcoin entre dos casas de cambio.",
+    text: "Arus es un bot que gana con las diferencias de precio de las criptomonedas entre casas de cambio.",
     where: "Bienvenida",
   },
   {
-    emoji: "📊",
-    text: "Tu Dinero Total, Ganancia y nº de Operaciones.",
-    where: "Arriba · tarjetas grandes",
+    emoji: "📡",
+    text: "El RADAR es la pantalla principal: tu dinero como un mapa vivo. Los ciclos rentables se iluminan en verde.",
+    where: "Pestaña RADAR",
+  },
+  {
+    emoji: "🎛️",
+    text: "En «Estrategia» defines TUS reglas: margen, fees, filtros, tu préstamo y con qué casas y monedas jugar.",
+    where: "Botón morado · arriba",
   },
   {
     emoji: "🏦",
-    text: "Tus 2 casas de cambio (Binance y Bitso) con sus saldos.",
-    where: "Columna izquierda",
+    text: "En el DASHBOARD ves tus casas de cambio con sus saldos y la distribución de tu dinero.",
+    where: "Pestaña DASHBOARD",
   },
   {
     emoji: "✏️",

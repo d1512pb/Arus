@@ -36,3 +36,142 @@
 .animate-pulse-border {
   animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* ── Radar-first (rediseño): tema del lienzo ────────────────────────────────
+   El radar tematiza vía variables CSS: la paleta clara vive en :root y la
+   oscura bajo .dark (la clase que la app pone en su contenedor raíz — las
+   custom properties se heredan hacia todo el subárbol, SVG incluido). Antes
+   el lienzo estaba comprometido al oscuro con colores fijos; el dueño lo
+   reportó como bug: el toggle de tema debe gobernar TODA la app. */
+:root {
+  --radar-bg: #edf1f8;                    /* papel azulado: plano técnico, no terminal */
+  --radar-panel: rgba(255, 255, 255, 0.65);
+  --radar-bar: #f7f9fd;
+  --radar-border: #d4ddec;
+  --radar-edge-book: #9db0d2;             /* libros: sólido y presente */
+  --radar-edge-assume: #c0cce2;           /* supuestos (paridad/inventario): recesivo */
+  --radar-node: #ffffff;
+  --radar-ink: #17233d;
+  --radar-ink2: #5c6c8e;
+  --radar-ink3: #8c9ab8;
+  --radar-accent: #059669;                /* emerald-600: legible sobre claro */
+  --radar-accent-glow: rgba(5, 150, 105, 0.35);
+  --radar-sweep-mid: rgba(5, 150, 105, 0.05);
+  --radar-sweep-end: rgba(5, 150, 105, 0.13);
+  --radar-danger: #dc2626;
+  --radar-cash: #2563eb;
+  --radar-btc: #b45309;                   /* amber-700: el 600 no contrasta en blanco */
+  --radar-alt: #7c3aed;
+  --radar-credit: #2563eb;                /* préstamo activo: azul, como el banner de crédito */
+  --radar-credit-glow: rgba(37, 99, 235, 0.45);
+}
+.dark {
+  --radar-bg: #060a14;
+  --radar-panel: rgba(12, 19, 34, 0.55);
+  --radar-bar: #0c1322;
+  --radar-border: #1b2740;
+  --radar-edge-book: #33415f;
+  --radar-edge-assume: #232f4a;
+  --radar-node: #0d1526;
+  --radar-ink: #e8edf7;
+  --radar-ink2: #8b96ad;
+  --radar-ink3: #4a5570;
+  --radar-accent: #10d98e;
+  --radar-accent-glow: rgba(16, 217, 142, 0.5);
+  --radar-sweep-mid: rgba(16, 217, 142, 0.05);
+  --radar-sweep-end: rgba(16, 217, 142, 0.14);
+  --radar-danger: #ff5470;
+  --radar-cash: #4da2ff;
+  --radar-btc: #f5a623;
+  --radar-alt: #a78bfa;
+  --radar-credit: #4da2ff;
+  --radar-credit-glow: rgba(77, 162, 255, 0.55);
+}
+
+/* ── Radar-first (rediseño): animaciones del lienzo ─────────────────────── */
+
+/* Barrido tipo sonar cuando el mercado está eficiente (sin ciclo).
+   --sweep-dist la fija el componente al ancho real del lienzo; la animación es
+   solo transform → el compositor la corre en su propia capa. */
+@keyframes radar-sweep {
+  0%   { transform: translateX(-140px); opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { transform: translateX(var(--sweep-dist, 110vw)); opacity: 0; }
+}
+.animate-radar-sweep {
+  animation: radar-sweep 4.6s linear infinite;
+}
+
+/* El "+$X" que flota desde el nodo de inicio al ejecutarse un ciclo. */
+@keyframes profit-rise {
+  0%   { opacity: 0; transform: translate(-50%, 8px); }
+  18%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -72px); }
+}
+.animate-profit-rise {
+  animation: profit-rise 2.4s ease-out forwards;
+}
+
+/* Entrada de la card de nodo. */
+@keyframes card-pop {
+  0%   { opacity: 0; transform: scale(0.96) translateY(4px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-card-pop {
+  animation: card-pop 0.18s ease-out forwards;
+}
+
+/* HFT Flash: borde neón + tint verde en la fila de activo durante el overlay forense. */
+@keyframes hft-flash {
+  0%   { background-color: rgba(16, 185, 129, 0.28); box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.7); }
+  50%  { background-color: rgba(16, 185, 129, 0.18); box-shadow: 0 0 12px 2px rgba(16, 185, 129, 0.45); }
+  100% { background-color: rgba(16, 185, 129, 0.22); box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.55); }
+}
+.hft-flash-cell {
+  animation: hft-flash 0.4s ease-out;
+  border-radius: 0.5rem;
+  padding: 0.25rem 0.35rem;
+  margin: -0.25rem -0.35rem;
+}
+
+/* ── Préstamo: ganancia neta obtenida gracias al capital prestado ──────────
+   Al vencer un préstamo, un destello centrado en el radar comunica DE UN
+   VISTAZO cuánto neto rindió la inyección de capital (el fuerte de Arus: no
+   perder oportunidades por falta de fondos). Overlay HTML (no SVG): el
+   compositor lo anima en su capa sin repintar el lienzo. Entra con un pop,
+   sostiene, y sale flotando hacia arriba. */
+@keyframes loan-burst {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.82); }
+  9%   { opacity: 1; transform: translate(-50%, -50%) scale(1.05); }
+  16%  { transform: translate(-50%, -50%) scale(1); }
+  80%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -74%) scale(0.98); }
+}
+.animate-loan-burst {
+  animation: loan-burst 6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Anillo pulsante en los nodos que sostienen capital prestado mientras el
+   préstamo está activo (solo opacidad → barato para el compositor). */
+@keyframes credit-ring {
+  0%, 100% { opacity: 0.2; }
+  50%      { opacity: 0.75; }
+}
+.animate-credit-ring {
+  animation: credit-ring 1.7s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-radar-sweep { animation: none; opacity: 0; }
+  .animate-profit-rise { animation: none; opacity: 0; }
+  /* El burst sigue visible pero sin desplazamiento: solo aparece y se desvanece. */
+  .animate-loan-burst { animation: loan-burst-reduced 6s ease-out forwards; }
+  .animate-credit-ring { animation: none; opacity: 0.5; }
+}
+@keyframes loan-burst-reduced {
+  0%   { opacity: 0; transform: translate(-50%, -50%); }
+  8%   { opacity: 1; transform: translate(-50%, -50%); }
+  85%  { opacity: 1; transform: translate(-50%, -50%); }
+  100% { opacity: 0; transform: translate(-50%, -50%); }
+}

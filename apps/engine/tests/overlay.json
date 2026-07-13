@@ -1,0 +1,11 @@
+{
+  "Replace": {
+    "engine_stress_test.go": "tests/engine_stress_test.go",
+    "mock_exchange_book_test.go": "tests/mock_exchange_book_test.go",
+    "stress_helpers_test.go": "tests/stress_helpers_test.go",
+    "engine_benchmark_test.go": "tests/engine_benchmark_test.go",
+    "stress_adverse_test.go": "tests/stress_adverse_test.go",
+    "credit_rebalance_test.go": "tests/credit_rebalance_test.go",
+    "params_concurrency_test.go": "tests/params_concurrency_test.go"
+  }
+}

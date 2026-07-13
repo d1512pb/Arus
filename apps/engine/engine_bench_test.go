@@ -8,8 +8,9 @@ import (
 // BenchmarkOpportunityDetection mide la latencia REAL del núcleo de detección de
 // oportunidades del motor: dado un tick (precios ask/bid de ambos exchanges),
 // cuánto tarda en calcular spreads, actualizar la media móvil del spread (Spike
-// Filter), estimar fees + slippage, computar el neto y decidir si la operación es
-// viable. Es exactamente la aritmética O(1) que corre el hot loop por cada tick.
+// Filter), estimar fees + slippage vía computeNetProfit (la fórmula única del
+// motor) y decidir si la operación es viable. Es exactamente la aritmética O(1)
+// que corre el hot loop por cada tick.
 //
 // Ejecutar:  go test -bench=Detection -benchmem -run=^$
 func BenchmarkOpportunityDetection(b *testing.B) {
@@ -18,9 +19,12 @@ func BenchmarkOpportunityDetection(b *testing.B) {
 	// Precios representativos de BTC/USD con una pequeña divergencia entre exchanges.
 	binAsk, binBid := 73_810.50, 73_805.20
 	bitAsk, bitBid := 73_790.10, 73_784.80
-	const baseVolume = 0.005
-	const binanceTakerFee = 0.001
-	const bitsoTakerFee = 0.0065
+	// Mismos parámetros por defecto que usa el motor (single source of truth): el
+	// bench mide el hot path real, no una copia con números a mano.
+	params := DefaultTradingParameters()
+	baseVolume := params.MaxOrderSizeBTC
+	binanceTakerFee := params.takerFee("Binance")
+	bitsoTakerFee := params.takerFee("Bitso")
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -33,7 +37,6 @@ func BenchmarkOpportunityDetection(b *testing.B) {
 
 		grossSpread1 := bitBid - binAsk
 		grossSpread2 := binBid - bitAsk
-		grossSpread := math.Max(grossSpread1, grossSpread2)
 		spread := math.Abs(binanceMid - bitsoMid)
 
 		// 2) Spike Filter: media móvil del spread + factor de anomalía.
@@ -44,18 +47,16 @@ func BenchmarkOpportunityDetection(b *testing.B) {
 			factor = spread / avg
 		}
 
-		// 3) Fees + slippage en la dirección rentable.
-		var fees float64
+		// 3) Fórmula única del motor (fees + slippage + neto) en la dirección rentable.
+		var netOp float64
 		if grossSpread1 > grossSpread2 {
-			fees = (binAsk*binanceTakerFee + bitBid*bitsoTakerFee) * baseVolume
+			_, _, _, netOp = computeNetProfit(binAsk, bitBid, baseVolume, binanceTakerFee, bitsoTakerFee, params.SlippageRate)
 		} else {
-			fees = (bitAsk*bitsoTakerFee + binBid*binanceTakerFee) * baseVolume
+			_, _, _, netOp = computeNetProfit(bitAsk, binBid, baseVolume, bitsoTakerFee, binanceTakerFee, params.SlippageRate)
 		}
-		slippage := estimateSlippage(binanceMid, bitsoMid, baseVolume)
 
-		// 4) Neto y decisión de viabilidad (incluye corte por spike).
-		netOp := grossSpread*baseVolume - fees - slippage
-		viable := netOp > 0.10 && factor <= SpikeBlockMultiplier
+		// 4) Decisión de viabilidad (incluye corte por spike).
+		viable := netOp > params.MinNetProfitUSD && factor <= SpikeBlockMultiplier
 
 		if viable {
 			sink += netOp

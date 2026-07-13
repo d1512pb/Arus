@@ -1,0 +1,383 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+// profitableSpatialGraph arma el escenario clásico: comprar en Binance, vender
+// en Bitso con spread que sí cubre fees.
+func profitableSpatialGraph(now time.Time) *LiquidityGraph {
+	g := NewLiquidityGraph()
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 0.8, BidQty: 0.4, UpdatedAt: now})
+	return g
+}
+
+// TestPlanCycle_Spatial: el plan rota a un inicio CASH, respeta el tope del
+// usuario en BTC-equivalente y su neto coincide con la tasa del ciclo.
+func TestPlanCycle_Spatial(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo espacial de partida")
+	}
+
+	balances := Balances{
+		"Binance": {"USDT": 5_000, "BTC": 0.25},
+		"Bitso":   {"USD": 5_000, "BTC": 0.25},
+	}
+	p := DefaultTradingParameters()
+	const btcPrice = 60_000.0
+
+	plan, err := planCycle(cycle, balances, p, btcPrice)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+
+	if !isCashAsset(plan.Start.Asset) {
+		t.Fatalf("el ciclo no rotó a un inicio cash: %s", plan.Start.ID())
+	}
+	// Tope del usuario: 0.005 BTC × $60,000 = $300 de entrada (saldo y liquidez sobran).
+	if !almostEqual(plan.StartAmount, p.MaxOrderSizeBTC*btcPrice) {
+		t.Fatalf("entrada=%v, esperado el tope del usuario %v", plan.StartAmount, p.MaxOrderSizeBTC*btcPrice)
+	}
+	if !almostEqual(plan.VolumeBTCEquiv, p.MaxOrderSizeBTC) {
+		t.Fatalf("volumen BTC-eq=%v, esperado %v", plan.VolumeBTCEquiv, p.MaxOrderSizeBTC)
+	}
+	// Neto = entrada × (tasa del ciclo): misma matemática que el radar.
+	wantNet := plan.StartAmount * cycle.NetReturn
+	if !almostEqual(plan.NetProfit, wantNet) {
+		t.Fatalf("neto=%v, esperado %v", plan.NetProfit, wantNet)
+	}
+	// Consistencia de la cadena: lo que sale de la última pierna = entrada + neto.
+	last := plan.Legs[len(plan.Legs)-1]
+	if !almostEqual(last.Out, plan.StartAmount+plan.NetProfit) {
+		t.Fatalf("cadena rota: out final=%v, esperado %v", last.Out, plan.StartAmount+plan.NetProfit)
+	}
+	if last.To != plan.Start {
+		t.Fatalf("el ciclo no regresa al inicio: %s ≠ %s", last.To.ID(), plan.Start.ID())
+	}
+}
+
+// TestPlanCycle_LiquidityBinds: cuando el bid de Bitso solo soporta 0.001 BTC,
+// esa pierna acota la entrada (mapeada a unidades cash del inicio).
+func TestPlanCycle_LiquidityBinds(t *testing.T) {
+	now := time.Now()
+	g := NewLiquidityGraph()
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_000, Bid: 59_990, AskQty: 2.0, BidQty: 1.5, UpdatedAt: now})
+	g.UpdateBook("Bitso:BTC/USD", TopOfBook{Ask: 60_650, Bid: 60_600, AskQty: 0.8, BidQty: 0.001, UpdatedAt: now})
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo de partida")
+	}
+
+	balances := Balances{"Binance": {"USDT": 1e6}, "Bitso": {"USD": 1e6, "BTC": 1}}
+	p := DefaultTradingParameters()
+	p.MaxOrderSizeBTC = 10  // tope enorme: debe mandar la liquidez, no el usuario
+	p.MinNetProfitUSD = 0.0 // margen fuera de la ecuación: aislamos la liquidez
+
+	plan, err := planCycle(cycle, balances, p, 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+	// La pierna de venta en Bitso admite 0.001 BTC: la entrada X debe ser tal que
+	// X·prod_hasta_esa_pierna = 0.001 BTC. Verificamos por la propia cadena:
+	for _, leg := range plan.Legs {
+		if leg.Kind == EdgeOrderBook && leg.From.ID() == "BTC@Bitso" {
+			if !closeTo(leg.In, 0.001, 1e-12) {
+				t.Fatalf("la pierna acotada usa %v BTC, esperado 0.001", leg.In)
+			}
+		}
+	}
+}
+
+// TestPlanCycle_Inviable: sin saldo, o con un margen de usuario imposible, no hay plan.
+func TestPlanCycle_Inviable(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+
+	p := DefaultTradingParameters()
+
+	// Sin saldo cash en el nodo de inicio.
+	if _, err := planCycle(cycle, Balances{"Binance": {"USDT": 0}}, p, 60_000); err == nil {
+		t.Fatal("plan aceptado sin fondos")
+	}
+
+	// Margen del usuario mayor que lo que el ciclo puede rendir.
+	rich := Balances{"Binance": {"USDT": 5_000}, "Bitso": {"BTC": 1, "USD": 1_000}}
+	p.MinNetProfitUSD = 10_000
+	if _, err := planCycle(cycle, rich, p, 60_000); err == nil {
+		t.Fatal("plan aceptado por debajo del margen del usuario")
+	}
+}
+
+// TestPlanCycle_PicksFundedCashStart (Sprint C): un ciclo puede tocar varios
+// nodos cash; si el "primero" no tiene saldo pero otro sí, el plan debe rotar
+// al nodo FUNDADO. En el mundo real también hace falta inventario cripto en el
+// venue de venta (pre-fondeo): sin BTC@Bitso no hay pierna de venta.
+func TestPlanCycle_PicksFundedCashStart(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo de partida")
+	}
+
+	// Cash solo en Bitso + BTC pre-fondeado para vender. Binance nace en 0:
+	// la paridad USD→USDT financia la compra allí.
+	balances := Balances{"Bitso": {"USD": 5_000, "BTC": 0.25}}
+	p := DefaultTradingParameters()
+
+	plan, err := planCycle(cycle, balances, p, 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado con un nodo cash fundado: %v", err)
+	}
+	if plan.Start.ID() != "USD@Bitso" {
+		t.Fatalf("inicio=%s, esperado USD@Bitso (el único con saldo)", plan.Start.ID())
+	}
+	if plan.NetProfit <= 0 {
+		t.Fatalf("neto=%v, esperado positivo", plan.NetProfit)
+	}
+}
+
+// TestPlanCycle_FeesUSD: la fricción del plan es exactamente
+// entrada × (Π tasas brutas − Π tasas netas) — el costo total de fees+slippage.
+func TestPlanCycle_FeesUSD(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+
+	balances := Balances{"Binance": {"USDT": 5_000, "BTC": 1}, "Bitso": {"USD": 5_000, "BTC": 1}}
+	plan, err := planCycle(cycle, balances, DefaultTradingParameters(), 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+
+	prodGross, prodNet := 1.0, 1.0
+	for _, e := range cycle.Edges {
+		prodGross *= e.Rate
+		prodNet *= e.Rate * (1 - e.Fee)
+	}
+	want := plan.StartAmount * (prodGross - prodNet)
+	if !closeTo(plan.FeesUSD, want, 1e-9) || plan.FeesUSD <= 0 {
+		t.Fatalf("fricción=%v, esperado %v (>0)", plan.FeesUSD, want)
+	}
+	// Coherencia: bruto − fricción = neto (misma identidad que computeNetProfit).
+	gross := plan.StartAmount * (prodGross - 1)
+	if !closeTo(gross-plan.FeesUSD, plan.NetProfit, 1e-9) {
+		t.Fatalf("bruto−fricción=%v ≠ neto=%v", gross-plan.FeesUSD, plan.NetProfit)
+	}
+}
+
+// TestCycleCreditProjection (Sprint D): sin fondos el ciclo no planifica, pero la
+// proyección con la línea de crédito hipotética responde cuánto ganaría — y si ni
+// el crédito lo salva (margen imposible), responde que no.
+func TestCycleCreditProjection(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+	if cycle == nil {
+		t.Fatal("sin ciclo de partida")
+	}
+
+	empty := Balances{}
+	p := DefaultTradingParameters()
+	if _, err := planCycle(cycle, empty, p, 60_000); err == nil {
+		t.Fatal("plan aceptado sin fondos")
+	}
+
+	projected, ok := cycleCreditProjection(cycle, empty, p, 60_000)
+	if !ok || projected <= p.MinNetProfitUSD {
+		t.Fatalf("la línea de crédito debería volver viable el ciclo: ok=%v proyección=%v", ok, projected)
+	}
+	// La proyección NO muta los saldos reales (función pura sobre una copia).
+	if len(empty) != 0 {
+		t.Fatalf("la proyección mutó los saldos reales: %+v", empty)
+	}
+
+	// Margen imposible: ni con crédito hay plan → sin proyección (y sin ruido).
+	greedy := DefaultTradingParameters()
+	greedy.MinNetProfitUSD = 1e6
+	if _, ok := cycleCreditProjection(cycle, empty, greedy, 60_000); ok {
+		t.Fatal("proyección aceptada con margen inalcanzable")
+	}
+}
+
+// TestCommitCycle_ConservesBalances: tras ejecutar, el nodo de inicio gana
+// exactamente el neto; los nodos intermedios quedan como estaban (todo lo que
+// TestCommitCycle_SpatialSkewsInventory: en arbitraje espacial real el bot
+// COMPRA crypto en un venue y la VENDE en otro — el inventario se sesga
+// (más BTC donde compraste, menos donde vendiste). El swap de inventario del
+// grafo NO teletransporta: solo conecta la ruta. El cash de inicio sube ≈ neto.
+func TestCommitCycle_SpatialSkewsInventory(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+
+	s := newClientSession("ciclo", nil)
+	initSession(s, 10_000, 0.5, nil, nil, nil) // 5 000 quote + 0.25 BTC por venue
+
+	s.Mu.Lock()
+	before := s.Wallets.Clone()
+	wealthBefore := s.TotalWealth
+	s.Mu.Unlock()
+
+	plan, err := planCycle(cycle, before, DefaultTradingParameters(), 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+	if !commitCycle(s, plan) {
+		t.Fatal("commit rechazado con fondos suficientes")
+	}
+
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	start := plan.Start
+	gotStart := s.Wallets.Get(start.Venue, string(start.Asset))
+	wantStart := before.Get(start.Venue, string(start.Asset)) + plan.NetProfit
+	if !closeTo(gotStart, wantStart, 1e-6) {
+		t.Fatalf("inicio: %v, esperado %v (+neto)", gotStart, wantStart)
+	}
+	if !closeTo(s.TotalWealth, wealthBefore+plan.NetProfit, 1e-9) {
+		t.Fatalf("TotalWealth=%v, esperado %v", s.TotalWealth, wealthBefore+plan.NetProfit)
+	}
+
+	// Debe existir al menos un sesgo cripto (compra vs venta) tras saltar swaps.
+	skewed := false
+	for _, leg := range plan.Legs {
+		if leg.Kind != EdgeOrderBook {
+			continue
+		}
+		// Compra: To es crypto base → ese venue gana crypto
+		if !isCashAsset(leg.To.Asset) {
+			got := s.Wallets.Get(leg.To.Venue, string(leg.To.Asset))
+			want := before.Get(leg.To.Venue, string(leg.To.Asset))
+			if got > want+1e-9 {
+				skewed = true
+			}
+		}
+		// Venta: From es crypto base → ese venue pierde crypto
+		if !isCashAsset(leg.From.Asset) {
+			got := s.Wallets.Get(leg.From.Venue, string(leg.From.Asset))
+			want := before.Get(leg.From.Venue, string(leg.From.Asset))
+			if got < want-1e-9 {
+				skewed = true
+			}
+		}
+	}
+	if !skewed {
+		t.Fatalf("el inventario cripto no se sesgó tras el ciclo espacial: antes=%+v después=%+v", before, s.Wallets)
+	}
+}
+
+// TestCommitCycle_HardBlock: si los fondos cambiaron entre plan y commit, el
+// commit se rechaza sin tocar nada.
+func TestCommitCycle_HardBlock(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+	cycle := g.FindBestCycle(now)
+
+	s := newClientSession("ciclo-block", nil)
+	initSession(s, 10_000, 0.5, nil, nil, nil)
+
+	s.Mu.Lock()
+	snapshot := s.Wallets.Clone()
+	s.Mu.Unlock()
+
+	plan, err := planCycle(cycle, snapshot, DefaultTradingParameters(), 60_000)
+	if err != nil {
+		t.Fatalf("plan rechazado: %v", err)
+	}
+
+	// El mundo cambió: alguien vació el nodo de inicio.
+	s.Mu.Lock()
+	s.Wallets.Set(plan.Start.Venue, string(plan.Start.Asset), 0)
+	wealth := s.TotalWealth
+	s.Mu.Unlock()
+
+	if commitCycle(s, plan) {
+		t.Fatal("commit aceptado sin fondos (hard block roto)")
+	}
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.TotalWealth != wealth {
+		t.Fatal("el commit rechazado alteró el patrimonio")
+	}
+}
+
+// TestFindBestCycleFor_UserFees: la MISMA oportunidad existe para un usuario con
+// fees estándar y desaparece para uno cuyas comisiones (2 %) se la comen — la
+// detección personalizada usa los pesos DEL usuario.
+func TestFindBestCycleFor_UserFees(t *testing.T) {
+	now := time.Now()
+	g := profitableSpatialGraph(now)
+
+	standard := DefaultTradingParameters()
+	if g.FindBestCycleFor(standard, now) == nil {
+		t.Fatal("el usuario con fees estándar debería ver el ciclo")
+	}
+
+	expensive := DefaultTradingParameters()
+	expensive.TakerFees = map[string]float64{"Binance": 0.02, "Bitso": 0.02}
+	if c := g.FindBestCycleFor(expensive, now); c != nil {
+		t.Fatalf("con fees del 2%% el ciclo no debería existir: %s", DescribeCycle(c))
+	}
+}
+
+// TestFindBestCycleFor_UniversePruning: la poda del universo.
+func TestFindBestCycleFor_UniversePruning(t *testing.T) {
+	now := time.Now()
+	// Espacial rentable Y triángulo de Binance rentable, ambos activos.
+	g := profitableSpatialGraph(now)
+	g.UpdateBook("Binance:ETH/USDT", TopOfBook{Ask: 3_000, Bid: 2_999, AskQty: 10, BidQty: 10, UpdatedAt: now})
+	g.UpdateBook("Binance:ETH/BTC", TopOfBook{Ask: 0.0516, Bid: 0.0515, AskQty: 5, BidQty: 5, UpdatedAt: now})
+
+	// Universo restringido a Binance: el ciclo espacial (que necesita Bitso)
+	// queda podado; el que aparezca debe vivir 100 % en Binance.
+	p := DefaultTradingParameters()
+	p.EnabledVenues = []string{"Binance"}
+	c := g.FindBestCycleFor(p, now)
+	if c == nil {
+		t.Fatal("el triángulo de Binance debería sobrevivir a la poda")
+	}
+	for _, e := range c.Edges {
+		if e.From.Venue != "Binance" || e.To.Venue != "Binance" {
+			t.Fatalf("la poda dejó pasar un nodo fuera del universo: %s", DescribeCycle(c))
+		}
+	}
+
+	// Universo sin ETH: el triángulo muere; con ambos venues, el espacial vive.
+	p2 := DefaultTradingParameters()
+	p2.EnabledAssets = []string{"USDT", "USD", "BTC"}
+	c2 := g.FindBestCycleFor(p2, now)
+	if c2 == nil {
+		t.Fatal("el ciclo espacial debería sobrevivir sin ETH")
+	}
+	for _, e := range c2.Edges {
+		if e.From.Asset == "ETH" || e.To.Asset == "ETH" {
+			t.Fatalf("la poda dejó pasar ETH: %s", DescribeCycle(c2))
+		}
+	}
+}
+
+// TestSanitizeTradingParams_Universe: venues/activos desconocidos fuera,
+// duplicados fuera, autopiloto pasa tal cual.
+func TestSanitizeTradingParams_Universe(t *testing.T) {
+	p := sanitizeTradingParams(TradingParameters{
+		EnabledVenues:  []string{"Binance", "FTX", "Binance"},
+		EnabledAssets:  []string{"BTC", "DOGE", "BTC", "USDT"},
+		RadarAutopilot: true,
+	})
+	if len(p.EnabledVenues) != 1 || p.EnabledVenues[0] != "Binance" {
+		t.Fatalf("venues mal saneados: %v", p.EnabledVenues)
+	}
+	if len(p.EnabledAssets) != 2 || p.EnabledAssets[0] != "BTC" || p.EnabledAssets[1] != "USDT" {
+		t.Fatalf("activos mal saneados: %v", p.EnabledAssets)
+	}
+	if !p.RadarAutopilot {
+		t.Fatal("autopiloto perdido en la sanitización")
+	}
+}

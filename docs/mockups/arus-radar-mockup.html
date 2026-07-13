@@ -1,0 +1,673 @@
+<title>Arus — Radar (mockup de diseño)</title>
+<style>
+  :root {
+    --bg: #060a14;
+    --surface: #0c1322;
+    --raised: #111a2e;
+    --line: #1b2740;
+    --ink: #e8edf7;
+    --ink-2: #8b96ad;
+    --ink-3: #4a5570;
+    --accent: #10d98e;
+    --accent-dim: rgba(16, 217, 142, .14);
+    --cash: #4d9fff;
+    --btc: #f5a623;
+    --alt: #a78bfa;
+    --danger: #ff5470;
+    --mono: "Cascadia Code", "SF Mono", Consolas, "Roboto Mono", monospace;
+    --sans: "Avenir Next", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); overflow: hidden;
+    background-image: radial-gradient(1200px 600px at 50% -10%, rgba(77,159,255,.06), transparent 60%);
+  }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  button:focus-visible, .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+  /* ───────────────────────── header ───────────────────────── */
+  header {
+    display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(12,19,34,.9), rgba(12,19,34,.65));
+    position: relative; z-index: 30;
+  }
+  header > * { white-space: nowrap; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .hex { color: var(--accent); font-size: 20px; filter: drop-shadow(0 0 6px rgba(16,217,142,.6)); }
+  .brand b { letter-spacing: .28em; font-size: 15px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 10px; letter-spacing: .18em; color: var(--ink-2); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: beat 2s infinite; }
+  @keyframes beat { 50% { opacity: .45; } }
+
+  .wealth { margin-left: auto; display: flex; align-items: baseline; gap: 12px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .wealth .total { font-size: 17px; font-weight: 700; }
+  .wealth .pnl { font-size: 12px; color: var(--accent); }
+
+  .tabs { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tabs button { padding: 7px 14px; font-size: 10px; letter-spacing: .16em; color: var(--ink-2); }
+  .tabs button[aria-selected="true"] { background: var(--accent-dim); color: var(--accent); }
+  .actions { display: flex; gap: 8px; }
+  .btn {
+    padding: 7px 13px; border: 1px solid var(--line); border-radius: 8px;
+    font-size: 10px; letter-spacing: .14em; color: var(--ink-2); transition: .2s;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #04231a; border-color: var(--accent); font-weight: 700; }
+  .btn.primary:hover { box-shadow: 0 0 18px rgba(16,217,142,.45); color: #04231a; }
+
+  .mode {
+    font-size: 9px; letter-spacing: .2em; padding: 4px 10px; border-radius: 99px;
+    border: 1px solid var(--line); color: var(--ink-3);
+  }
+  .mode.on { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); box-shadow: 0 0 12px rgba(16,217,142,.25); }
+
+  /* ───────────────────────── stage ───────────────────────── */
+  #stage { position: relative; height: calc(100vh - 96px); overflow: auto; }
+  #radar-wrap { min-width: 960px; height: 100%; position: relative; }
+  svg#radar { width: 100%; height: 100%; display: block; }
+
+  .venue-box { fill: rgba(12,19,34,.55); stroke: var(--line); rx: 18; transition: opacity .5s; }
+  .venue-name { fill: var(--ink-2); font: 700 13px var(--sans); letter-spacing: .3em; }
+  .venue-off .venue-box, .venue-off .node, .venue-off .venue-name { opacity: .16; }
+
+  .edge { fill: none; }
+  .edge-book { stroke: #33415f; stroke-width: 1.6; }
+  .edge-soft { stroke: #232f4a; stroke-width: 1.1; stroke-dasharray: 5 6; }
+  .edge-hit { stroke: transparent; stroke-width: 16; fill: none; cursor: pointer; }
+  .edge-hover { stroke: var(--cash); stroke-width: 2.2; filter: drop-shadow(0 0 5px rgba(77,159,255,.7)); }
+  .edge-cycle { stroke: var(--accent); stroke-width: 2.6; filter: drop-shadow(0 0 7px rgba(16,217,142,.8)); }
+  .edge-spike { stroke: var(--danger); stroke-width: 2.6; filter: drop-shadow(0 0 7px rgba(255,84,112,.8)); }
+
+  .node, .node .pulse { transform-box: fill-box; transform-origin: center; }
+  .node { cursor: pointer; }
+  .node circle.body { fill: #0d1526; stroke: var(--line); stroke-width: 1.4; transition: stroke .3s; }
+  .node:hover circle.body, .node.sel circle.body { stroke: var(--accent); }
+  .node.cycle circle.body { stroke: var(--accent); stroke-width: 2.4; }
+  .node circle.pulse { fill: none; stroke: var(--accent); opacity: 0; pointer-events: none; }
+  .node .asset { font: 800 13px var(--mono); text-anchor: middle; }
+  .node .bal { fill: var(--ink); font: 700 11px var(--mono); text-anchor: middle; }
+  .node .usd { fill: var(--ink-3); font: 10px var(--mono); text-anchor: middle; }
+  .a-cash { fill: var(--cash); } .a-btc { fill: var(--btc); } .a-alt { fill: var(--alt); }
+
+  .particle { fill: var(--accent); filter: drop-shadow(0 0 6px var(--accent)); pointer-events: none; }
+  #sweep { pointer-events: none; opacity: .55; }
+
+  .float-profit {
+    position: absolute; font: 800 20px var(--mono); color: var(--accent);
+    text-shadow: 0 0 14px rgba(16,217,142,.8); pointer-events: none;
+    animation: rise 2.4s ease-out forwards;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } 18% { opacity: 1; } to { opacity: 0; transform: translateY(-70px); } }
+
+  /* ───────────────────────── tooltip / card ───────────────────────── */
+  #tip {
+    position: absolute; z-index: 40; pointer-events: none; display: none;
+    background: var(--raised); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font-family: var(--mono); font-size: 11px; min-width: 210px;
+    box-shadow: 0 12px 34px rgba(0,0,0,.55);
+  }
+  #tip h4 { margin: 0 0 6px; font: 700 10px var(--sans); letter-spacing: .18em; color: var(--ink-2); }
+  #tip .row { display: flex; justify-content: space-between; gap: 18px; padding: 2px 0; }
+  #tip .row span:first-child { color: var(--ink-3); }
+
+  #nodecard {
+    position: absolute; z-index: 45; width: 300px; display: none;
+    background: var(--raised); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.6); overflow: hidden;
+    animation: pop .18s ease-out;
+  }
+  @keyframes pop { from { opacity: 0; transform: scale(.96) translateY(4px); } }
+  #nodecard .head { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border-bottom: 1px solid var(--line); }
+  #nodecard .head .sym { font: 800 15px var(--mono); }
+  #nodecard .head .venue { font-size: 9px; letter-spacing: .2em; color: var(--ink-3); }
+  #nodecard .head .fresh { margin-left: auto; display: flex; align-items: center; gap: 5px; font-size: 9px; color: var(--accent); letter-spacing: .1em; }
+  #nodecard .close { color: var(--ink-3); font-size: 14px; padding: 2px 6px; }
+  #nodecard .body { padding: 12px 15px; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #nodecard .big { font-size: 20px; font-weight: 800; }
+  #nodecard .sub { color: var(--ink-3); font-size: 11px; margin-top: 2px; }
+  #nodecard .books { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  #nodecard .books h5 { margin: 0 0 7px; font: 700 9px var(--sans); letter-spacing: .18em; color: var(--ink-2); }
+  #nodecard .bk { display: flex; justify-content: space-between; padding: 3px 0; font-size: 11px; }
+  #nodecard .bk .l { color: var(--ink-2); }
+  #nodecard .cta { display: flex; gap: 8px; padding: 0 15px 14px; }
+  #nodecard .cta .btn { flex: 1; text-align: center; }
+
+  /* ───────────────────────── drawer estrategia ───────────────────────── */
+  #drawer {
+    position: fixed; top: 0; right: 0; height: 100%; width: 340px; z-index: 60;
+    background: var(--surface); border-left: 1px solid var(--line);
+    transform: translateX(100%); transition: transform .28s ease; overflow-y: auto;
+    box-shadow: -20px 0 60px rgba(0,0,0,.5);
+  }
+  #drawer.open { transform: none; }
+  #drawer .head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+  #drawer h3 { margin: 0; font-size: 11px; letter-spacing: .22em; }
+  #drawer section { padding: 15px 18px; border-bottom: 1px solid var(--line); }
+  #drawer label { display: block; font-size: 9px; letter-spacing: .16em; color: var(--ink-2); margin-bottom: 6px; }
+  #drawer input[type="text"] {
+    width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    color: var(--ink); font-family: var(--mono); font-size: 13px; padding: 8px 10px;
+  }
+  #drawer input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    padding: 6px 12px; border-radius: 99px; border: 1px solid var(--line);
+    font-size: 10px; letter-spacing: .1em; color: var(--ink-3); transition: .2s; cursor: pointer;
+  }
+  .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .switchrow { display: flex; align-items: center; gap: 12px; }
+  .switch { width: 40px; height: 21px; border-radius: 99px; background: var(--line); position: relative; transition: .2s; flex-shrink: 0; }
+  .switch::after { content: ""; position: absolute; top: 2.5px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--ink-2); transition: .2s; }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { left: 21px; background: #04231a; }
+  .hint { font-size: 10px; color: var(--ink-3); line-height: 1.5; margin-top: 6px; }
+
+  /* ───────────────────────── modal probar ───────────────────────── */
+  #modal {
+    position: fixed; inset: 0; z-index: 70; display: none;
+    background: rgba(4,7,14,.7); backdrop-filter: blur(3px);
+    align-items: center; justify-content: center;
+  }
+  #modal.open { display: flex; }
+  #modal .panel {
+    width: min(560px, 92vw); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 16px; padding: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  }
+  #modal h3 { margin: 0 0 4px; font-size: 12px; letter-spacing: .22em; }
+  #modal p.lead { margin: 0 0 16px; font-size: 11px; color: var(--ink-2); line-height: 1.5; }
+  .scenarios { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .scenario {
+    text-align: left; border: 1px solid var(--line); border-radius: 12px; padding: 13px;
+    transition: .2s; display: flex; flex-direction: column; gap: 6px;
+  }
+  .scenario:hover { transform: translateY(-2px); }
+  .scenario .ico { font-size: 18px; }
+  .scenario b { font-size: 11px; }
+  .scenario span { font-size: 9.5px; color: var(--ink-3); line-height: 1.45; font-family: var(--mono); }
+  .scenario.ok:hover { border-color: var(--accent); box-shadow: 0 0 16px rgba(16,217,142,.2); }
+  .scenario.warn:hover { border-color: var(--btc); box-shadow: 0 0 16px rgba(245,166,35,.2); }
+  .scenario.bad:hover { border-color: var(--danger); box-shadow: 0 0 16px rgba(255,84,112,.2); }
+
+  /* ───────────────────────── footer ───────────────────────── */
+  footer {
+    display: flex; align-items: center; gap: 14px; padding: 8px 18px;
+    border-top: 1px solid var(--line); background: rgba(12,19,34,.8);
+    font-family: var(--mono); font-size: 11px; height: 40px;
+  }
+  #narr { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #narr.cycle { color: var(--accent); }
+  #narr.spike { color: var(--danger); }
+  #lastop { margin-left: auto; flex-shrink: 0; color: var(--ink-3); font-size: 10px; display: flex; gap: 8px; align-items: center; }
+  #lastop b { color: var(--accent); }
+
+  #toast {
+    position: fixed; bottom: 56px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--raised); border: 1px solid var(--line); color: var(--ink-2);
+    padding: 9px 16px; border-radius: 99px; font-size: 11px; font-family: var(--mono);
+    opacity: 0; transition: .25s; z-index: 80; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%); }
+
+  /* dashboard placeholder */
+  #dashview { display: none; padding: 40px; height: calc(100vh - 96px); overflow: auto; }
+  #dashview .ph { border: 1px dashed var(--line); border-radius: 14px; padding: 26px; color: var(--ink-3); font-size: 12px; line-height: 1.7; max-width: 640px; }
+  #dashview .ph b { color: var(--ink-2); }
+
+  #stage { height: auto; min-height: 0; flex: 1; }
+  body { display: flex; flex-direction: column; }
+  @media (max-width: 900px) {
+    .mode, .status { display: none; }
+    .wealth { margin-left: auto; }
+  }
+  @media (max-width: 760px) {
+    .wealth .pnl, .status span { display: none; }
+    #nodecard { position: fixed; left: 0 !important; right: 0; bottom: 0; top: auto !important; width: 100%; border-radius: 16px 16px 0 0; }
+    .scenarios { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #sweep, .dot { display: none; }
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<header>
+  <div class="brand"><span class="hex">⬡</span><b>ARUS</b></div>
+  <div class="status"><span class="dot"></span><span>EN LÍNEA · 3 EXCHANGES · 9 LIBROS</span></div>
+  <span class="mode" id="mode">RADAR · DETECTANDO</span>
+  <div class="wealth">
+    <span class="total" id="wealth">$122,094.32</span>
+    <span class="pnl" id="pnl">+$26.70</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" id="tab-radar">📡 RADAR</button>
+    <button role="tab" aria-selected="false" id="tab-dash">📊 DASHBOARD</button>
+  </nav>
+  <div class="actions">
+    <button class="btn primary" id="b-try">⚡ PROBAR EL BOT</button>
+    <button class="btn" id="b-strategy">⚙ ESTRATEGIA</button>
+  </div>
+</header>
+
+<div id="stage">
+  <div id="radar-wrap">
+    <svg id="radar" viewBox="0 0 1200 640" role="img" aria-label="Grafo de liquidez en vivo"></svg>
+    <div id="tip"></div>
+    <div id="nodecard"></div>
+  </div>
+  <div id="dashview">
+    <div class="ph">
+      <b>Vista Dashboard (esqueleto del mockup).</b><br><br>
+      Aquí vive todo lo que ya existe hoy: wallets clásicas con salud de inventario,
+      P&amp;L detallado, feed de operaciones completo, préstamo automático,
+      editar fondos, panel de Analítica/Rendimiento con export CSV, e Historial/Auditoría.<br><br>
+      <b>Probar el bot</b> vive en el header — disponible desde AMBAS vistas — porque
+      inyectar una oportunidad y ver al radar reaccionar es la demo central de Arus.
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span id="narr">◉ Mercado eficiente — los fees superan al spread. El radar recalcula cada segundo…</span>
+  <span id="lastop">ÚLTIMA OP: <b>+$13.57</b> · Binance→Bitso · 0.05 ₿ · 21:42:07</span>
+</footer>
+
+<aside id="drawer" aria-label="Estrategia">
+  <div class="head">
+    <h3>⚙ ESTRATEGIA / TU CONFIGURACIÓN</h3>
+    <button class="close btn" id="d-close">✕</button>
+  </div>
+  <section>
+    <div class="grid2">
+      <div><label>MARGEN MÍN. (USD)</label><input type="text" value="0.10"></div>
+      <div><label>ORDEN MÁX. (BTC)</label><input type="text" value="0.005"></div>
+      <div><label>SLIPPAGE (BPS)</label><input type="text" value="5"></div>
+      <div><label>RIESGO CRÉDITO (×)</label><input type="text" value="1.0"></div>
+    </div>
+  </section>
+  <section>
+    <label>TU UNIVERSO — EXCHANGES</label>
+    <div class="chips" id="venue-chips">
+      <button class="chip on" data-venue="Binance">BINANCE</button>
+      <button class="chip on" data-venue="Bitso">BITSO</button>
+      <button class="chip on" data-venue="Kraken">KRAKEN</button>
+    </div>
+    <p class="hint">Apaga un exchange y míralo desvanecerse del radar: la poda del grafo es literal — el motor no buscará ciclos ahí.</p>
+    <label style="margin-top:12px">MONEDAS</label>
+    <div class="chips">
+      <button class="chip on">USD·USDT</button>
+      <button class="chip on">BTC</button>
+      <button class="chip on">ETH</button>
+      <button class="chip on">SOL</button>
+    </div>
+  </section>
+  <section>
+    <div class="switchrow">
+      <button class="switch on" id="sw-auto" role="switch" aria-checked="true" aria-label="Autopiloto del radar"></button>
+      <div>
+        <label style="margin:0">AUTOPILOTO DEL RADAR</label>
+        <p class="hint" style="margin-top:3px" id="auto-hint">ON — el bot EJECUTA el mejor ciclo de tu universo con tus fees y tu margen.</p>
+      </div>
+    </div>
+  </section>
+  <section>
+    <label>COMISIONES TAKER (%)</label>
+    <div class="grid2">
+      <div><label>BINANCE</label><input type="text" value="0.10"></div>
+      <div><label>BITSO</label><input type="text" value="0.65"></div>
+      <div><label>KRAKEN</label><input type="text" value="0.40"></div>
+    </div>
+    <p class="hint">El servidor valida y acota cada valor; lo que ves tras aplicar es lo vigente.</p>
+  </section>
+  <section style="border:none">
+    <button class="btn primary" style="width:100%; padding:11px" id="d-apply">APLICAR ESTRATEGIA</button>
+  </section>
+</aside>
+
+<div id="modal">
+  <div class="panel">
+    <h3>⚡ PROBAR EL BOT</h3>
+    <p class="lead">Inyecta un escenario al mercado simulado y observa cómo reacciona el radar en vivo — la detección, los filtros de seguridad y la ejecución, con tus reglas.</p>
+    <div class="scenarios">
+      <button class="scenario ok" id="sc-ok">
+        <span class="ico">⚡</span><b>Oportunidad normal</b>
+        <span>Bitso +$800 · 0.1 ₿<br>Debe detectar el ciclo y ejecutarlo</span>
+      </button>
+      <button class="scenario warn" id="sc-warn">
+        <span class="ico">🌊</span><b>Evento extremo</b>
+        <span>Bitso +$1,300 · 0.3 ₿<br>Spike alerta: opera con aviso</span>
+      </button>
+      <button class="scenario bad" id="sc-bad">
+        <span class="ico">🛑</span><b>Precio falso (error)</b>
+        <span>Binance +$10,000 · 0.1 ₿<br>Spike bloqueado: lo rechaza</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("radar");
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ── datos del mockup (consistentes con la app real) ──────────────
+  const VENUES = ["Binance", "Bitso", "Kraken"];
+  const nodes = [
+    { id: "USDT@Binance", venue: "Binance", asset: "USDT", cls: "a-cash", bal: "$30,000.00", usd: "", price: 1 },
+    { id: "BTC@Binance",  venue: "Binance", asset: "BTC",  cls: "a-btc",  bal: "0.5000 ₿", usd: "≈ $30,960", price: 61921.96 },
+    { id: "ETH@Binance",  venue: "Binance", asset: "ETH",  cls: "a-alt",  bal: "0.0000",   usd: "", price: 1729.13 },
+    { id: "SOL@Binance",  venue: "Binance", asset: "SOL",  cls: "a-alt",  bal: "0.0000",   usd: "", price: 77.15 },
+    { id: "USD@Bitso",    venue: "Bitso",   asset: "USD",  cls: "a-cash", bal: "$30,000.00", usd: "", price: 1 },
+    { id: "BTC@Bitso",    venue: "Bitso",   asset: "BTC",  cls: "a-btc",  bal: "0.5000 ₿", usd: "≈ $30,938", price: 61876.00 },
+    { id: "USD@Kraken",   venue: "Kraken",  asset: "USD",  cls: "a-cash", bal: "$0.00",    usd: "", price: 1 },
+    { id: "BTC@Kraken",   venue: "Kraken",  asset: "BTC",  cls: "a-btc",  bal: "0.0000 ₿", usd: "", price: 61855.85 },
+    { id: "ETH@Kraken",   venue: "Kraken",  asset: "ETH",  cls: "a-alt",  bal: "0.0000",   usd: "", price: 1727.68 },
+  ];
+  // libros: [from, to, precioCompra, fee%, liquidez]
+  const books = [
+    ["USDT@Binance", "BTC@Binance", "$61,921.96", "0.15 %", "1.94 ₿"],
+    ["USDT@Binance", "ETH@Binance", "$1,729.13",  "0.15 %", "12.4 ETH"],
+    ["BTC@Binance",  "ETH@Binance", "0.02793 ₿",  "0.15 %", "8.1 ETH"],
+    ["USDT@Binance", "SOL@Binance", "$77.15",     "0.15 %", "410 SOL"],
+    ["BTC@Binance",  "SOL@Binance", "0.00125 ₿",  "0.15 %", "97 SOL"],
+    ["USD@Bitso",    "BTC@Bitso",   "$61,891.00", "0.70 %", "0.42 ₿"],
+    ["USD@Kraken",   "BTC@Kraken",  "$61,855.85", "0.45 %", "0.03 ₿"],
+    ["USD@Kraken",   "ETH@Kraken",  "$1,727.68",  "0.45 %", "0.20 ETH"],
+    ["BTC@Kraken",   "ETH@Kraken",  "0.02794 ₿",  "0.45 %", "0.06 ETH"],
+  ];
+  const softEdges = [ // paridad / inventario (supuestos declarados)
+    ["USDT@Binance", "USD@Bitso", "paridad 1:1 (supuesto declarado)"],
+    ["USDT@Binance", "USD@Kraken", "paridad 1:1 (supuesto declarado)"],
+    ["USD@Bitso", "USD@Kraken", "inventario pre-fondeado"],
+    ["BTC@Binance", "BTC@Bitso", "inventario pre-fondeado"],
+    ["BTC@Binance", "BTC@Kraken", "inventario pre-fondeado"],
+    ["BTC@Bitso", "BTC@Kraken", "inventario pre-fondeado"],
+    ["ETH@Binance", "ETH@Kraken", "inventario pre-fondeado"],
+  ];
+
+  // ── layout: columnas por venue ────────────────────────────────────
+  const W = 1200, H = 640, colW = W / 3;
+  const pos = {};
+  VENUES.forEach((v, c) => {
+    const inV = nodes.filter(n => n.venue === v);
+    inV.forEach((n, i) => {
+      const yTop = 140, yBot = H - 110;
+      const y = inV.length === 1 ? (yTop + yBot) / 2 : yTop + i * (yBot - yTop) / (inV.length - 1);
+      pos[n.id] = { x: colW * c + colW / 2, y };
+    });
+  });
+
+  const el = (tag, attrs, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(e); return e;
+  };
+
+  // Capas en orden de pintura: cajas de venue (fondo) → aristas → nodos (frente).
+  const venueGroups = {}, nodeLayers = {};
+  VENUES.forEach((v, c) => {
+    const g = el("g", { "data-venue": v });
+    el("rect", { class: "venue-box", x: colW * c + 26, y: 52, width: colW - 52, height: H - 118, rx: 18 }, g);
+    const t = el("text", { class: "venue-name", x: colW * c + colW / 2, y: 86, "text-anchor": "middle" }, g);
+    t.textContent = v.toUpperCase();
+    venueGroups[v] = g;
+  });
+
+  // ── aristas (curvas silenciosas) ─────────────────────────────────
+  const edgesG = el("g", {});
+  const tip = document.getElementById("tip");
+  const curve = (a, b) => {
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, off = 22;
+    const mx = (a.x + b.x) / 2 - dy / len * off, my = (a.y + b.y) / 2 + dx / len * off;
+    return `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+  };
+  const edgePaths = {};
+  const addEdge = (from, to, soft, tipHTML) => {
+    const d = curve(pos[from], pos[to]);
+    const p = el("path", { class: soft ? "edge edge-soft" : "edge edge-book", d }, edgesG);
+    const hit = el("path", { class: "edge-hit", d }, edgesG);
+    edgePaths[from + ">" + to] = p; edgePaths[to + ">" + from] = p;
+    hit.addEventListener("mousemove", ev => {
+      p.classList.add("edge-hover");
+      tip.innerHTML = tipHTML;
+      tip.style.display = "block";
+      const r = document.getElementById("radar-wrap").getBoundingClientRect();
+      tip.style.left = Math.min(ev.clientX - r.left + 14, r.width - 240) + "px";
+      tip.style.top = (ev.clientY - r.top + 14) + "px";
+    });
+    hit.addEventListener("mouseleave", () => { p.classList.remove("edge-hover"); tip.style.display = "none"; });
+  };
+  books.forEach(([f, t, px, fee, liq]) => addEdge(f, t, false, `
+    <h4>LIBRO · ${f.split("@")[1].toUpperCase()}</h4>
+    <div class="row"><span>compra ${t.split("@")[0]}</span><span>${px}</span></div>
+    <div class="row"><span>tu fee + slippage</span><span>${fee}</span></div>
+    <div class="row"><span>liquidez visible</span><span>${liq}</span></div>`));
+  softEdges.forEach(([f, t, label]) => addEdge(f, t, true, `
+    <h4>SUPUESTO DEL MODELO</h4>
+    <div class="row"><span>${f} ⇄ ${t}</span></div>
+    <div class="row"><span style="color:var(--ink-2)">${label}</span></div>`));
+
+  // ── nodos (capa superior, por venue para la poda del universo) ────
+  VENUES.forEach(v => { nodeLayers[v] = el("g", { "data-venue": v }); });
+  const nodeEls = {};
+  nodes.forEach(n => {
+    const { x, y } = pos[n.id];
+    const g = el("g", { class: "node", tabindex: 0, role: "button", "aria-label": n.id }, nodeLayers[n.venue]);
+    el("circle", { class: "pulse", cx: x, cy: y, r: 38 }, g);
+    el("circle", { class: "body", cx: x, cy: y, r: 38 }, g);
+    const a = el("text", { class: "asset " + n.cls, x, y: y - 8 }, g); a.textContent = n.asset;
+    const b = el("text", { class: "bal", x, y: y + 9 }, g); b.textContent = n.bal;
+    if (n.usd) { const u = el("text", { class: "usd", x, y: y + 23 }, g); u.textContent = n.usd; }
+    g.addEventListener("click", ev => { ev.stopPropagation(); openCard(n); });
+    g.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openCard(n); } });
+    nodeEls[n.id] = g;
+  });
+
+  // ── card de nodo (flotante desktop / sheet móvil) ─────────────────
+  const card = document.getElementById("nodecard");
+  let selNode = null;
+  function openCard(n) {
+    if (selNode) nodeEls[selNode].classList.remove("sel");
+    selNode = n.id; nodeEls[n.id].classList.add("sel");
+    const myBooks = books.filter(([f, t]) => f === n.id || t === n.id);
+    card.innerHTML = `
+      <div class="head">
+        <span class="sym ${n.cls}">${n.asset}</span>
+        <span class="venue">${n.venue.toUpperCase()}</span>
+        <span class="fresh">● feed fresco · 0.4 s</span>
+        <button class="close" aria-label="Cerrar">✕</button>
+      </div>
+      <div class="body">
+        <div class="big">${n.bal}</div>
+        <div class="sub">${n.usd ? n.usd + " · " : ""}1 ${n.asset} = ${n.price === 1 ? "$1.00 (cash)" : "$" + n.price.toLocaleString("en-US", {minimumFractionDigits: 2})}</div>
+        <div class="books">
+          <h5>LIBROS QUE TOCAN ESTE NODO</h5>
+          ${myBooks.map(([f, t, px, fee, liq]) => `
+            <div class="bk"><span class="l">${f === n.id ? "→ compra " + t.split("@")[0] : "⇄ libro " + n.asset + "/" + f.split("@")[0]}</span><span>${px} · fee ${fee} · liq ${liq}</span></div>`).join("") || `<div class="bk"><span class="l">— nodo cash: convierte vía paridad/inventario</span></div>`}
+        </div>
+      </div>
+      <div class="cta">
+        <button class="btn" data-act="dep">＋ DEPOSITAR</button>
+        <button class="btn" data-act="ret">－ RETIRAR</button>
+      </div>`;
+    card.style.display = "block";
+    if (innerWidth > 760) {
+      // Posición desde el nodo REAL en pantalla (robusto ante letterboxing del viewBox).
+      const r = document.getElementById("radar-wrap").getBoundingClientRect();
+      const nb = nodeEls[n.id].getBoundingClientRect();
+      let left = nb.right - r.left + 14, top = nb.top - r.top - 40;
+      if (left + 310 > r.width) left = nb.left - r.left - 314;
+      card.style.left = Math.max(8, left) + "px";
+      card.style.top = Math.max(8, Math.min(top, r.height - 330)) + "px";
+    }
+    card.querySelector(".close").onclick = closeCard;
+    card.querySelectorAll("[data-act]").forEach(b => b.onclick = () => toast("En la app real: abre Editar fondos de " + n.venue));
+  }
+  function closeCard() { card.style.display = "none"; if (selNode) nodeEls[selNode].classList.remove("sel"); selNode = null; }
+  document.getElementById("stage").addEventListener("click", closeCard);
+  card.addEventListener("click", ev => ev.stopPropagation());
+
+  // ── pulso de ticks (el mercado se siente vivo) ────────────────────
+  if (!reduced) setInterval(() => {
+    const ids = Object.keys(nodeEls).filter(id => !document.querySelector(`[data-venue="${id.split("@")[1]}"]`)?.classList.contains("venue-off"));
+    const id = ids[Math.floor(Math.random() * ids.length)];
+    const pulse = nodeEls[id]?.querySelector(".pulse");
+    if (!pulse) return;
+    pulse.animate([
+      { opacity: .8, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.45)" }
+    ], { duration: 700, easing: "ease-out" });
+  }, 650);
+
+  // ── barrido de radar ──────────────────────────────────────────────
+  const sweep = el("rect", { id: "sweep", x: -160, y: 40, width: 120, height: H - 90, fill: "url(#sweepGrad)" });
+  const defs = el("defs", {});
+  const grad = el("linearGradient", { id: "sweepGrad", x1: 0, x2: 1 }, defs);
+  el("stop", { offset: "0", "stop-color": "rgba(16,217,142,0)" }, grad);
+  el("stop", { offset: ".6", "stop-color": "rgba(16,217,142,.05)" }, grad);
+  el("stop", { offset: "1", "stop-color": "rgba(16,217,142,.13)" }, grad);
+  let sweeping = true;
+  if (!reduced) (function loop() {
+    if (sweeping) sweep.animate([{ transform: "translateX(0)" }, { transform: `translateX(${W + 320}px)` }], { duration: 3800, easing: "linear" });
+    setTimeout(loop, 4600);
+  })();
+
+  // ── narración / contadores ────────────────────────────────────────
+  const narr = document.getElementById("narr"), wealthEl = document.getElementById("wealth"), pnlEl = document.getElementById("pnl");
+  let wealth = 122094.32, pnl = 26.70;
+  const fmt = v => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function bumpWealth(delta) {
+    const from = wealth; wealth += delta; pnl += delta;
+    const t0 = performance.now();
+    (function anim(t) {
+      const k = Math.min(1, (t - t0) / 900);
+      wealthEl.textContent = fmt(from + (wealth - from) * k);
+      pnlEl.textContent = "+" + fmt(pnl - (1 - k) * delta).slice(0);
+      if (k < 1) requestAnimationFrame(anim);
+      else { wealthEl.textContent = fmt(wealth); pnlEl.textContent = "+" + fmt(pnl); }
+    })(t0);
+  }
+  const toastEl = document.getElementById("toast");
+  let toastT;
+  function toast(msg) {
+    toastEl.textContent = msg; toastEl.classList.add("show");
+    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove("show"), 2400);
+  }
+
+  // ── LA secuencia épica: ciclo detectado → ejecutado ───────────────
+  const CYCLE = ["USDT@Binance", "BTC@Binance", "BTC@Bitso", "USD@Bitso", "USDT@Binance"];
+  let running = false;
+  function runCycle(profit, label) {
+    if (running) return; running = true; sweeping = false;
+    const segs = [];
+    for (let i = 0; i < CYCLE.length - 1; i++) {
+      const p = edgePaths[CYCLE[i] + ">" + CYCLE[i + 1]];
+      p.classList.add("edge-cycle"); segs.push(p);
+      nodeEls[CYCLE[i]].classList.add("cycle");
+    }
+    narr.className = "cycle";
+    narr.textContent = `📡 [RADAR] Ciclo rentable: ${CYCLE.join(" → ").replaceAll("@", "@")} (${label})`;
+    // partículas recorriendo el ciclo
+    const parts = Array.from({ length: 5 }, (_, i) => el("circle", { class: "particle", r: 4.5 }));
+    const total = segs.reduce((s, p) => s + p.getTotalLength(), 0);
+    const t0 = performance.now(); const DUR = 2600;
+    (function flow(t) {
+      const base = ((t - t0) % DUR) / DUR;
+      parts.forEach((c, i) => {
+        let d = ((base + i / parts.length) % 1) * total;
+        for (const p of segs) {
+          const L = p.getTotalLength();
+          if (d <= L) { const pt = p.getPointAtLength(d); c.setAttribute("cx", pt.x); c.setAttribute("cy", pt.y); break; }
+          d -= L;
+        }
+      });
+      if (running) requestAnimationFrame(flow);
+    })(t0);
+
+    setTimeout(() => { // cobro
+      const r = document.getElementById("radar-wrap").getBoundingClientRect();
+      const nb = nodeEls["USDT@Binance"].getBoundingClientRect();
+      const f = document.createElement("div");
+      f.className = "float-profit"; f.textContent = "+" + fmt(profit);
+      f.style.left = (nb.left - r.left + nb.width / 2 - 40) + "px";
+      f.style.top = (nb.top - r.top - 46) + "px";
+      document.getElementById("radar-wrap").appendChild(f);
+      setTimeout(() => f.remove(), 2400);
+      bumpWealth(profit);
+      document.getElementById("lastop").innerHTML = `ÚLTIMA OP: <b>+${fmt(profit)}</b> · ciclo radar · ${new Date().toLocaleTimeString("es-ES", {hour12: false})}`;
+      narr.textContent = `🔁 [CICLO EJECUTADO] ${CYCLE.join("→")} | Neto: +${fmt(profit)} — commit atómico, cero exposición direccional`;
+    }, 2200);
+
+    setTimeout(() => { // el mercado vuelve a ser eficiente
+      segs.forEach(p => p.classList.remove("edge-cycle"));
+      CYCLE.forEach(id => nodeEls[id].classList.remove("cycle"));
+      parts.forEach(p => p.remove());
+      narr.className = ""; narr.textContent = "◉ Mercado eficiente — los fees superan al spread. El radar recalcula cada segundo…";
+      running = false; sweeping = true;
+    }, 6800);
+  }
+
+  function runSpike() {
+    if (running) return; running = true; sweeping = false;
+    const p = edgePaths["USDT@Binance>BTC@Binance"];
+    p.classList.add("edge-spike");
+    narr.className = "spike";
+    narr.textContent = "⚠️ [SPIKE BLOQUEADO] Binance +$10,000 | Factor 78.4× sobre el promedio — probable error de API. Tick descartado, capital protegido.";
+    nodeEls["BTC@Binance"].animate([
+      { transform: "translateX(0)" }, { transform: "translateX(-5px)" }, { transform: "translateX(5px)" },
+      { transform: "translateX(-4px)" }, { transform: "translateX(0)" }
+    ], { duration: 420 });
+    setTimeout(() => {
+      p.classList.remove("edge-spike");
+      narr.className = ""; narr.textContent = "◉ Mercado eficiente — el radar sigue vigilando. Ningún saldo fue tocado.";
+      running = false; sweeping = true;
+    }, 4200);
+  }
+
+  // ── drawer / modal / tabs / chips ─────────────────────────────────
+  const drawer = document.getElementById("drawer"), modal = document.getElementById("modal");
+  document.getElementById("b-strategy").onclick = () => drawer.classList.add("open");
+  document.getElementById("d-close").onclick = () => drawer.classList.remove("open");
+  document.getElementById("d-apply").onclick = () => { drawer.classList.remove("open"); toast("Estrategia aplicada — el backend valida y devuelve lo vigente"); };
+  document.getElementById("b-try").onclick = () => modal.classList.add("open");
+  modal.addEventListener("click", ev => { if (ev.target === modal) modal.classList.remove("open"); });
+  document.getElementById("sc-ok").onclick = () => { modal.classList.remove("open"); setTimeout(() => runCycle(26.70, "+0.132 % neto por vuelta"), 350); };
+  document.getElementById("sc-warn").onclick = () => { modal.classList.remove("open"); narr.textContent = "⚡ [SPIKE ALERTA] Factor 18.2× — evento extremo, ejecutando con aviso…"; setTimeout(() => runCycle(94.13, "+0.31 % neto · spike alerta"), 900); };
+  document.getElementById("sc-bad").onclick = () => { modal.classList.remove("open"); setTimeout(runSpike, 350); };
+
+  document.querySelectorAll("#venue-chips .chip").forEach(chip => {
+    chip.onclick = () => {
+      chip.classList.toggle("on");
+      const v = chip.dataset.venue, off = !chip.classList.contains("on");
+      venueGroups[v].classList.toggle("venue-off", off);
+      nodeLayers[v].classList.toggle("venue-off", off);
+      toast(off ? v + " fuera de tu universo — el radar no buscará ciclos ahí" : v + " vuelve a tu universo");
+    };
+  });
+  const sw = document.getElementById("sw-auto"), mode = document.getElementById("mode"), hint = document.getElementById("auto-hint");
+  let auto = true;
+  const setMode = () => {
+    mode.textContent = auto ? "RADAR · AUTOPILOTO ON" : "RADAR · SOLO DETECTANDO";
+    mode.classList.toggle("on", auto);
+    hint.textContent = auto ? "ON — el bot EJECUTA el mejor ciclo de tu universo con tus fees y tu margen."
+                            : "OFF — el radar solo detecta y narra; la ejecución queda en el modo clásico del par.";
+  };
+  sw.onclick = () => { auto = !auto; sw.classList.toggle("on", auto); sw.setAttribute("aria-checked", auto); setMode(); };
+  setMode();
+
+  const tabR = document.getElementById("tab-radar"), tabD = document.getElementById("tab-dash");
+  const radarWrap = document.getElementById("radar-wrap"), dash = document.getElementById("dashview");
+  tabR.onclick = () => { tabR.setAttribute("aria-selected", true); tabD.setAttribute("aria-selected", false); radarWrap.style.display = "block"; dash.style.display = "none"; };
+  tabD.onclick = () => { tabD.setAttribute("aria-selected", true); tabR.setAttribute("aria-selected", false); radarWrap.style.display = "none"; dash.style.display = "block"; };
+
+  // entrada orquestada: los nodos aparecen en cascada
+  if (!reduced) Object.values(nodeEls).forEach((g, i) => {
+    g.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 450, delay: 80 * i, fill: "backwards", easing: "ease-out" });
+  });
+})();
+</script>

@@ -1,0 +1,20 @@
+{
+  "_comentario": "Catálogo externo de Arus. Cópialo como venues.json (o apunta ARUS_CATALOG a él) y el motor cargará venues/instrumentos/paridades de aquí al arrancar, SIN recompilar. Agregar un libro a un venue ya conectado (p. ej. {\"venue\": \"Kraken\", \"base\": \"SOL\", \"quote\": \"USD\", \"stream_id\": \"SOL/USD\"}) hace que su FeedAdapter se suscriba solo y el radar gane sus nodos y aristas. Un venue NUEVO además necesita su FeedAdapter en Go (ws_real_market.go); mientras no lo tenga aparece en el radar sin datos. El par clásico (Binance y Bitso) debe existir siempre: capital inicial, crédito y reequilibrio dependen de él.",
+  "venues": [
+    { "name": "Binance", "default_taker_fee": 0.001, "base_asset": "BTC", "quote_asset": "USDT" },
+    { "name": "Bitso", "default_taker_fee": 0.0065, "base_asset": "BTC", "quote_asset": "USD" },
+    { "name": "Kraken", "default_taker_fee": 0.004, "base_asset": "BTC", "quote_asset": "USD" }
+  ],
+  "instruments": [
+    { "venue": "Binance", "base": "BTC", "quote": "USDT", "stream_id": "btcusdt" },
+    { "venue": "Binance", "base": "ETH", "quote": "USDT", "stream_id": "ethusdt" },
+    { "venue": "Binance", "base": "ETH", "quote": "BTC", "stream_id": "ethbtc" },
+    { "venue": "Binance", "base": "SOL", "quote": "USDT", "stream_id": "solusdt" },
+    { "venue": "Binance", "base": "SOL", "quote": "BTC", "stream_id": "solbtc" },
+    { "venue": "Bitso", "base": "BTC", "quote": "USD", "stream_id": "btc_usd" },
+    { "venue": "Kraken", "base": "BTC", "quote": "USD", "stream_id": "BTC/USD" },
+    { "venue": "Kraken", "base": "ETH", "quote": "USD", "stream_id": "ETH/USD" },
+    { "venue": "Kraken", "base": "ETH", "quote": "BTC", "stream_id": "ETH/BTC" }
+  ],
+  "parity_pairs": [["USDT", "USD"]]
+}
