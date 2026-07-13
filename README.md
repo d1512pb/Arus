@@ -22,52 +22,68 @@
 
 ---
 
-## 📑 Índice
+## Índice
 
-1. [Resumen ejecutivo](#-resumen-ejecutivo)
-2. [Filosofía del producto — cuatro pilares](#-filosofía-del-producto--cuatro-pilares)
-3. [El problema y la solución](#-el-problema-y-la-solución)
-4. [Estrategia e inteligencia del bot](#-estrategia-e-inteligencia-del-bot)
-5. [El Radar Omnidireccional (grafo de liquidez)](#-el-radar-omnidireccional-grafo-de-liquidez)
-6. [Velocidad y eficiencia](#-velocidad-y-eficiencia-detección-de-oportunidades)
-7. [Precisión del cálculo de rentabilidad neta](#-precisión-del-cálculo-de-rentabilidad-neta)
-8. [Robustez y gestión de riesgo](#-robustez-y-gestión-de-riesgo-circuit-breakers)
-9. [Auditoría interna y pruebas de estrés](#-auditoría-interna-y-pruebas-de-estrés)
-10. [Persistencia y continuidad](#-persistencia-y-continuidad-sesiones-completas--trade-ledger)
-11. [Arquitectura y stack tecnológico](#-arquitectura-y-stack-tecnológico)
-12. [Interfaz y experiencia de usuario](#-interfaz-y-experiencia-de-usuario)
-13. [Parámetros y configuración — referencia completa](#️-parámetros-y-configuración--referencia-completa)
-14. [Instalación y ejecución local](#-instalación-y-ejecución-local)
-15. [Despliegue](#-despliegue)
-16. [Capturas de pantalla](#-capturas-de-pantalla)
-17. [Licencia](#-licencia)
+1. [Resumen ejecutivo](#resumen-ejecutivo)
+2. [Evolución del producto](#evolución-del-producto)
+3. [Filosofía del producto — cuatro pilares](#filosofía-del-producto--cuatro-pilares)
+4. [El problema y la solución](#el-problema-y-la-solución)
+5. [Estrategia e inteligencia del bot](#estrategia-e-inteligencia-del-bot)
+6. [El Radar Omnidireccional (grafo de liquidez)](#el-radar-omnidireccional-grafo-de-liquidez)
+7. [Velocidad y eficiencia](#velocidad-y-eficiencia-detección-de-oportunidades)
+8. [Precisión del cálculo de rentabilidad neta](#precisión-del-cálculo-de-rentabilidad-neta)
+9. [Robustez y gestión de riesgo](#robustez-y-gestión-de-riesgo-circuit-breakers)
+10. [Auditoría interna y pruebas de estrés](#auditoría-interna-y-pruebas-de-estrés)
+11. [Persistencia y continuidad](#persistencia-y-continuidad-sesiones-completas--trade-ledger)
+12. [Arquitectura y stack tecnológico](#arquitectura-y-stack-tecnológico)
+13. [Interfaz y experiencia de usuario](#interfaz-y-experiencia-de-usuario)
+14. [Parámetros y configuración — referencia completa](#parámetros-y-configuración--referencia-completa)
+15. [Instalación y ejecución local](#instalación-y-ejecución-local)
+16. [Despliegue](#despliegue)
+17. [Capturas de pantalla](#capturas-de-pantalla)
+18. [Licencia](#licencia)
 
 ---
 
-## 🎯 Resumen ejecutivo
+## Resumen ejecutivo
 
 **Arus** es un motor de **arbitraje omnidireccional**: modela el mercado como un **grafo de liquidez** donde cada nodo es un activo en un exchange (`BTC@Binance`, `USD@Bitso`, `ETH@Kraken`…) y cada arista una forma de convertirlo (libros de órdenes reales, paridad USDT≈USD, inventario pre-fondeado). Una oportunidad de arbitraje es un **ciclo rentable** en ese grafo — comprar barato y vender caro entre exchanges (espacial) o rotar tres pares dentro de uno (triangular) son el mismo problema matemático, detectado con Bellman-Ford sobre pesos `−log(tasa·(1−fee))`, cada segundo, con datos 100 % reales de **Binance, Bitso y Kraken** (9 libros de órdenes en vivo).
 
-El sistema descuenta comisiones y slippage *antes* de decidir, dimensiona cada orden contra la liquidez visible del libro y deja al **usuario** parametrizar margen, riesgo, universo de mercados y términos del crédito — todo editable en vivo, validado por el backend y **persistido** en SQLite.
+El sistema descuenta comisiones y slippage *antes* de decidir, dimensiona cada orden contra la liquidez visible del libro y deja al **usuario** la última palabra sobre riesgo, universo de mercados y crédito — con botones que automatizan tramos del flujo cuando el usuario lo autoriza. Todo es editable en vivo, validado por el backend y **persistido** en SQLite.
 
 ---
 
-## 🏛️ Filosofía del producto — cuatro pilares
+## Evolución del producto
+
+Arus no nació como un grafo omnidireccional: **evolucionó** desde un bot de spread espacial (Binance ↔ Bitso, un par) hacia una plataforma multi-venue / multi-activo. Cada etapa resolvió una fricción real del arbitraje:
+
+| Etapa | Qué aprendimos | Qué quedó en el producto |
+|---|---|---|
+| **Spread neto** | El bruto engaña: fees y slippage pueden volver negativa una “oportunidad” | Una sola fórmula (`computeNetProfit`) para detectar, ejecutar, simular y medir |
+| **Inventario asimétrico** | Rebalancear on-chain tarda ~30+ min y se pierden ticks rentables | Crédito temporal vs. reequilibrio — **no dormir el capital** mientras hay ganancia neta |
+| **Errores de mercado** | Spikes, feeds congelados y fallos FoK rompen bots ingenuos | Filtros y circuit breakers que **abortan antes** de mutar wallets |
+| **Quién manda** | La automatización sin soberanía asusta al operador | El usuario **decide**; Arus propone y automatiza solo lo que él activa |
+| **Universo personal** | No todos operan los mismos exchanges ni monedas | Catálogo ampliable + poda por sesión → **otro subgrafo = otras oportunidades** |
+| **Omnidireccional** | Espacial y triangular son el mismo ciclo en un grafo | Radar + Bellman-Ford sobre el universo activo del usuario |
+
+---
+
+## Filosofía del producto — cuatro pilares
 
 Arus no es un bot de spread bruto: es una plataforma de arbitraje con disciplina institucional. Descansa en cuatro pilares verificables en el código:
 
 | Pilar | Principio | Implementación en el motor |
 |---|---|---|
 | **La Física Real del Dinero** | Solo opera cuando la ganancia **neta** supera el margen del usuario, tras fees y slippage en cada pierna | `computeNetProfit` (engine.go) — única fórmula para detección, ejecución del par, ciclos del radar, simulador y benchmarks |
-| **Eficiencia de Capital** | El capital no duerme: línea de crédito instantánea cuando la rentabilidad domina el costo | `creditWorthIt`, `cycleCreditProjection`, `handleLiquidityShortfall` — inecuación `ganancia > costo × RiskMultiplier` en modo clásico y radar |
-| **Control Absoluto del Usuario** | El riesgo lo define quien opera, no el sistema | 16 parámetros por sesión (`set_params`), onboarding guiado/experto, universo podable, presets Conservador/Balanceado/Agresivo |
-| **Escudo de Robustez** | Ante fallas de exchange, no queda exposición direccional | Fill-or-Kill atómico antes de mutar wallets, Spike Filter, staleness, `MaxDivergenceRatio`, evento `CIRCUIT_BREAKER` + Emergency Unwind preventivo |
+| **Eficiencia de Capital** | El capital no duerme: si rebalancear implica perder la ventana, el crédito temporal permite **seguir capturando** la oportunidad cuando la matemática lo justifica | `creditWorthIt`, `cycleCreditProjection`, `handleLiquidityShortfall` — inecuación `ganancia > costo × RiskMultiplier` en modo clásico y radar |
+| **Control Absoluto del Usuario** | La **última decisión** siempre es humana: riesgo, universo, crédito y autopiloto. Arus automatiza tramos (presets, auto-crédito, radar) solo cuando el usuario lo enciende | 16 parámetros por sesión (`set_params`), onboarding guiado/experto, `enabled_venues` / `enabled_assets`, presets Conservador/Balanceado/Agresivo, toggles de crédito y autopiloto |
+| **Escudo de Robustez** | Ante fallas de exchange o precios absurdos, no queda exposición direccional | Fill-or-Kill atómico, Spike Filter, staleness, `MaxDivergenceRatio`, evento `CIRCUIT_BREAKER` + Emergency Unwind preventivo |
 
 ---
 
-## 💡 El problema y la solución
+## El problema y la solución
 
-El error clásico del arbitraje novato es operar sobre el **spread bruto** (`Ask < Bid`) ignorando que cada operación tiene costos que pueden volverla negativa. Arus parte de modelar esos costos.
+El error clásico del arbitraje novato es operar sobre el **spread bruto** (`Ask < Bid`) ignorando que cada operación tiene costos que pueden volverla negativa. Arus parte de modelar esos costos — y de no abandonar oportunidades válidas por fricciones operativas.
 
 | | Arbitraje ingenuo | **Arus** |
 |---|---|---|
@@ -75,33 +91,52 @@ El error clásico del arbitraje novato es operar sobre el **spread bruto** (`Ask
 | Comisiones | Se asumen "despreciables" | Modeladas por exchange y **personalizables** (cuentas VIP pagan menos) |
 | Slippage | Ignorado | Estimado por pierna (configurable) y descontado antes de decidir |
 | Alcance | Un par fijo | **Grafo omnidireccional**: espacial + triangular con el mismo detector |
+| Universo | Igual para todos | Cada usuario **poda** venues/activos → su propio mapa de oportunidades |
 | Volumen | Fijo | `min(tope del usuario, liquidez real del libro en cada pierna)` |
-| Anomalías de precio | Se opera sobre ellas | **Spike Filter** + staleness + compuertas de divergencia |
-| Falta de fondos | Se detiene o falla | Decisión crédito-vs-reequilibrio con análisis de rentabilidad |
+| Anomalías de precio | Se opera sobre ellas | **Filtros** (Spike + staleness + divergencia) descartan el tick erróneo |
+| Falta de fondos | Se detiene o falla | Crédito temporal vs. reequilibrio — **no perder** la ventana rentable por esperar el traslado |
+| Autonomía | Todo automático o todo manual | El usuario decide; botones automatizan partes del flujo con opt-in |
 | Estado | Volátil / en memoria | **Sesiones completas persistidas** + ledger inmutable de auditoría |
 
 ---
 
-## 🧠 Estrategia e inteligencia del bot
+## Estrategia e inteligencia del bot
 
 El motor opera con **dos estrategias conmutables por el usuario**:
 
 - **Modo clásico (default):** arbitraje espacial del par BTC entre Binance y Bitso con fondos pre-posicionados en ambos lados — compra y venta **simultáneas**. Evalúa las **dos** direcciones cada tick y ejecuta la de **mayor neto**.
-- **Modo radar / autopiloto (opt-in):** el grafo de liquidez completo. El motor busca cada segundo el mejor **ciclo** dentro del universo del usuario — espacial o **triangular** — con los fees de ESE usuario en los pesos, y lo ejecuta atómicamente si supera SU margen.
+- **Modo radar / autopiloto (opt-in):** el grafo de liquidez completo. El motor busca cada segundo el mejor **ciclo** dentro del **universo del usuario** — espacial o **triangular** — con los fees de ESE usuario en los pesos, y lo ejecuta atómicamente si supera SU margen. Sin autopiloto, el radar **detecta y muestra**; no ejecuta solo.
 
-### ⭐ La capa de inteligencia financiera (crédito vs. reequilibrio)
+### Crédito vs. reequilibrio — no perder la oportunidad
 
-Cuando un exchange agota su inventario, reponerlo exige transferencias on-chain de **~30+ minutos**. Arus modela una línea de crédito instantánea cuyos **términos define cada usuario** y decide según:
+Cuando un exchange agota su inventario, reponerlo con un traslado on-chain implica **~30+ minutos** de capital idle. En ese intervalo el mercado sigue moviéndose y las ventanas netas se evaporan.
+
+Arus modela una **línea de crédito temporal** cuyos términos define cada usuario y decide (o propone) según:
 
 ```
 pedir préstamo ⇔ ganancia proyectada > costo del crédito × RiskMultiplier
 ```
 
-El préstamo es **siempre temporal**: al vencer se devuelve y el inventario del par vuelve a 50/50. Un crédito activo **jamás se persiste como capital del usuario**.
+- **Objetivo:** no sacrificar una oportunidad neta válida solo porque el inventario está desbalanceado.
+- El préstamo es **siempre temporal**: al vencer se devuelve y el inventario del par vuelve a 50/50.
+- Un crédito activo **jamás se persiste como capital del usuario**.
+- Si el usuario prefiere esperar el reequilibrio, puede hacerlo: la **última decisión es suya** (pedir crédito, esperar redistribución o descartar el shortfall).
+
+### Quién decide y qué se automatiza
+
+| Decisión | Quién la toma | Automatización disponible |
+|---|---|---|
+| Margen mínimo, tamaño, fees, spike, divergencia | **Usuario** (`set_params`, panel de estrategia) | Presets Conservador / Balanceado / Agresivo |
+| Universo (qué exchanges y monedas importan) | **Usuario** | Listas `enabled_venues` / `enabled_assets` |
+| Ejecutar ciclos del radar sin confirmar cada uno | **Usuario** (opt-in) | Toggle `radar_autopilot` |
+| Crédito ante shortfall | **Usuario** | Auto-crédito si cumple la inecuación; o botones Pedir crédito / Esperar reequilibrio / Descartar |
+| Inyectar escenarios de prueba | **Usuario** | Banco **Probar el bot** (omni, tormenta, spike, custom) |
+
+Arus **asiste y acelera**; no sustituye al operador.
 
 ---
 
-## 📡 El Radar Omnidireccional (grafo de liquidez)
+## El Radar Omnidireccional (grafo de liquidez)
 
 El mercado se modela como un **grafo dirigido** (diseño completo en [`docs/FASE2-GRAFO.md`](docs/FASE2-GRAFO.md)):
 
@@ -113,11 +148,21 @@ El mercado se modela como un **grafo dirigido** (diseño completo en [`docs/FASE
 | Mismo activo en dos exchanges pre-fondeados | **Arista de inventario** |
 | Oportunidad de arbitraje | **Ciclo de peso negativo** — detectado por Bellman-Ford |
 
-**Topología actual:** **9 nodos** y **32 aristas** (Binance: triángulos BTC/ETH/SOL · Bitso: BTC/USD · Kraken: triángulo BTC/ETH). Agregar un exchange = entrada en el registro + adaptador de feed, **cero cambios en la lógica de decisión**.
+**Topología actual:** **9 nodos** y **32 aristas** (Binance: triángulos BTC/ETH/SOL · Bitso: BTC/USD · Kraken: triángulo BTC/ETH).
+
+### Extensible por diseño — un universo distinto por usuario
+
+La lógica de decisión **no conoce** “Binance” ni “BTC” a fuego: lee un **registro / catálogo** (`venues.go`, opcionalmente `venues.json` vía `ARUS_CATALOG`).
+
+- **Más exchanges o monedas** = entrada en el catálogo + adaptador de feed → nodos y aristas nuevos, **cero cambios** en Bellman-Ford ni en `computeNetProfit`.
+- Cada sesión puede **podar** el grafo (`enabled_venues`, `enabled_assets`): un usuario solo Bitso+Kraken y otro con el catálogo completo ven **subgrafos distintos** y, por tanto, **oportunidades distintas** (espaciales, triangulares o ambas).
+- Fees y slippage del usuario entran en los pesos: el mismo ciclo puede ser rentable para uno e inviable para otro.
+
+Eso convierte a Arus en una plataforma de arbitraje **personalizable**, no en un bot de un solo par para todos.
 
 ---
 
-## ⚡ Velocidad y eficiencia (detección de oportunidades)
+## Velocidad y eficiencia (detección de oportunidades)
 
 **Núcleo de detección — latencia medida, no estimada.** El hot path (mids, Spike Filter, fees, slippage, neto y decisión) es **O(1)**:
 
@@ -146,7 +191,7 @@ cd apps/engine && go test -overlay tests/overlay.json -bench=BenchmarkNetProfit 
 
 ---
 
-## 🎯 Precisión del cálculo de rentabilidad neta
+## Precisión del cálculo de rentabilidad neta
 
 Una única fórmula gobierna TODAS las decisiones — `computeNetProfit` en engine.go:
 
@@ -162,21 +207,25 @@ Neto = (P_venta × V × (1 − fee_venta)) − (P_compra × V × (1 + fee_compra
 
 ---
 
-## 🛡️ Robustez y gestión de riesgo (circuit breakers)
+## Robustez y gestión de riesgo (circuit breakers)
 
-- **Feed congelado (staleness >10 s):** aristas excluidas del grafo; evaluación pausada
-- **Spike Filter en dos capas:** ingesta global (5 %) + tolerancia por sesión (`spike_tick_deviation`)
-- **Divergencia entre casas:** aborta si supera `MaxDivergenceRatio` del usuario
-- **Fill-or-Kill atómico:** fallo de orden evaluado **antes** de mover saldos — cero exposición direccional
-- **Doble hard block de fondos:** validación al planificar y bajo lock justo antes del commit
-- **Cooldown 3 s** + `IsExecuting` serializa ejecuciones (cierra ventana TOCTOU)
-- **Apalancamiento disciplinado:** nunca se pide crédito que no cubra `costo × RiskMultiplier`
+Arus asume que el mercado miente a veces. Los **filtros** existen para **evitar errores costosos**, no para decorar el UI:
+
+| Filtro / compuerta | Qué evita |
+|---|---|
+| **Spike Filter** (ingesta 5 % + tolerancia por sesión) | Operar sobre un tick absurdo (+50 %, glitch, inyección de prueba) |
+| **Staleness (>10 s)** | Usar un libro congelado como si fuera precio vivo |
+| **`MaxDivergenceRatio`** | Arbitrar cuando dos casas “no hablan del mismo mercado” |
+| **Fill-or-Kill atómico** | Quedarse a media pierna (exposición direccional) |
+| **Doble hard block de fondos** | Commit con saldo insuficiente (plan + lock) |
+| **Cooldown 3 s + `IsExecuting`** | Carreras TOCTOU entre ticks concurrentes |
+| **Inecuación de crédito** | Pedir préstamo que no cubre `costo × RiskMultiplier` |
 
 El botón **«Precio falso / error»** en *Probar el bot* (`inject_fake`, circuit.go) provoca anomalías reales (spike de ingesta, timeout FoK, divergencia) y el motor las **rechaza** emitiendo `CIRCUIT_BREAKER` — sin luces verdes ni mutación de capital.
 
 ---
 
-## 🔬 Auditoría interna y pruebas de estrés
+## Auditoría interna y pruebas de estrés
 
 Suite concentrada en `apps/engine/tests/` (compilada vía overlay sobre `package main` para acceso white-box). Reporte completo: [`apps/engine/tests/STRESS_TEST_REPORT.md`](apps/engine/tests/STRESS_TEST_REPORT.md).
 
@@ -221,7 +270,7 @@ cd apps/engine && node smoke_custom_sim.mjs  # POST /api/simulate/custom
 
 ---
 
-## 💾 Persistencia y continuidad (sesiones completas + Trade Ledger)
+## Persistencia y continuidad (sesiones completas + Trade Ledger)
 
 Arus persiste en SQLite **la sesión completa de cada usuario**: saldos multi-activo, estrategia, PnL y preferencias sobreviven a reinicios del motor **y** del navegador. Token UUID v4 en `localStorage` → `resume_session` recupera todo sin login.
 
@@ -244,7 +293,7 @@ Un proceso, un escritor (write-behind), lecturas esporádicas — el patrón exa
 
 ---
 
-## 🏗️ Arquitectura y stack tecnológico
+## Arquitectura y stack tecnológico
 
 ```mermaid
 flowchart LR
@@ -292,6 +341,7 @@ apps/engine/
 ├── engine.go      # computeNetProfit, bucle Start, ejecutor clásico, crédito
 ├── graph.go       # LiquidityGraph, Bellman-Ford
 ├── cycle.go       # planCycle + commitCycle + autopiloto
+├── venues.go      # registro de venues/instrumentos (extensible)
 ├── simulate.go    # POST /api/simulate/custom (tubería real)
 ├── omni.go        # inject_omni — oportunidad omnidireccional
 ├── storm.go       # inject_storm — ráfaga HFT
@@ -303,7 +353,7 @@ apps/engine/
 
 ---
 
-## 🖥️ Interfaz y experiencia de usuario
+## Interfaz y experiencia de usuario
 
 Web app **Radar-first** ([`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md)): el grafo de liquidez es la pantalla principal; el dashboard concentra P&L, wallets, ledger y analítica.
 
@@ -314,7 +364,16 @@ Web app **Radar-first** ([`docs/REDISENO-RADAR.md`](docs/REDISENO-RADAR.md)): el
 - **Vista DASHBOARD:** KPIs, salud de inventario por venue, donut de distribución de capital, historial/auditoría, analítica con curva de P&L y export CSV
 - **Onboarding adaptativo:** modo Guiado (un número + presets) y Experto (matriz de % por exchange validada en UI y backend)
 
-### ⚡ Probar el bot — banco de pruebas sin reiniciar el motor
+### El usuario manda; los botones aceleran
+
+La UI está diseñada para que **ninguna automatización sea silenciosa**:
+
+- Shortfall de liquidez → panel con **Pedir crédito**, **Esperar reequilibrio** o **Descartar** (más auto-crédito solo si el usuario lo habilitó).
+- Radar → el ciclo se ve en el grafo; la ejecución en bucle requiere **autopiloto** explícito.
+- Estrategia → presets y sliders; el motor **clampa y valida** en backend, no “adivina” riesgo.
+- **Probar el bot** → el usuario dispara escenarios a voluntad para auditar el comportamiento bajo presión.
+
+### Probar el bot — banco de pruebas sin reiniciar el motor
 
 Accesible desde el header en **ambas vistas**. Inyecta escenarios por el **mismo pipeline** que los feeds reales — misma `computeNetProfit`, mismos circuit breakers, mismo ejecutor:
 
@@ -327,7 +386,7 @@ Accesible desde el header en **ambas vistas**. Inyecta escenarios por el **mismo
 
 ---
 
-## ⚙️ Parámetros y configuración — referencia completa
+## Parámetros y configuración — referencia completa
 
 Fuente de verdad viva: `GET /api/config` — cada parámetro con default, rango y catálogo de venues.
 
@@ -342,8 +401,8 @@ Fuente de verdad viva: `GET /api/config` — cada parámetro con default, rango 
 | `max_divergence_ratio` | Divergencia máxima entre casas | 1.20 |
 | `risk_multiplier` | Inecuación del crédito | 1.0 |
 | `order_failure_prob` | Prob. Fill-or-Kill (simulador) | 5 % |
-| `enabled_venues` / `enabled_assets` | Universo (poda del grafo) | todos |
-| `radar_autopilot` | Detección → ejecución de ciclos | off |
+| `enabled_venues` / `enabled_assets` | Universo (poda del grafo → oportunidades distintas) | todos |
+| `radar_autopilot` | Detección → ejecución automática de ciclos | off |
 
 Bloque completo de crédito (`credit_line_usd`, `credit_line_btc`, `credit_apr`, `credit_origination_fee`, `credit_duration_min`) y comisiones por venue — ver `GET /api/config`.
 
@@ -359,7 +418,7 @@ Frontend: `NEXT_PUBLIC_ENGINE_WS_URL` y `NEXT_PUBLIC_ENGINE_HTTP_URL` (ver `apps
 
 ---
 
-## 🚀 Instalación y ejecución local
+## Instalación y ejecución local
 
 > Sistema funcional en **menos de 2 minutos**. Sin Docker ni base de datos externa.
 
@@ -403,12 +462,12 @@ cd apps/web && npm test
 
 ---
 
-## ☁️ Despliegue
+## Despliegue
 
-| Componente | Plataforma |
-|---|---|
-| **Frontend** | **Vercel** (root: `apps/web`) |
-| **Motor** | **Fly.io** (volumen persistente `data/`) |
+| Componente | Plataforma | URL en producción |
+|---|---|---|
+| **Frontend** | **Vercel** (root: `apps/web`) | [arus-snowy.vercel.app](https://arus-snowy.vercel.app) |
+| **Motor** | **Fly.io** (volumen persistente `data/`) | [arus-engine.fly.dev](https://arus-engine.fly.dev/api/ledger) |
 
 ```bash
 flyctl auth login
@@ -416,7 +475,7 @@ cd apps/engine
 flyctl deploy
 ```
 
-Variables en Vercel:
+Variables en Vercel (Production — requieren rebuild):
 
 ```
 NEXT_PUBLIC_ENGINE_WS_URL=wss://arus-engine.fly.dev/ws
@@ -425,7 +484,7 @@ NEXT_PUBLIC_ENGINE_HTTP_URL=https://arus-engine.fly.dev
 
 ---
 
-## 📸 Capturas de pantalla
+## Capturas de pantalla
 
 ### Vista RADAR — grafo de liquidez en acción
 
@@ -474,7 +533,7 @@ P&L acumulado, salud de inventario, feed de operaciones y precios en vivo.
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 Este proyecto se distribuye bajo la **licencia MIT** — eres libre de usar, copiar, modificar y distribuir el código, citando la autoría. El texto completo está en [`LICENSE`](LICENSE).
 
