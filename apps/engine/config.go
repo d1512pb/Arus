@@ -184,6 +184,8 @@ func configHandler(w http.ResponseWriter, r *http.Request) {
 		// Guiado del onboarding lo usa para derivar el BTC de un total en USD.
 		"reference": map[string]float64{
 			"btc_price_usd": getBTCPrice(),
+			"eth_price_usd": assetPriceUSD("ETH"),
+			"sol_price_usd": assetPriceUSD("SOL"),
 		},
 
 		// El catálogo vigente (compilado o cargado de ARUS_CATALOG).

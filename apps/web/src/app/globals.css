@@ -122,6 +122,19 @@
   animation: card-pop 0.18s ease-out forwards;
 }
 
+/* HFT Flash: borde neón + tint verde en la fila de activo durante el overlay forense. */
+@keyframes hft-flash {
+  0%   { background-color: rgba(16, 185, 129, 0.28); box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.7); }
+  50%  { background-color: rgba(16, 185, 129, 0.18); box-shadow: 0 0 12px 2px rgba(16, 185, 129, 0.45); }
+  100% { background-color: rgba(16, 185, 129, 0.22); box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.55); }
+}
+.hft-flash-cell {
+  animation: hft-flash 0.4s ease-out;
+  border-radius: 0.5rem;
+  padding: 0.25rem 0.35rem;
+  margin: -0.25rem -0.35rem;
+}
+
 /* ── Préstamo: ganancia neta obtenida gracias al capital prestado ──────────
    Al vencer un préstamo, un destello centrado en el radar comunica DE UN
    VISTAZO cuánto neto rindió la inyección de capital (el fuerte de Arus: no

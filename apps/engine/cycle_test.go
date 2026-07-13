@@ -107,7 +107,7 @@ func TestPlanCycle_Inviable(t *testing.T) {
 	}
 
 	// Margen del usuario mayor que lo que el ciclo puede rendir.
-	rich := Balances{"Binance": {"USDT": 5_000}, "Bitso": {"BTC": 1}}
+	rich := Balances{"Binance": {"USDT": 5_000}, "Bitso": {"BTC": 1, "USD": 1_000}}
 	p.MinNetProfitUSD = 10_000
 	if _, err := planCycle(cycle, rich, p, 60_000); err == nil {
 		t.Fatal("plan aceptado por debajo del margen del usuario")
@@ -116,8 +116,8 @@ func TestPlanCycle_Inviable(t *testing.T) {
 
 // TestPlanCycle_PicksFundedCashStart (Sprint C): un ciclo puede tocar varios
 // nodos cash; si el "primero" no tiene saldo pero otro sí, el plan debe rotar
-// al nodo FUNDADO en vez de rendirse — así los ciclos que pasan por Kraken son
-// ejecutables sin haber depositado nunca en Kraken.
+// al nodo FUNDADO. En el mundo real también hace falta inventario cripto en el
+// venue de venta (pre-fondeo): sin BTC@Bitso no hay pierna de venta.
 func TestPlanCycle_PicksFundedCashStart(t *testing.T) {
 	now := time.Now()
 	g := profitableSpatialGraph(now)
@@ -126,8 +126,9 @@ func TestPlanCycle_PicksFundedCashStart(t *testing.T) {
 		t.Fatal("sin ciclo de partida")
 	}
 
-	// Fondos ÚNICAMENTE en USD@Bitso: cualquier otra rotación cash está en cero.
-	balances := Balances{"Bitso": {"USD": 5_000}}
+	// Cash solo en Bitso + BTC pre-fondeado para vender. Binance nace en 0:
+	// la paridad USD→USDT financia la compra allí.
+	balances := Balances{"Bitso": {"USD": 5_000, "BTC": 0.25}}
 	p := DefaultTradingParameters()
 
 	plan, err := planCycle(cycle, balances, p, 60_000)
@@ -149,7 +150,7 @@ func TestPlanCycle_FeesUSD(t *testing.T) {
 	g := profitableSpatialGraph(now)
 	cycle := g.FindBestCycle(now)
 
-	balances := Balances{"Binance": {"USDT": 5_000}, "Bitso": {"USD": 5_000, "BTC": 1}}
+	balances := Balances{"Binance": {"USDT": 5_000, "BTC": 1}, "Bitso": {"USD": 5_000, "BTC": 1}}
 	plan, err := planCycle(cycle, balances, DefaultTradingParameters(), 60_000)
 	if err != nil {
 		t.Fatalf("plan rechazado: %v", err)
@@ -207,14 +208,17 @@ func TestCycleCreditProjection(t *testing.T) {
 
 // TestCommitCycle_ConservesBalances: tras ejecutar, el nodo de inicio gana
 // exactamente el neto; los nodos intermedios quedan como estaban (todo lo que
-// entra sale) y el PnL de la sesión sube por el neto.
-func TestCommitCycle_ConservesBalances(t *testing.T) {
+// TestCommitCycle_SpatialSkewsInventory: en arbitraje espacial real el bot
+// COMPRA crypto en un venue y la VENDE en otro — el inventario se sesga
+// (más BTC donde compraste, menos donde vendiste). El swap de inventario del
+// grafo NO teletransporta: solo conecta la ruta. El cash de inicio sube ≈ neto.
+func TestCommitCycle_SpatialSkewsInventory(t *testing.T) {
 	now := time.Now()
 	g := profitableSpatialGraph(now)
 	cycle := g.FindBestCycle(now)
 
 	s := newClientSession("ciclo", nil)
-	initSession(s, 10_000, 0.5, nil, nil) // 5 000 quote + 0.25 BTC por venue
+	initSession(s, 10_000, 0.5, nil, nil, nil) // 5 000 quote + 0.25 BTC por venue
 
 	s.Mu.Lock()
 	before := s.Wallets.Clone()
@@ -237,22 +241,35 @@ func TestCommitCycle_ConservesBalances(t *testing.T) {
 	if !closeTo(gotStart, wantStart, 1e-6) {
 		t.Fatalf("inicio: %v, esperado %v (+neto)", gotStart, wantStart)
 	}
-	// TODO nodo que no sea el de inicio queda sin residuo (lo que entra sale) —
-	// incluidos los venues de tránsito de los swaps de inventario (Kraken).
-	for venue, assets := range s.Wallets {
-		for asset := range assets {
-			if venue == start.Venue && asset == string(start.Asset) {
-				continue
+	if !closeTo(s.TotalWealth, wealthBefore+plan.NetProfit, 1e-9) {
+		t.Fatalf("TotalWealth=%v, esperado %v", s.TotalWealth, wealthBefore+plan.NetProfit)
+	}
+
+	// Debe existir al menos un sesgo cripto (compra vs venta) tras saltar swaps.
+	skewed := false
+	for _, leg := range plan.Legs {
+		if leg.Kind != EdgeOrderBook {
+			continue
+		}
+		// Compra: To es crypto base → ese venue gana crypto
+		if !isCashAsset(leg.To.Asset) {
+			got := s.Wallets.Get(leg.To.Venue, string(leg.To.Asset))
+			want := before.Get(leg.To.Venue, string(leg.To.Asset))
+			if got > want+1e-9 {
+				skewed = true
 			}
-			got := s.Wallets.Get(venue, asset)
-			want := before.Get(venue, asset)
-			if !closeTo(got, want, 1e-9) {
-				t.Fatalf("residuo en %s@%s: %v, esperado %v", asset, venue, got, want)
+		}
+		// Venta: From es crypto base → ese venue pierde crypto
+		if !isCashAsset(leg.From.Asset) {
+			got := s.Wallets.Get(leg.From.Venue, string(leg.From.Asset))
+			want := before.Get(leg.From.Venue, string(leg.From.Asset))
+			if got < want-1e-9 {
+				skewed = true
 			}
 		}
 	}
-	if !closeTo(s.TotalWealth, wealthBefore+plan.NetProfit, 1e-9) {
-		t.Fatalf("TotalWealth=%v, esperado %v", s.TotalWealth, wealthBefore+plan.NetProfit)
+	if !skewed {
+		t.Fatalf("el inventario cripto no se sesgó tras el ciclo espacial: antes=%+v después=%+v", before, s.Wallets)
 	}
 }
 
@@ -264,7 +281,7 @@ func TestCommitCycle_HardBlock(t *testing.T) {
 	cycle := g.FindBestCycle(now)
 
 	s := newClientSession("ciclo-block", nil)
-	initSession(s, 10_000, 0.5, nil, nil)
+	initSession(s, 10_000, 0.5, nil, nil, nil)
 
 	s.Mu.Lock()
 	snapshot := s.Wallets.Clone()

@@ -54,12 +54,15 @@ type SessionRecord struct {
 	// reanudación respete la elección del usuario.
 	UsdAlloc map[string]float64
 	BtcAlloc map[string]float64
+	// AssetInventory: totales mid (ETH/SOL…) del onboarding; viaja en alloc_json.
+	AssetInventory map[string]float64
 }
 
 // allocPayload es el shape de la columna sessions.alloc_json.
 type allocPayload struct {
-	Usd map[string]float64 `json:"usd,omitempty"`
-	Btc map[string]float64 `json:"btc,omitempty"`
+	Usd    map[string]float64 `json:"usd,omitempty"`
+	Btc    map[string]float64 `json:"btc,omitempty"`
+	Assets map[string]float64 `json:"assets,omitempty"`
 }
 
 // SessionStore es el contrato de persistencia de sesiones.
@@ -127,8 +130,8 @@ func (s *sqliteSessionStore) SaveSession(rec SessionRecord) error {
 	}
 	// Distribución del onboarding: '' = reparto clásico (nada que serializar).
 	allocJSON := ""
-	if rec.UsdAlloc != nil || rec.BtcAlloc != nil {
-		b, err := json.Marshal(allocPayload{Usd: rec.UsdAlloc, Btc: rec.BtcAlloc})
+	if rec.UsdAlloc != nil || rec.BtcAlloc != nil || rec.AssetInventory != nil {
+		b, err := json.Marshal(allocPayload{Usd: rec.UsdAlloc, Btc: rec.BtcAlloc, Assets: rec.AssetInventory})
 		if err != nil {
 			return err
 		}
@@ -214,6 +217,7 @@ func (s *sqliteSessionStore) LoadSession(id string) (SessionRecord, bool, error)
 			log.Printf("⚠️ [STORE] alloc_json corrupto en sesión %s — reparto clásico: %v", id, err)
 		} else {
 			rec.UsdAlloc, rec.BtcAlloc = alloc.Usd, alloc.Btc
+			rec.AssetInventory = sanitizeAssetInventory(alloc.Assets)
 		}
 	}
 
@@ -278,20 +282,25 @@ func snapshotSessionRecord(s *ClientSession) (SessionRecord, bool) {
 		// con la goroutine de escritura es seguro por convención (como TakerFees).
 		UsdAlloc: s.UsdAlloc,
 		BtcAlloc: s.BtcAlloc,
+		AssetInventory: s.AssetInventory,
 	}
 
 	// Fotografía multi-activo COMPLETA (hito 3): todos los activos de todos los
-	// venues; el préstamo activo (que vive solo en quote/base) se descuenta.
+	// venues; el préstamo activo se descuenta (agnóstico: Borrowed o mapas legacy).
 	for venue, assets := range s.Wallets {
 		inner := make(map[string]float64, len(assets))
 		for asset, amt := range assets {
 			own := amt
 			if s.Credit.Active {
-				if asset == quoteOf(venue) && s.Credit.BorrowedUSD != nil {
-					own -= s.Credit.BorrowedUSD[venue]
-				}
-				if asset == baseOf(venue) && s.Credit.BorrowedBTC != nil {
-					own -= s.Credit.BorrowedBTC[venue]
+				if s.Credit.Borrowed != nil {
+					own -= s.Credit.Borrowed.Get(venue, asset)
+				} else {
+					if asset == quoteOf(venue) && s.Credit.BorrowedUSD != nil {
+						own -= s.Credit.BorrowedUSD[venue]
+					}
+					if asset == baseOf(venue) && s.Credit.BorrowedBTC != nil {
+						own -= s.Credit.BorrowedBTC[venue]
+					}
 				}
 				if own < 0 {
 					own = 0 // el bot consumió parte del préstamo: lo propio nunca es negativo
@@ -358,7 +367,7 @@ func applySessionRecord(s *ClientSession, rec SessionRecord) {
 
 	// Distribución del onboarding: se restaura VALIDADA (una fila manipulada no
 	// inyecta venues fantasma ni sumas rotas); inválida → reparto clásico.
-	s.UsdAlloc, s.BtcAlloc = nil, nil
+	s.UsdAlloc, s.BtcAlloc, s.AssetInventory = nil, nil, nil
 	if rec.UsdAlloc != nil && validAllocation(rec.UsdAlloc) {
 		s.UsdAlloc = rec.UsdAlloc
 		if rec.BtcAlloc != nil && validAllocation(rec.BtcAlloc) {
@@ -367,6 +376,7 @@ func applySessionRecord(s *ClientSession, rec SessionRecord) {
 			s.BtcAlloc = rec.UsdAlloc
 		}
 	}
+	s.AssetInventory = sanitizeAssetInventory(rec.AssetInventory)
 	s.IsReplenishing = false
 	s.ReplenishExpiresAt = time.Time{}
 	s.InsufficientFundsPending = false

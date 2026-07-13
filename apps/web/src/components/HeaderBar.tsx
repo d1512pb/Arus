@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Radar, LayoutDashboard, ShieldAlert, SlidersHorizontal, BookOpen, Moon, Sun, RotateCcw } from "lucide-react";
+import { Radar, LayoutDashboard, ShieldAlert, SlidersHorizontal, BookOpen, Moon, Sun, RotateCcw, RefreshCw } from "lucide-react";
 
 // HeaderBar — cabecera compacta del rediseño Radar-first (fase R1).
 // Una sola línea con lo vital: marca, estado, patrimonio+PnL (con contador
 // animado), tabs RADAR|DASHBOARD, y las acciones globales. "Probar el bot" vive
 // aquí porque inyectar un escenario y VER al radar reaccionar es la demo
 // central de Arus — disponible desde ambas vistas.
+// El préstamo NO va aquí: aparece en el overlay de congelamiento al Redistribuir.
 
 export type AppView = "radar" | "dashboard";
 
@@ -18,7 +19,10 @@ interface Props {
   pnl: number | null;
   uptime: string;
   autopilot: boolean;
+  isRebalancing?: boolean;
+  creditActive?: boolean;
   onProbar: () => void;
+  onRebalance: () => void;
   onEstrategia: () => void;
   onTutorial: () => void;
   onReset: () => void;
@@ -57,8 +61,8 @@ function useCountUp(target: number) {
 }
 
 export function HeaderBar({
-  view, onViewChange, totalWealth, pnl, uptime, autopilot,
-  onProbar, onEstrategia, onTutorial, onReset, isDarkMode, onToggleDark,
+  view, onViewChange, totalWealth, pnl, uptime, autopilot, isRebalancing, creditActive,
+  onProbar, onRebalance, onEstrategia, onTutorial, onReset, isDarkMode, onToggleDark,
 }: Props) {
   const wealthRef = useCountUp(totalWealth);
 
@@ -81,20 +85,31 @@ export function HeaderBar({
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)] animate-pulse"></span>
             EN LÍNEA
           </span>
+          {autopilot && (
+            <span className="text-emerald-600 dark:text-emerald-400" title="El radar detecta y ejecuta ciclos">
+              AUTOPILOTO
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Modo del radar */}
-      <span
-        className={`hidden lg:inline-flex text-[9px] font-bold tracking-[0.18em] px-2.5 py-1 rounded-full border ${
-          autopilot
-            ? "border-emerald-300 dark:border-emerald-500/40 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10"
-            : "border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500"
-        }`}
-        title={autopilot ? "El radar detecta Y ejecuta el mejor ciclo de tu universo" : "El radar solo detecta; ejecuta el modo clásico del par"}
-      >
-        {autopilot ? "AUTOPILOTO ON" : "SOLO DETECTA"}
-      </span>
+      {/* Redistribuir: congela el bot ~1 min (demo); el préstamo vive en ese overlay */}
+      <div className="hidden lg:flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onRebalance}
+          disabled={isRebalancing || creditActive}
+          title="Reparte el inventario entre exchanges (traslado ~1 min en demo). No disponible con crédito activo."
+          className={`inline-flex items-center gap-1.5 text-[9px] font-bold tracking-[0.14em] uppercase px-2.5 py-1.5 rounded-full border transition-all duration-300 ${
+            isRebalancing
+              ? "border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 cursor-wait"
+              : "border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 hover:bg-amber-100 dark:hover:bg-amber-500/20 hover:-translate-y-0.5 active:scale-95 disabled:opacity-40 disabled:hover:translate-y-0"
+          }`}
+        >
+          <RefreshCw className={`w-3 h-3 ${isRebalancing ? "animate-spin" : ""}`} />
+          {isRebalancing ? "Reequilibrando…" : "Redistribuir"}
+        </button>
+      </div>
 
       {/* Patrimonio + PnL — el contador anima al ganar */}
       <div className="ml-auto flex items-baseline gap-2.5 font-mono" style={{ fontVariantNumeric: "tabular-nums" }}>
@@ -118,6 +133,19 @@ export function HeaderBar({
 
       {/* Acciones globales */}
       <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onRebalance}
+          disabled={isRebalancing || creditActive}
+          title="Redistribuir inventario"
+          className={`lg:hidden p-2 rounded-md border transition-colors ${
+            isRebalancing
+              ? "border-amber-300 text-amber-600 bg-amber-50 dark:bg-amber-500/10"
+              : "border-amber-300 text-amber-700 bg-amber-50 dark:bg-amber-500/10 hover:bg-amber-100 disabled:opacity-40"
+          }`}
+        >
+          <RefreshCw className={`w-4 h-4 ${isRebalancing ? "animate-spin" : ""}`} />
+        </button>
         <button
           onClick={onProbar}
           className="px-3 py-2 bg-red-600 text-white rounded-md font-black text-[10px] uppercase tracking-widest flex items-center gap-1.5 shadow-sm hover:bg-red-500 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-red-500/30 active:scale-95"

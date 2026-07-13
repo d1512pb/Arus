@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  layoutRadar, routeEdges, canvasSize, pairKey, venueOrderOf,
-  LayoutNode, LayoutEdge, MIN_W, NODE_R,
+  layoutRadar, routeEdges, canvasSize, pairKey, venueOrderOf, venueBoxRect,
+  LayoutNode, LayoutEdge, MIN_W, NODE_R, NODE_PRICE_BELOW,
 } from "./radarLayout";
 
 // Fábrica de universos sintéticos: n venues, cada uno con cash + criptos.
@@ -55,6 +55,19 @@ describe("layoutRadar — paramétrico en número de venues", () => {
       for (let i = 0; i < 3; i++) {
         expect(cashY).toBeLessThan(L.pos.get(`C${i}@${v}`)!.y);
       }
+    }
+  });
+
+  it("nodos densos: círculo + etiqueta de precio caben DENTRO de la caja del venue", () => {
+    // 4 activos (cash+3) fuerza el stack a yBot — el caso que se salía por debajo.
+    const L = layoutRadar(universe(["Dense"], 3));
+    const box = venueBoxRect(0, L);
+    const boxBottom = box.y + box.height;
+    for (const n of universe(["Dense"], 3)) {
+      const p = L.pos.get(n.id)!;
+      expect(p.y - NODE_R).toBeGreaterThanOrEqual(box.y + 8);
+      // Precio bajo el círculo (crypto) + un poco de descent tipográfico.
+      expect(p.y + NODE_PRICE_BELOW + 4).toBeLessThanOrEqual(boxBottom);
     }
   });
 

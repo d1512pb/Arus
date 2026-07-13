@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Sprout, SlidersHorizontal, Database, AlertTriangle, Check, ListChecks } from 'lucide-react';
 import { ENGINE_HTTP_URL } from '../lib/config';
+import { analyzeUniverseClient } from '../lib/universeCapability';
 
 // OnboardingModal — la puerta de entrada se adapta a DOS clases de usuario:
 //
 //  · GUIADO (nuevo en esto, pocos recursos): un solo número — cuánto quiere
 //    invertir en total. Arus deriva el resto y EXPLICA por qué: el bot compra y
 //    vende al mismo tiempo, así que necesita inventario en ambos lados (mitad
-//    efectivo, mitad BTC al precio de referencia) repartido 50/50 en el par.
+//    efectivo, mitad BTC al precio de referencia) repartido por igual entre las
+//    casas de cambio que el usuario marcó en el checklist.
 //  · EXPERTO (sabe sus porcentajes): totales de USD y BTC + distribución por
 //    exchange en porcentajes (suma 100, validada aquí Y en el backend), con
 //    distribución separada para el BTC opcional. Sus números se respetan al
@@ -34,6 +36,7 @@ interface OnboardingModalProps {
     btcAlloc?: Allocation,
     enabledVenues?: string[],
     enabledAssets?: string[],
+    assetInventory?: Allocation,
   ) => void;
   // Rechazo del backend (INIT_REJECTED): se muestra tal cual — el experto
   // merece saber POR QUÉ no arrancó su sesión.
@@ -66,12 +69,55 @@ function toggleIn(selected: string[], catalog: string[], item: string): string[]
   return catalog.filter(x => next.includes(x));
 }
 
-// Distribución inicial del modo experto: el 50/50 clásico explícito; los venues
-// extra del catálogo aparecen en 0 listos para recibir su porcentaje.
-function defaultAlloc(venues: string[]): AllocForm {
+// equalAllocForm: reparte 100 % en partes iguales entre los venues dados.
+// El último absorbe el residuo de redondeo para que la suma sea exactamente 100
+// (el backend exige ±0.01). Antes defaultAlloc dejaba a Kraken en 0 mientras el
+// checklist lo tenía marcado — capital "seleccionado" pero wallets vacíos.
+function equalAllocForm(venues: string[]): AllocForm {
   const alloc: AllocForm = {};
-  for (const v of venues) alloc[v] = v === 'Binance' || v === 'Bitso' ? 50 : 0;
+  if (venues.length === 0) return alloc;
+  const raw = 100 / venues.length;
+  let assigned = 0;
+  venues.forEach((v, i) => {
+    if (i === venues.length - 1) {
+      alloc[v] = Math.round((100 - assigned) * 100) / 100;
+    } else {
+      const p = Math.round(raw * 100) / 100;
+      alloc[v] = p;
+      assigned += p;
+    }
+  });
   return alloc;
+}
+
+function equalAlloc(venues: string[]): Allocation {
+  return Object.fromEntries(
+    Object.entries(equalAllocForm(venues)).map(([k, v]) => [k, Number(v) || 0]),
+  ) as Allocation;
+}
+
+// renormalizeAlloc: al quitar un exchange, reescala los % restantes a 100.
+// Si todos quedaban en 0, cae a partes iguales.
+function renormalizeAlloc(prev: AllocForm, venues: string[]): AllocForm {
+  if (venues.length === 0) return {};
+  const weights = venues.map(v => {
+    const n = Number(prev[v]);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  });
+  const sum = weights.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return equalAllocForm(venues);
+  const next: AllocForm = {};
+  let assigned = 0;
+  venues.forEach((v, i) => {
+    if (i === venues.length - 1) {
+      next[v] = Math.round((100 - assigned) * 100) / 100;
+    } else {
+      const p = Math.round((weights[i] / sum) * 100 * 100) / 100;
+      next[v] = p;
+      assigned += p;
+    }
+  });
+  return next;
 }
 
 // sumOf/sumOk tratan '' como 0 (Number.isFinite('') es false; '' >= 0 es true):
@@ -92,6 +138,12 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   const [venues, setVenues] = useState<string[]>(['Binance', 'Bitso']);
   const [assets, setAssets] = useState<string[]>([]);
   const [btcPrice, setBtcPrice] = useState<number>(0);
+  const [ethPrice, setEthPrice] = useState<number>(0);
+  const [solPrice, setSolPrice] = useState<number>(0);
+  // engineDown: /api/config no respondió. Sin el catálogo el formulario queda
+  // incompleto (sin precio de referencia ni checklist de monedas) y el submit
+  // no puede arrancar — se AVISA en vez de bloquear en silencio.
+  const [engineDown, setEngineDown] = useState(false);
 
   // Checklist del universo: con qué exchanges y monedas quiere operar el usuario.
   // Vacío hasta que carga el catálogo; por defecto TODO seleccionado. Lo que quede
@@ -102,10 +154,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   // Modo guiado: UN número.
   const [total, setTotal] = useState<number | ''>('');
 
-  // Modo experto: totales + porcentajes.
+  // Modo experto: totales + porcentajes (partes iguales entre los venues activos).
   const [usd, setUsd] = useState<number | ''>('');
   const [btc, setBtc] = useState<number | ''>('');
-  const [usdAlloc, setUsdAlloc] = useState<AllocForm>(defaultAlloc(['Binance', 'Bitso']));
+  const [usdAlloc, setUsdAlloc] = useState<AllocForm>(equalAllocForm(['Binance', 'Bitso']));
   // null = el BTC sigue a la distribución del cash (el caso común).
   const [btcAlloc, setBtcAlloc] = useState<AllocForm | null>(null);
 
@@ -129,20 +181,43 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
     fetch(`${ENGINE_HTTP_URL}/api/config`)
       .then(r => r.json())
       .then(cfg => {
+        setEngineDown(false);
         const names: string[] = (cfg.venues ?? []).map((v: { name: string }) => v.name);
         if (names.length > 0) {
           setVenues(names);
-          setUsdAlloc(prev => {
-            const next = defaultAlloc(names);
-            for (const [venue, pct] of Object.entries(prev)) {
-              if (venue in next) next[venue] = pct;
-            }
-            return next;
-          });
           // Selección de exchanges: prefs guardadas (filtradas al catálogo real)
           // o TODO por defecto.
           const storedV = stored?.selectedVenues?.filter(v => names.includes(v));
-          setSelectedVenues(storedV && storedV.length > 0 ? names.filter(v => storedV.includes(v)) : names);
+          const nextSelected = storedV && storedV.length > 0 ? names.filter(v => storedV.includes(v)) : names;
+          setSelectedVenues(nextSelected);
+          setUsdAlloc(() => {
+            // Prefs expertas: restaurar % por venue conocido. Si el checklist
+            // incluye una casa con 0 % (prefs viejas: Kraken nacía en 0) o la
+            // suma de lo seleccionado no es 100, se rebalancea en partes iguales
+            // entre las casas activas — capital y checklist deben coincidir.
+            if (stored?.usdAlloc) {
+              const next: AllocForm = {};
+              for (const n of names) next[n] = stored.usdAlloc![n] ?? 0;
+              const selSum = nextSelected.reduce((s, v) => s + (Number(next[v]) || 0), 0);
+              const hasEmptySelected = nextSelected.some(v => (Number(next[v]) || 0) <= 0);
+              if (Math.abs(selSum - 100) > 0.01 || hasEmptySelected) {
+                return { ...next, ...equalAllocForm(nextSelected) };
+              }
+              return next;
+            }
+            return equalAllocForm(names);
+          });
+          if (stored?.btcAlloc) {
+            const next: AllocForm = {};
+            for (const n of names) next[n] = stored.btcAlloc![n] ?? 0;
+            const selSum = nextSelected.reduce((s, v) => s + (Number(next[v]) || 0), 0);
+            const hasEmptySelected = nextSelected.some(v => (Number(next[v]) || 0) <= 0);
+            if (Math.abs(selSum - 100) > 0.01 || hasEmptySelected) {
+              setBtcAlloc({ ...next, ...equalAllocForm(nextSelected) });
+            } else {
+              setBtcAlloc(next);
+            }
+          }
         }
         const catalogAssets: string[] = Array.isArray(cfg.assets) ? cfg.assets : [];
         if (catalogAssets.length > 0) {
@@ -151,22 +226,54 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
           setSelectedAssets(storedA && storedA.length > 0 ? catalogAssets.filter(a => storedA.includes(a)) : catalogAssets);
         }
         if (cfg.reference?.btc_price_usd > 0) setBtcPrice(cfg.reference.btc_price_usd);
+        if (cfg.reference?.eth_price_usd > 0) setEthPrice(cfg.reference.eth_price_usd);
+        if (cfg.reference?.sol_price_usd > 0) setSolPrice(cfg.reference.sol_price_usd);
       })
-      .catch(() => { /* motor apagado: el formulario sigue usable con el par */ });
+      .catch(() => setEngineDown(true)); // motor apagado o URL mal configurada: se avisa
   }, []);
 
   // ── Derivaciones del modo guiado ──────────────────────────────────────────
   const totalNum = Number(total) || 0;
-  const guidedUsd = totalNum / 2;
-  const guidedBtc = btcPrice > 0 ? guidedUsd / btcPrice : 0;
-  const guidedOk = totalNum >= 100 && guidedBtc > 0;
+  const guidedCash = totalNum / 2;
+  const guidedCryptoBudget = totalNum / 2;
+  // Cripto seleccionadas (BTC/ETH/SOL…): el presupuesto cripto se reparte en
+  // valor USD entre ellas — así ETH@Binance y SOL@Binance ya no nacen en 0.
+  const selectedCryptos = useMemo(
+    () => selectedAssets.filter(a => !isCashAsset(a)),
+    [selectedAssets],
+  );
+  const priceOf = (a: string) => {
+    if (a === 'BTC') return btcPrice;
+    if (a === 'ETH') return ethPrice > 0 ? ethPrice : 3000;
+    if (a === 'SOL') return solPrice > 0 ? solPrice : 150;
+    return 0;
+  };
+  const splitCryptoBudget = (budgetUsd: number): { btcQty: number; inventory: Allocation; ready: boolean } => {
+    const cryptos = selectedCryptos.length > 0 ? selectedCryptos : ['BTC'];
+    const priced = cryptos.filter(a => priceOf(a) > 0);
+    if (priced.length === 0 || budgetUsd <= 0) return { btcQty: 0, inventory: {}, ready: false };
+    const share = budgetUsd / priced.length;
+    const inventory: Allocation = {};
+    let btcQty = 0;
+    for (const a of priced) {
+      const qty = share / priceOf(a);
+      if (a === 'BTC') btcQty = qty;
+      else inventory[a] = qty;
+    }
+    return { btcQty, inventory, ready: true };
+  };
+  const guidedSplit = splitCryptoBudget(guidedCryptoBudget);
+  const guidedOk = totalNum >= 100 && guidedSplit.ready && (guidedSplit.btcQty > 0 || Object.keys(guidedSplit.inventory).length > 0);
 
-  // Universo elegido en la checklist: al menos un exchange, y al menos una moneda
-  // CRIPTO a operar cuando el catálogo ya cargó (el cash no cuenta: es la base). Si
-  // el motor no respondió, assets está vacío y no bloqueamos (no arrancaría igual).
+  // Universo operable: al menos un ciclo espacial o triangular (no basta 1 casa + BTC).
+  const arbCap = useMemo(
+    () => analyzeUniverseClient(selectedVenues, selectedAssets, venues),
+    [selectedVenues, selectedAssets, venues],
+  );
   const universeOk =
     selectedVenues.length >= 1 &&
-    (assets.length === 0 || selectedAssets.some(a => !isCashAsset(a)));
+    (assets.length === 0 || selectedAssets.some(a => !isCashAsset(a))) &&
+    (assets.length === 0 || arbCap.ok);
 
   // ── Validación del modo experto ───────────────────────────────────────────
   const usdNum = Number(usd) || 0;
@@ -181,7 +288,26 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
   const btcAllocSel = pickSelected(effectiveBtcAlloc);
   const usdSumOk = sumOk(usdAllocSel);
   const btcSumOk = sumOk(btcAllocSel);
-  const expertOk = usdNum > 0 && btcNum > 0 && usdSumOk && btcSumOk && universeOk;
+  // Toda casa marcada en el checklist debe llevar capital (>0 %): si no, aparece
+  // en el radar con wallets a 0 — el síntoma que el usuario reportó.
+  const usdAllocOk = usdSumOk && selectedVenues.every(v => (usdAllocSel[v] ?? 0) > 0);
+  const btcAllocOk = btcSumOk && selectedVenues.every(v => (btcAllocSel[v] ?? 0) > 0);
+  const expertSplit = splitCryptoBudget(btcNum * (btcPrice > 0 ? btcPrice : 0));
+  // Experto: el BTC tipeado es el presupuesto cripto en valor; se reparte entre
+  // las monedas marcadas. Si solo hay BTC seleccionada, conserva el monto exacto.
+  const expertBtcQty =
+    selectedCryptos.length <= 1 && selectedCryptos[0] === 'BTC'
+      ? btcNum
+      : expertSplit.btcQty;
+  const expertInventory =
+    selectedCryptos.length <= 1 && selectedCryptos[0] === 'BTC'
+      ? undefined
+      : expertSplit.inventory;
+  const expertCryptoOk =
+    selectedCryptos.length <= 1 && selectedCryptos[0] === 'BTC'
+      ? btcNum > 0
+      : expertSplit.ready && (expertSplit.btcQty > 0 || Object.keys(expertSplit.inventory).length > 0);
+  const expertOk = usdNum > 0 && expertCryptoOk && usdAllocOk && btcAllocOk && universeOk;
 
   const canSubmit = (mode === 'guided' ? guidedOk : expertOk) && universeOk;
 
@@ -202,11 +328,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
     const univVenues = selectedVenues.length < venues.length ? selectedVenues : undefined;
     const univAssets = assets.length > 0 && selectedAssets.length < assets.length ? selectedAssets : undefined;
     if (mode === 'guided') {
-      // Guiado = el 50/50 clásico del motor (sin distribución explícita) + universo.
-      onInit(guidedUsd, guidedBtc, undefined, undefined, univVenues, univAssets);
+      // Guiado: 50 % cash / 50 % cripto; el tramo cripto se parte en valor entre
+      // BTC/ETH/SOL marcados y el cash+cripto se reparte entre las casas elegidas.
+      const even = equalAlloc(selectedVenues);
+      const inv = Object.keys(guidedSplit.inventory).length > 0 ? guidedSplit.inventory : undefined;
+      onInit(guidedCash, guidedSplit.btcQty, even, even, univVenues, univAssets, inv);
     } else {
-      // Experto: el reparto va acotado a los exchanges seleccionados.
-      onInit(usdNum, btcNum, usdAllocSel, btcAlloc ? btcAllocSel : undefined, univVenues, univAssets);
+      const inv = expertInventory && Object.keys(expertInventory).length > 0 ? expertInventory : undefined;
+      onInit(usdNum, expertBtcQty, usdAllocSel, btcAlloc ? btcAllocSel : undefined, univVenues, univAssets, inv);
     }
   };
 
@@ -243,7 +372,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
           ))}
         </div>
         <p className={`text-[10px] mt-1.5 font-bold ${ok ? 'text-emerald-600' : 'text-red-500'}`}>
-          Suma: {sumOf(shown).toFixed(2)} % {ok ? '✓' : '— debe sumar exactamente 100'}
+          {ok
+            ? `Suma: ${sumOf(shown).toFixed(2)} % ✓`
+            : Math.abs(sumOf(shown) - 100) >= 0.01
+              ? `Suma: ${sumOf(shown).toFixed(2)} % — debe sumar exactamente 100`
+              : `Suma: ${sumOf(shown).toFixed(2)} % — cada casa seleccionada necesita > 0 %`}
         </p>
       </div>
     );
@@ -268,6 +401,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
             <p className="text-gray-500 dark:text-gray-400 text-xs font-bold tracking-widest mt-1">CONFIGURACIÓN INICIAL</p>
           </div>
         </div>
+
+        {/* Motor inalcanzable: sin /api/config no hay precio de referencia ni
+            checklist completa — el porqué del botón bloqueado debe ser VISIBLE. */}
+        {engineDown && (
+          <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/30 rounded-lg p-3 mb-5">
+            <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed font-bold">
+              No se pudo contactar al motor de Arus. Verifica que esté corriendo (por defecto en :8080) y recarga la página — sin su catálogo no se puede configurar la sesión.
+            </p>
+          </div>
+        )}
 
         {/* Selector de modo: la misma pantalla pregunta distinto según quién eres */}
         <div className="grid grid-cols-2 gap-3 mb-5">
@@ -329,20 +473,36 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
               <div className="bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-lg p-4">
                 <p className="text-[11px] font-bold text-gray-700 dark:text-gray-300 uppercase tracking-widest mb-2">Así se prepara tu dinero</p>
                 <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
-                  El bot gana comprando barato en una casa de cambio y vendiendo caro en otra <strong>en el mismo instante</strong> — para eso necesita tener efectivo en un lado y bitcoin en el otro <em>antes</em> de que aparezca la oportunidad. Por eso tu inversión se prepara así:
+                  Mitad en efectivo y mitad en cripto (repartida en valor entre las monedas que marcaste). Luego todo se distribuye entre tus casas seleccionadas.
                 </p>
                 <div className="grid grid-cols-2 gap-3 mt-3 text-center">
                   <div className="bg-white dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-800">
-                    <p className="text-sm font-black text-gray-900 dark:text-gray-100">${guidedUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })}</p>
+                    <p className="text-sm font-black text-gray-900 dark:text-gray-100">${guidedCash.toLocaleString('en-US', { maximumFractionDigits: 2 })}</p>
                     <p className="text-[10px] text-gray-400 mt-0.5">en efectivo</p>
                   </div>
                   <div className="bg-white dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-800">
-                    <p className="text-sm font-black text-gray-900 dark:text-gray-100">{guidedBtc > 0 ? `${guidedBtc.toFixed(4)} ₿` : '—'}</p>
-                    <p className="text-[10px] text-gray-400 mt-0.5">{btcPrice > 0 ? `en bitcoin (a ~$${Math.round(btcPrice).toLocaleString('en-US')})` : 'esperando precio del motor…'}</p>
+                    <p className="text-sm font-black text-gray-900 dark:text-gray-100">${guidedCryptoBudget.toLocaleString('en-US', { maximumFractionDigits: 2 })}</p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">en cripto (valor)</p>
                   </div>
                 </div>
+                {guidedSplit.ready && (
+                  <div className="mt-3 flex flex-wrap gap-1.5 justify-center">
+                    {guidedSplit.btcQty > 0 && (
+                      <span className="text-[10px] font-mono font-bold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-full px-2.5 py-1 text-gray-700 dark:text-gray-300">
+                        {guidedSplit.btcQty.toFixed(4)} BTC
+                      </span>
+                    )}
+                    {Object.entries(guidedSplit.inventory).map(([a, q]) => (
+                      <span key={a} className="text-[10px] font-mono font-bold bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-full px-2.5 py-1 text-gray-700 dark:text-gray-300">
+                        {q.toFixed(4)} {a}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-3 leading-relaxed">
-                  Todo se reparte por igual entre Binance y Bitso. Cuando quieras decidir tú los porcentajes (o usar más casas de cambio), cámbiate al modo <strong>Experto</strong>.
+                  Casas: <strong>{selectedVenues.length > 0 ? selectedVenues.join(', ') : '—'}</strong>.
+                  ETH/SOL solo en exchanges que los cotizan (p. ej. Binance; Bitso no tiene ETH/SOL).
+                  Modo <strong>Experto</strong> si quieres porcentajes a mano.
                 </p>
               </div>
             </>
@@ -359,19 +519,28 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
                   </div>
                 </div>
                 <div>
-                  <label className={labelCls}>Inventario (BTC)</label>
+                  <label className={labelCls}>Presupuesto cripto (en BTC)</label>
                   <div className="relative mt-2">
                     <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₿</span>
                     <input type="number" value={btc} min="0.0001" step="any"
                       onChange={e => setBtc(e.target.value === '' ? '' : parseFloat(e.target.value) || 0)}
                       className={`${inputCls} pl-8`} placeholder="1.0" />
                   </div>
+                  {selectedCryptos.length > 1 && expertSplit.ready && (
+                    <p className="text-[10px] text-violet-600 dark:text-violet-400 mt-1.5 leading-relaxed">
+                      Se reparte en valor entre {selectedCryptos.join('+')}:{' '}
+                      {expertBtcQty > 0 && <span className="font-mono font-bold">{expertBtcQty.toFixed(4)} BTC </span>}
+                      {Object.entries(expertSplit.inventory).map(([a, q]) => (
+                        <span key={a} className="font-mono font-bold">{q.toFixed(4)} {a} </span>
+                      ))}
+                    </p>
+                  )}
                 </div>
               </div>
 
               <div>
                 <p className={labelCls}>Distribución del capital por exchange</p>
-                {allocEditor(usdAlloc, editAlloc(setUsdAlloc), usdSumOk)}
+                {allocEditor(usdAlloc, editAlloc(setUsdAlloc), usdAllocOk)}
               </div>
 
               <div className="flex items-center gap-3">
@@ -388,7 +557,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
                   Distribución <strong>distinta</strong> para el BTC {btcAlloc === null && '(apagado: el bitcoin sigue los mismos porcentajes que el efectivo)'}
                 </p>
               </div>
-              {btcAlloc !== null && allocEditor(btcAlloc, editAlloc(setBtcAlloc as React.Dispatch<React.SetStateAction<AllocForm>>), btcSumOk)}
+              {btcAlloc !== null && allocEditor(btcAlloc, editAlloc(setBtcAlloc as React.Dispatch<React.SetStateAction<AllocForm>>), btcAllocOk)}
 
               <p className="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed">
                 El motor valida esta distribución tal cual: casas de cambio registradas y suma exacta de 100. Ten presente que la línea de crédito y el reequilibrio automático operan sobre Binance+Bitso (el par clásico); lo asignado a otras casas lo opera el radar.
@@ -411,7 +580,23 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
                 return (
                   <button
                     key={v} type="button" aria-pressed={on}
-                    onClick={() => setSelectedVenues(prev => toggleIn(prev, venues, v))}
+                    onClick={() => {
+                      setSelectedVenues(prev => {
+                        const next = toggleIn(prev, venues, v);
+                        // El capital sigue al checklist: al agregar/quitar una casa
+                        // se rebalancean los % del modo experto para que ninguna
+                        // quede seleccionada con 0 % (o suma rota tras un borrado).
+                        if (mode === 'expert') {
+                          const added = next.includes(v) && !prev.includes(v);
+                          setUsdAlloc(a => (added ? equalAllocForm(next) : renormalizeAlloc(a, next)));
+                          setBtcAlloc(ba => {
+                            if (ba === null) return null;
+                            return added ? equalAllocForm(next) : renormalizeAlloc(ba, next);
+                          });
+                        }
+                        return next;
+                      });
+                    }}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold border transition-colors ${
                       on
                         ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
@@ -464,10 +649,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onInit, initEr
             )}
 
             {!universeOk ? (
-              <p className="text-[10px] text-red-500 font-bold mt-2.5">Selecciona al menos un exchange y una moneda.</p>
+              <p className="text-[10px] text-red-500 font-bold mt-2.5">
+                {assets.length > 0 && !arbCap.ok
+                  ? arbCap.reason
+                  : "Selecciona al menos un exchange y una moneda cripto."}
+              </p>
             ) : (
               <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-2.5 leading-relaxed">
-                Solo se dibujan en el radar y se operan los exchanges y monedas marcados. Puedes cambiarlo luego en <strong>Estrategia</strong>.
+                Solo se dibujan y se operan los exchanges y monedas marcados. Al iniciar, el capital cripto se reparte en valor entre BTC/ETH/SOL seleccionados (ETH/SOL solo en casas que los cotizan). Puedes cambiar el universo luego en <strong>Estrategia</strong>.
               </p>
             )}
           </div>

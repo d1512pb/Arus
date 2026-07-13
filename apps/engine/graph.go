@@ -53,9 +53,9 @@ const (
 	// cuando exista un libro USDT/USD real, esta arista tomará su precio.
 	EdgeParity
 	// EdgeInventorySwap conecta el MISMO activo entre venues a tasa 1 y costo 0:
-	// modela el arbitraje PRE-FONDEADO (hay inventario en ambos lados, la compra y
-	// la venta son simultáneas y el traslado real se difiere al reequilibrio).
-	// En producción esta arista cargará el costo amortizado de reequilibrar.
+	// une el grafo para detectar arbitraje espacial PRE-FONDEADO. En el commit
+	// REAL no mueve wallets: la compra deja crypto en el venue barato y la
+	// venta la consume del venue caro (sesgo de inventario hasta reequilibrar).
 	EdgeInventorySwap
 	// EdgeTransfer (reservado): traslado on-chain real con fee de retiro + fee de
 	// red + ~30 min de latencia. Se incorporará cuando el radar modele rutas lentas.
@@ -482,7 +482,7 @@ type GraphNodeWire struct {
 	Balance    float64 `json:"balance"`     // saldo del usuario en unidades del activo
 	BalanceUSD float64 `json:"balance_usd"` // valor aproximado en USD
 	PriceUSD   float64 `json:"price_usd"`   // precio del activo (mid) — 1 para cash, 0 = sin dato
-	FeedStale  bool    `json:"feed_stale"`  // true si el libro principal del venue está congelado
+	FeedStale  bool    `json:"feed_stale"`  // true si ningún libro del venue tiene dato fresco (UI)
 }
 
 // GraphEdgeWire es una arista del radar para la UI.
@@ -558,18 +558,30 @@ func (g *LiquidityGraph) SnapshotFor(wallets Balances, p TradingParameters, cycl
 		}
 	}
 
-	// Staleness por venue: el libro PRINCIPAL (respaldado por wallets) manda para
-	// el chip de la UI; cada arista lleva además su propio flag de staleness.
+	// Staleness por venue (chip "feed congelado"): un venue está vivo si
+	// CUALQUIERA de sus libros de orden tiene dato fresco. Antes solo mirábamos
+	// el libro principal (BTC): en Kraken el canal ticker con event_trigger=bbo
+	// puede no empujar BTC/USD durante >10 s aunque ETH/USD sí y el socket esté
+	// sano → falso "congelado". Umbral de UI más holgado que el de búsqueda de
+	// ciclos (MaxBookStaleness): BBO quieto ≠ feed muerto.
+	const displayStale = MaxBookStaleness * 3 // 30 s
 	staleVenue := make(map[string]bool, len(Venues))
 	for _, v := range Venues {
-		staleVenue[v.Name] = true
-		if in, ok := primaryInstrument(v.Name); ok {
+		fresh := false
+		for _, in := range Instruments {
+			if in.Venue != v.Name {
+				continue
+			}
 			base := MarketNode{Asset: Asset(in.Base), Venue: in.Venue}
 			quote := MarketNode{Asset: Asset(in.Quote), Venue: in.Venue}
-			if sell := g.edges[edgeKey(base, quote)]; sell != nil && sell.Rate > 0 {
-				staleVenue[v.Name] = now.Sub(sell.UpdatedAt) > MaxBookStaleness
+			sell := g.edges[edgeKey(base, quote)]
+			if sell != nil && sell.Rate > 0 && now.Sub(sell.UpdatedAt) <= displayStale {
+				fresh = true
+				break
 			}
 		}
+		// Sin ningún libro nunca: sigue "congelado" (venue sin feed).
+		staleVenue[v.Name] = !fresh
 	}
 
 	for _, n := range g.nodes {

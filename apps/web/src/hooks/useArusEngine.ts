@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { ENGINE_WS_URL } from "../lib/config";
+import { ENGINE_WS_URL, ENGINE_HTTP_URL } from "../lib/config";
 
 export interface Trade {
   event: string;
@@ -10,7 +10,7 @@ export interface Trade {
   timestamp: string | number;
   volume?: number;
   credit_active?: boolean;
-  // FASE 2: marca las operaciones de la ráfaga de volatilidad. El radar les
+  // FASE 3: marca las operaciones de la ráfaga HFT. El radar les
   // dispara la luz verde (flare) pero NO el cobro flotante individual, para no
   // saturar de números la tormenta (el P&L trepa en la cabecera).
   storm?: boolean;
@@ -116,19 +116,32 @@ export interface OmniPulse {
   legs: OmniLeg[];
   route: string;
   net: number;
+  /** Nodos cuyo inventario SÍ cambió (net delta ≠ 0). El radar solo los pulsa. */
+  flashNodes?: string[];
 }
 
-// Distribución del capital por venue (porcentajes, suman 100).
-export type Allocation = Record<string, number>;
+/** Flash forense de un ciclo atómico: deltas por nodo durante ~400 ms. */
+export interface InventoryFlash {
+  id: number;
+  /** "BTC@Binance" → delta firmado (excursión pico del recorrido). */
+  deltas: Record<string, number>;
+  /** venue → asset → delta (para las cards del dashboard). */
+  byVenueAsset: Record<string, Record<string, number>>;
+}
+
+/** Inventario multi-venue / multi-asset (espejo de Balances en Go). */
+export type VenueBalances = Record<string, Record<string, number>>;
 
 export interface EngineState {
   sessionId: string;
   params: TradingParams | null;
   graph: GraphSnapshot | null;
-  // Última inyección omnidireccional (FASE 1): el radar la anima como una luz
-  // verde recorriendo el camino. null = ninguna aún.
+  // Última inyección omnidireccional (FASE 2): el radar la anima como una luz
+  // verde recorriendo el camino dinámico del ciclo ejecutado. null = ninguna aún.
   omniPulse: OmniPulse | null;
-  // FASE 2 — ráfaga de volatilidad: stormActive mientras dura la tormenta;
+  /** Overlay HFT Flash tras un ciclo (null = inventario real). */
+  inventoryFlash: InventoryFlash | null;
+  // FASE 3 — ráfaga de volatilidad: stormActive mientras dura la tormenta;
   // stormResult trae el resumen (operaciones + ganancia) al terminar.
   stormActive: boolean;
   stormResult: { trades: number; profit: number } | null;
@@ -145,6 +158,9 @@ export interface EngineState {
   initialWealth: number;
   initialUsd: number;
   totalNetProfit: number;
+  /** Fuente de verdad multi-asset (venue → asset → qty). */
+  balances: VenueBalances;
+  /** Compat dashboard legacy Binance/Bitso. */
   wallets: {
     binance: { usd: number; btc: number };
     bitso: { usd: number; btc: number };
@@ -153,6 +169,7 @@ export interface EngineState {
     binance: { usd: number; btc: number };
     bitso: { usd: number; btc: number };
   };
+  borrowedBalances: VenueBalances;
   opsCount: number;
   uptimeSeconds: number;
   livePrices: { binance: number; bitso: number };
@@ -169,11 +186,71 @@ export interface EngineState {
   engineRunning: boolean;
 }
 
+function isVenueBalances(v: unknown): v is VenueBalances {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function walletsFromBalances(balances: VenueBalances) {
+  return {
+    binance: {
+      usd: balances.Binance?.USDT ?? balances.Binance?.USD ?? 0,
+      btc: balances.Binance?.BTC ?? 0,
+    },
+    bitso: {
+      usd: balances.Bitso?.USD ?? balances.Bitso?.USDT ?? 0,
+      btc: balances.Bitso?.BTC ?? 0,
+    },
+  };
+}
+
 function walletsFromData(data: Record<string, unknown>) {
+  if (isVenueBalances(data.balances)) {
+    return walletsFromBalances(data.balances);
+  }
   if (data.binance_usd === undefined) return null;
   return {
     binance: { usd: data.binance_usd as number, btc: (data.binance_btc as number) ?? 0 },
     bitso: { usd: data.bitso_usd as number, btc: (data.bitso_btc as number) ?? 0 },
+  };
+}
+
+function balancesFromData(data: Record<string, unknown>, prev: VenueBalances): VenueBalances {
+  if (isVenueBalances(data.balances)) {
+    return data.balances as VenueBalances;
+  }
+  const w = walletsFromData(data);
+  if (!w) return prev;
+  return {
+    ...prev,
+    Binance: { ...(prev.Binance ?? {}), USDT: w.binance.usd, BTC: w.binance.btc },
+    Bitso: { ...(prev.Bitso ?? {}), USD: w.bitso.usd, BTC: w.bitso.btc },
+  };
+}
+
+/** Extrae saldos de los nodos del radar (graph_update ya trae wallets de Go). */
+function balancesFromGraph(graph: GraphSnapshot | null | undefined, prev: VenueBalances): VenueBalances {
+  if (!graph?.nodes?.length) return prev;
+  const next: VenueBalances = {};
+  for (const n of graph.nodes) {
+    if (!n.venue || !n.asset) continue;
+    if (!next[n.venue]) next[n.venue] = {};
+    next[n.venue][n.asset] = typeof n.balance === "number" ? n.balance : 0;
+  }
+  return Object.keys(next).length > 0 ? next : prev;
+}
+
+/** Escribe balances vivos sobre los nodos del grafo (el radar lee n.balance). */
+function graphWithBalances(graph: GraphSnapshot | null, balances: VenueBalances): GraphSnapshot | null {
+  if (!graph) return null;
+  if (!balances || Object.keys(balances).length === 0) return graph;
+  return {
+    ...graph,
+    nodes: graph.nodes.map(n => {
+      const qty = balances[n.venue]?.[n.asset];
+      if (typeof qty !== "number") return n;
+      const price = n.price_usd > 0 ? n.price_usd : n.kind === "cash" ? 1 : 0;
+      return { ...n, balance: qty, balance_usd: qty * price };
+    }),
   };
 }
 
@@ -190,6 +267,68 @@ function borrowedFromData(data: Record<string, unknown>) {
   };
 }
 
+function borrowedBalancesFromData(data: Record<string, unknown>, prev: VenueBalances): VenueBalances {
+  if (isVenueBalances(data.borrowed_balances)) {
+    return data.borrowed_balances as VenueBalances;
+  }
+  if (data.credit_active === false && data.borrowed_binance_usd === undefined) {
+    return {};
+  }
+  const flat = borrowedFromData(data);
+  if (!flat.binance.usd && !flat.binance.btc && !flat.bitso.usd && !flat.bitso.btc) {
+    return prev;
+  }
+  return {
+    Binance: { USDT: flat.binance.usd, BTC: flat.binance.btc },
+    Bitso: { USD: flat.bitso.usd, BTC: flat.bitso.btc },
+  };
+}
+
+function flashFromOmni(data: Record<string, unknown>): InventoryFlash["byVenueAsset"] {
+  const byVenueAsset: Record<string, Record<string, number>> = {};
+  const arr = data.flash_deltas as Array<{ venue?: string; asset?: string; delta?: number; node?: string }> | undefined;
+  if (Array.isArray(arr)) {
+    for (const row of arr) {
+      if (!row.venue || !row.asset || typeof row.delta !== "number") continue;
+      if (!byVenueAsset[row.venue]) byVenueAsset[row.venue] = {};
+      byVenueAsset[row.venue][row.asset] = (byVenueAsset[row.venue][row.asset] ?? 0) + row.delta;
+    }
+    return byVenueAsset;
+  }
+  const map = data.flash_delta_by_node as Record<string, number> | undefined;
+  if (map) {
+    for (const [node, delta] of Object.entries(map)) {
+      const at = node.lastIndexOf("@");
+      if (at <= 0) continue;
+      const asset = node.slice(0, at);
+      const venue = node.slice(at + 1);
+      if (!byVenueAsset[venue]) byVenueAsset[venue] = {};
+      byVenueAsset[venue][asset] = (byVenueAsset[venue][asset] ?? 0) + delta;
+    }
+  }
+  return byVenueAsset;
+}
+
+// Distribución del capital por venue (porcentajes, suman 100).
+export type Allocation = Record<string, number>;
+
+// FASE 1 (refactor Probar Bot): escenario de "Crear tu propia prueba". Viaja
+// por HTTP a POST /api/simulate/custom; el motor lo valida contra el universo
+// del usuario y lo inyecta como MarketTicks REALES en su canal de ingesta.
+export interface CustomSimPayload {
+  exchangeA: string;
+  assetA: string;
+  bidA: number;
+  askA: number;
+  exchangeB: string;
+  assetB: string;
+  bidB: number;
+  askB: number;
+  liquidity?: number;
+}
+
+const HFT_FLASH_MS = 1800; // resalta celdas cuyo inventario SÍ cambió (sesgo real)
+
 // Clave del token de sesión en localStorage: el UUID de la sesión persistida en
 // el backend. Quien tiene el token, recupera SU sesión (saldos, estrategia,
 // historial) tras cerrar el navegador o tras un reinicio del motor.
@@ -202,6 +341,7 @@ const INITIAL_ENGINE_STATE: EngineState = {
   params: null,
   graph: null,
   omniPulse: null,
+  inventoryFlash: null,
   stormActive: false,
   stormResult: null,
   circuitBreaker: null,
@@ -210,8 +350,10 @@ const INITIAL_ENGINE_STATE: EngineState = {
   initialWealth: 0,
   initialUsd: 0,
   totalNetProfit: 0,
+  balances: {},
   wallets: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
   borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+  borrowedBalances: {},
   opsCount: 0,
   uptimeSeconds: 0,
   livePrices: { binance: 0, bitso: 0 },
@@ -240,7 +382,15 @@ export function useArusEngine() {
   // Contador para la alerta del circuit breaker (FASE 3): identifica cada alerta
   // para que su auto-descarte a los 3 s no borre una alerta posterior.
   const cbCounterRef = useRef(0);
-  const configRef = useRef<{ usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation } | null>(null);
+  // Generación del HFT Flash: evita que un setTimeout viejo borre un flash nuevo.
+  const flashCounterRef = useRef(0);
+  const configRef = useRef<{
+    usd: number;
+    btc: number;
+    usdAlloc?: Allocation;
+    btcAlloc?: Allocation;
+    assetInventory?: Allocation;
+  } | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Universo elegido en la checklist del onboarding (exchanges/monedas activos).
   // Se aplica vía set_params en cuanto la sesión existe (el primer state_update),
@@ -249,13 +399,20 @@ export function useArusEngine() {
 
   // initMsg arma el payload de init_session con la distribución (si la hay) —
   // lo comparten el arranque normal y la re-inicialización tras reconexión.
-  const initMsg = (cfg: { usd: number; btc: number; usdAlloc?: Allocation; btcAlloc?: Allocation }) =>
+  const initMsg = (cfg: {
+    usd: number;
+    btc: number;
+    usdAlloc?: Allocation;
+    btcAlloc?: Allocation;
+    assetInventory?: Allocation;
+  }) =>
     JSON.stringify({
       action: "init_session",
       initial_usd: cfg.usd,
       initial_btc: cfg.btc,
       usd_allocation: cfg.usdAlloc,
       btc_allocation: cfg.btcAlloc,
+      asset_inventory: cfg.assetInventory,
     });
 
   // openSocket abre la conexión con los handlers compartidos. La reconexión
@@ -298,8 +455,16 @@ export function useArusEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const initSession = useCallback((usd: number, btc: number, usdAlloc?: Allocation, btcAlloc?: Allocation, enabledVenues?: string[], enabledAssets?: string[]) => {
-    configRef.current = { usd, btc, usdAlloc, btcAlloc };
+  const initSession = useCallback((
+    usd: number,
+    btc: number,
+    usdAlloc?: Allocation,
+    btcAlloc?: Allocation,
+    enabledVenues?: string[],
+    enabledAssets?: string[],
+    assetInventory?: Allocation,
+  ) => {
+    configRef.current = { usd, btc, usdAlloc, btcAlloc, assetInventory };
     // La checklist del onboarding poda el universo: se guarda para aplicarlo en
     // cuanto la sesión exista (init_session solo lleva capital/distribución).
     pendingUniverseRef.current =
@@ -367,18 +532,51 @@ export function useArusEngine() {
     }
   }, []);
 
-  // FASE 1: "Oportunidad normal" → arbitraje omnidireccional. El backend arma y
-  // ejecuta un ciclo triangular/espacial sobre el universo del usuario y responde
-  // con omni_executed (el radar anima la luz verde recorriendo el camino).
+  // FASE 1 (refactor Probar Bot): "Crear tu propia prueba" → POST
+  // /api/simulate/custom. El backend valida (sesión viva, universo activo,
+  // libros del catálogo, coherencia) y, si todo cuadra, inyecta los ticks por
+  // la MISMA tubería que los feeds reales; el veredicto llega por el WebSocket
+  // (logs, arbitrage_executed, wallet_update). Devuelve el error del motor tal
+  // cual para mostrarlo al usuario — nunca se corrige en silencio.
+  const simulateCustom = useCallback(async (p: CustomSimPayload): Promise<{ ok: boolean; error?: string }> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return { ok: false, error: "La sesión aún no está lista." };
+    try {
+      const res = await fetch(`${ENGINE_HTTP_URL}/api/simulate/custom`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sid,
+          exchange_a: p.exchangeA,
+          asset_a: p.assetA,
+          bid_a: p.bidA,
+          ask_a: p.askA,
+          exchange_b: p.exchangeB,
+          asset_b: p.assetB,
+          bid_b: p.bidB,
+          ask_b: p.askB,
+          liquidity: p.liquidity,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) return { ok: false, error: data.error ?? `El motor respondió ${res.status}.` };
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "No se pudo contactar al motor." };
+    }
+  }, []);
+
+  // FASE 2: "Oportunidad normal" → arbitraje omnidireccional dinámico. El backend
+  // lee el universo activo, inyecta ineficiencia por la tubería real, el radar
+  // descubre/ejecuta el ciclo y responde con omni_executed para animar el grafo.
   const injectOmni = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ action: "inject_omni" }));
     }
   }, []);
 
-  // FASE 2: "Evento poco común" → ráfaga de volatilidad. El backend lanza varias
-  // goroutines que ejecutan mini-arbitrajes concurrentemente ~4 s; el radar lo
-  // pinta como una tormenta de luces y el P&L trepa (storm_started/trade/ended).
+  // FASE 3: "Evento poco común" → ráfaga HFT. Micro-ticks reales + planCycle
+  // concurrente; el radar pinta storm_started/trade/ended.
   const injectStorm = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ action: "inject_storm" }));
@@ -422,9 +620,10 @@ export function useArusEngine() {
     setState(prev => ({ ...prev, insufficientFundsModal: { open: false, profitPotential: 0, creditCost: 0, creditRequired: 0 } }));
   }, []);
 
-  // Depósito (amount > 0) o retiro (amount < 0) de USD/BTC en un exchange.
-  const adjustFunds = useCallback((exchange: string, currency: "USD" | "BTC", amount: number) => {
-    if (wsRef.current && amount !== 0) {
+  // Depósito (amount > 0) o retiro (amount < 0) de cualquier activo del venue
+  // (USD/USDT, BTC, ETH, SOL…). El backend valora en ≈USD y no altera el PnL.
+  const adjustFunds = useCallback((exchange: string, currency: string, amount: number) => {
+    if (wsRef.current && amount !== 0 && currency) {
       wsRef.current.send(JSON.stringify({ action: "adjust_funds", exchange, currency, amount }));
     }
   }, []);
@@ -448,16 +647,23 @@ export function useArusEngine() {
       const wallets = walletsFromData(data);
       const patch: Partial<EngineState> = {};
       if (wallets) patch.wallets = wallets;
+      patch.balances = balancesFromData(data, prev.balances);
+      patch.graph = graphWithBalances(prev.graph, patch.balances as VenueBalances);
       if (data.total_wealth !== undefined) patch.totalWealth = data.total_wealth as number;
       if (data.new_total_usd !== undefined) patch.totalWealth = data.new_total_usd as number;
       if (data.total_wealth_usd !== undefined) patch.totalWealth = data.total_wealth_usd as number;
+      if (data.total_net_profit !== undefined) patch.totalNetProfit = data.total_net_profit as number;
       // Depósito/retiro mueve la base inicial junto con el total → el PnL no se distorsiona.
       if (data.initial_wealth !== undefined) patch.initialWealth = data.initial_wealth as number;
       if (data.initial_usd !== undefined) patch.initialUsd = data.initial_usd as number;
-      if (data.borrowed_binance_usd !== undefined || data.credit_active === false) {
-        patch.borrowed = data.credit_active === false && data.borrowed_binance_usd === undefined
+      if (data.borrowed_binance_usd !== undefined || data.borrowed_balances !== undefined || data.credit_active === false) {
+        patch.borrowed = data.credit_active === false && data.borrowed_binance_usd === undefined && data.borrowed_balances === undefined
           ? { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } }
           : borrowedFromData(data);
+        patch.borrowedBalances = borrowedBalancesFromData(data, prev.borrowedBalances);
+        if (data.credit_active === false && data.borrowed_balances === undefined && data.borrowed_binance_usd === undefined) {
+          patch.borrowedBalances = {};
+        }
       }
       return patch;
     };
@@ -495,11 +701,14 @@ export function useArusEngine() {
         initialWealth: (data.initial_wealth as number) || prev.initialWealth,
         initialUsd: (data.initial_usd as number) || prev.initialUsd,
         totalNetProfit: (data.total_net_profit as number) || prev.totalNetProfit,
+        balances: balancesFromData(data, {}),
         wallets: {
           binance: { usd: data.binance_usd as number, btc: data.binance_btc as number },
           bitso: { usd: data.bitso_usd as number, btc: data.bitso_btc as number },
         },
         borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+        borrowedBalances: {},
+        inventoryFlash: null,
         trades: [],
         opsCount: 0,
         uptimeSeconds: 0,
@@ -523,7 +732,18 @@ export function useArusEngine() {
     } else if (data.type === "PARAMS_UPDATED") {
       setState(prev => ({ ...prev, params: (data.params as TradingParams) ?? prev.params }));
     } else if (data.type === "graph_update") {
-      setState(prev => ({ ...prev, graph: (data.graph as GraphSnapshot) ?? prev.graph }));
+      // El snapshot ya trae saldos de sesión: sincronizar balances para que el
+      // overlay del radar no pise nodos frescos con wallets viejos.
+      setState(prev => {
+        const graph = (data.graph as GraphSnapshot) ?? prev.graph;
+        const balances = balancesFromGraph(graph, prev.balances);
+        return {
+          ...prev,
+          graph,
+          balances,
+          wallets: walletsFromBalances(balances),
+        };
+      });
     } else if (data.type === "log") {
       setState(prev => {
         const next = [...prev.logs, data as unknown as LogEntry];
@@ -553,6 +773,7 @@ export function useArusEngine() {
           depleted: false,
         },
         borrowed: borrowedFromData(data),
+        borrowedBalances: borrowedBalancesFromData(data, {}),
         isRebalancing: false,
         rebalanceExpiresAt: null,
       }));
@@ -562,6 +783,7 @@ export function useArusEngine() {
         ...applyWalletSync(prev),
         creditActiveState: { active: false, expiresAt: null, depleted: false },
         borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+        borrowedBalances: {},
         rebalanceSuccessAmount: prev.totalWealth,
         loanResults: { earnings: (data.loan_earnings as number) || 0, cost: (data.loan_cost as number) || 0 },
       }));
@@ -609,6 +831,8 @@ export function useArusEngine() {
         rebalanceExpiresAt: null,
         creditActiveState: { active: false, expiresAt: null },
         borrowed: { binance: { usd: 0, btc: 0 }, bitso: { usd: 0, btc: 0 } },
+        borrowedBalances: {},
+        inventoryFlash: null,
       }));
     } else if (data.type === "CIRCUIT_BREAKER") {
       // FASE 3: rechazo por gestión de riesgo. Anuncio efímero centrado, sin luces
@@ -621,26 +845,55 @@ export function useArusEngine() {
       }));
       setTimeout(() => setState(prev => (prev.circuitBreaker?.id === id ? { ...prev, circuitBreaker: null } : prev)), 3000);
     } else if (data.type === "storm_started") {
-      // FASE 2: comienza la ráfaga de volatilidad (modo tormenta en el radar).
+      // FASE 3: comienza la ráfaga HFT (modo tormenta en el radar).
       setState(prev => ({ ...prev, stormActive: true, stormResult: null }));
     } else if (data.type === "storm_trade") {
-      // Cada operación de la tormenta: se empuja al feed (tag storm → el radar le
-      // dispara la luz verde pero omite el cobro flotante) y el P&L trepa.
-      setState(prev => ({
-        ...prev,
-        totalWealth: (data.total_wealth as number) ?? prev.totalWealth,
-        totalNetProfit: (data.total_net_profit as number) ?? prev.totalNetProfit,
-        opsCount: prev.opsCount + 1,
-        trades: [{
-          event: "arbitrage_executed",
-          exchange_buy: data.buy_venue as string,
-          exchange_sell: data.sell_venue as string,
-          net_profit_usd: (data.net_profit_usd as number) ?? 0,
-          new_total_usd: (data.total_wealth as number) ?? prev.totalWealth,
-          timestamp: (data.timestamp as string) ?? "",
-          storm: true,
-        } as Trade, ...prev.trades].slice(0, 15),
-      }));
+      // Cada fill de la tormenta: luces + P&L + saldos (sesgo espacial en vivo).
+      const flashId = ++flashCounterRef.current;
+      setState(prev => {
+        const nextBalances = balancesFromData(data, prev.balances);
+        const byVenueAsset: InventoryFlash["byVenueAsset"] = {};
+        for (const [venue, assets] of Object.entries(nextBalances)) {
+          for (const [asset, qty] of Object.entries(assets)) {
+            const before = prev.balances?.[venue]?.[asset] ?? 0;
+            const delta = qty - before;
+            if (Math.abs(delta) < 1e-12) continue;
+            if (!byVenueAsset[venue]) byVenueAsset[venue] = {};
+            byVenueAsset[venue][asset] = delta;
+          }
+        }
+        const hasFlash = Object.keys(byVenueAsset).length > 0;
+        const deltas: Record<string, number> = {};
+        for (const [venue, assets] of Object.entries(byVenueAsset)) {
+          for (const [asset, delta] of Object.entries(assets)) {
+            deltas[`${asset}@${venue}`] = delta;
+          }
+        }
+        return {
+          ...prev,
+          balances: nextBalances,
+          wallets: walletsFromBalances(nextBalances),
+          graph: graphWithBalances(prev.graph, nextBalances),
+          totalWealth: (data.total_wealth as number) ?? prev.totalWealth,
+          totalNetProfit: (data.total_net_profit as number) ?? prev.totalNetProfit,
+          opsCount: prev.opsCount + 1,
+          inventoryFlash: hasFlash ? { id: flashId, deltas, byVenueAsset } : prev.inventoryFlash,
+          trades: [{
+            event: "arbitrage_executed",
+            exchange_buy: data.buy_venue as string,
+            exchange_sell: data.sell_venue as string,
+            net_profit_usd: (data.net_profit_usd as number) ?? 0,
+            new_total_usd: (data.total_wealth as number) ?? prev.totalWealth,
+            timestamp: (data.timestamp as string) ?? "",
+            storm: true,
+          } as Trade, ...prev.trades].slice(0, 15),
+        };
+      });
+      setTimeout(() => {
+        setState(prev =>
+          prev.inventoryFlash?.id === flashId ? { ...prev, inventoryFlash: null } : prev,
+        );
+      }, HFT_FLASH_MS);
     } else if (data.type === "storm_ended") {
       // Fin de la tormenta: resumen efímero (operaciones + ganancia acumulada).
       setState(prev => ({
@@ -650,20 +903,39 @@ export function useArusEngine() {
       }));
       setTimeout(() => setState(prev => ({ ...prev, stormResult: null })), 8000);
     } else if (data.event === "omni_executed") {
-      // FASE 1: ciclo omnidireccional ejecutado. Se cuenta como una operación y se
-      // dispara la animación de la luz verde (omniPulse). Los saldos y el patrimonio
-      // llegan en el wallet_update que el backend emite justo después.
-      setState(prev => ({
-        ...prev,
-        opsCount: prev.opsCount + 1,
-        omniPulse: {
-          id: (prev.omniPulse?.id ?? 0) + 1,
-          path: (data.path as string[]) ?? [],
-          legs: (data.legs as OmniLeg[]) ?? [],
-          route: (data.route as string) ?? "",
-          net: (data.net_profit_usd as number) ?? 0,
-        },
-      }));
+      // Ciclo atómico real: el inventario YA quedó sesgado en Go (compra/venta).
+      // Sync balances + wallets; flash solo resalta celdas con el delta neto.
+      const flashId = ++flashCounterRef.current;
+      const byVenueAsset = flashFromOmni(data);
+      const deltas = (data.flash_delta_by_node as Record<string, number>) ?? {};
+      const hasFlash = Object.keys(byVenueAsset).length > 0;
+      setState(prev => {
+        const nextBalances = balancesFromData(data, prev.balances);
+        return {
+          ...prev,
+          balances: nextBalances,
+          wallets: walletsFromBalances(nextBalances),
+          graph: graphWithBalances(prev.graph, nextBalances),
+          omniPulse: {
+            id: (prev.omniPulse?.id ?? 0) + 1,
+            path: (data.path as string[]) ?? (data.trade_route as string[]) ?? [],
+            legs: (data.legs as OmniLeg[]) ?? [],
+            route: (data.route as string) ?? "",
+            net: (data.net_profit_usd as number) ?? 0,
+            flashNodes: Object.keys(deltas),
+          },
+          inventoryFlash: hasFlash
+            ? { id: flashId, deltas, byVenueAsset }
+            : null,
+        };
+      });
+      if (hasFlash) {
+        setTimeout(() => {
+          setState(prev =>
+            prev.inventoryFlash?.id === flashId ? { ...prev, inventoryFlash: null } : prev,
+          );
+        }, HFT_FLASH_MS);
+      }
     } else if (data.event === "arbitrage_executed") {
       setState(prev => ({
         ...prev,
@@ -695,6 +967,7 @@ export function useArusEngine() {
     initSession,
     resetSession,
     demoInject,
+    simulateCustom,
     injectOmni,
     injectStorm,
     injectFake,

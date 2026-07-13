@@ -293,3 +293,22 @@ func TestSnapshotFor(t *testing.T) {
 		t.Fatal("el path del ciclo debe cerrarse (primero == último)")
 	}
 }
+
+// TestSnapshotFor_VenueFreshIfAnyBookAlive: el chip "congelado" mira CUALQUIER
+// libro del venue (no solo el principal). Simula Kraken con BTC/USD quieto y
+// ETH/USD fresco — no debe marcar feed_stale.
+func TestSnapshotFor_VenueFreshIfAnyBookAlive(t *testing.T) {
+	g := NewLiquidityGraph()
+	now := time.Now()
+	stale := now.Add(-MaxBookStaleness - time.Second)
+	g.UpdateBook("Kraken:BTC/USD", TopOfBook{Ask: 60_100, Bid: 60_000, AskQty: 1, BidQty: 1, UpdatedAt: stale})
+	g.UpdateBook("Kraken:ETH/USD", TopOfBook{Ask: 3_100, Bid: 3_090, AskQty: 5, BidQty: 5, UpdatedAt: now})
+	g.UpdateBook("Binance:BTC/USDT", TopOfBook{Ask: 60_050, Bid: 60_000, AskQty: 1, BidQty: 1, UpdatedAt: now})
+
+	snap := g.SnapshotFor(Balances{}, DefaultTradingParameters(), nil, now)
+	for _, n := range snap.Nodes {
+		if n.Venue == "Kraken" && n.FeedStale {
+			t.Fatalf("Kraken no debe verse congelado si ETH/USD está fresco: nodo %+v", n)
+		}
+	}
+}

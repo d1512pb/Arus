@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // cycle.go — EJECUTOR DE CICLOS (Fase 2 · hito 3).
@@ -119,17 +122,18 @@ func planCycle(c *Cycle, balances Balances, p TradingParameters, btcPrice float6
 // planRotation planifica UNA rotación concreta del ciclo (edges ya rotadas para
 // que edges[0].From sea el nodo cash de inicio). El monto de entrada y el neto
 // quedan expresados en ≈USD, consistentes con el PnL del dashboard.
+//
+// Mundo real: EdgeInventorySwap es solo conectividad (no mueve wallets). El
+// sizing acota por liquidez de libros + un dry-run que aplica piernas reales
+// en orden (la venta consume BTC ya fondeado; el cash de la venta financia la
+// paridad siguiente).
 func planRotation(edges []Edge, balances Balances, p TradingParameters, btcPrice float64) (*cyclePlan, error) {
 	start := edges[0].From
 
-	// Tasa efectiva del ciclo y tope de entrada por liquidez de cada pierna,
-	// mapeado a unidades de inicio: en la pierna i entra X·Π(eff_j, j<i).
-	// prodGross acumula las tasas SIN fees: la diferencia contra prod es la
-	// fricción total (fees + slippage) que paga el ciclo.
 	prod, prodGross := 1.0, 1.0
 	maxStart := balances.Get(start.Venue, string(start.Asset))
 	if cap := p.MaxOrderSizeBTC * btcPrice; cap < maxStart {
-		maxStart = cap // tope del usuario, en BTC-equivalente
+		maxStart = cap
 	}
 	for _, e := range edges {
 		eff := e.Rate * (1 - e.Fee)
@@ -139,10 +143,8 @@ func planRotation(edges []Edge, balances Balances, p TradingParameters, btcPrice
 		if e.Kind == EdgeOrderBook && e.Liquidity > 0 {
 			var limit float64
 			if string(e.To.Asset) == e.BaseAsset {
-				// Compra: el volumen en base sale de la pierna → X·prod·eff ≤ liq.
 				limit = e.Liquidity / (prod * eff)
 			} else {
-				// Venta: el volumen en base entra a la pierna → X·prod ≤ liq.
 				limit = e.Liquidity / prod
 			}
 			if limit < maxStart {
@@ -156,15 +158,22 @@ func planRotation(edges []Edge, balances Balances, p TradingParameters, btcPrice
 	if prod <= 1 {
 		return nil, errNotProfitable
 	}
-	if maxStart < MinExecutableVolumeBTC*btcPrice {
+
+	// Dry-run: reduce X hasta que todas las piernas reales tengan saldo en el
+	// momento en que se ejecutan (la venta puede crear el cash de la paridad).
+	for i := 0; i < 12 && maxStart >= MinExecutableVolumeBTC*btcPrice; i++ {
+		if rotationFits(edges, balances, maxStart) {
+			break
+		}
+		maxStart *= 0.5
+	}
+	if maxStart < MinExecutableVolumeBTC*btcPrice || !rotationFits(edges, balances, maxStart) {
 		return nil, errNoFunds
 	}
 
 	x := maxStart
 	net := x * (prod - 1)
 	if net <= p.MinNetProfitUSD {
-		// El neto escala linealmente con X: si ni el máximo alcanza el margen
-		// del usuario, la oportunidad es demasiado pequeña PARA ÉL.
 		return nil, errBelowMargin
 	}
 
@@ -184,9 +193,41 @@ func planRotation(edges []Edge, balances Balances, p TradingParameters, btcPrice
 	return plan, nil
 }
 
+// legMovesWallet: piernas de libro/paridad siempre mueven saldos. Los swaps de
+// inventario CRYPTO no (compra y venta pre-fondeada dejan el sesgo real). Los
+// swaps de CASH sí se aplican: son atajos del grafo (USD Bitso→Kraken→paridad)
+// sin los cuales la ruta no cierra en wallets.
+func legMovesWallet(kind EdgeKind, asset Asset) bool {
+	if kind != EdgeInventorySwap {
+		return true
+	}
+	return isCashAsset(asset)
+}
+
+// rotationFits simula el commit real a tamaño x (salta solo swaps cripto).
+func rotationFits(edges []Edge, balances Balances, x float64) bool {
+	if x <= 0 || balances == nil {
+		return false
+	}
+	sim := balances.Clone()
+	amount := x
+	for _, e := range edges {
+		out := amount * e.Rate * (1 - e.Fee)
+		if legMovesWallet(e.Kind, e.From.Asset) {
+			if sim.Get(e.From.Venue, string(e.From.Asset)) < amount*(1-1e-12) {
+				return false
+			}
+			sim.Add(e.From.Venue, string(e.From.Asset), -amount)
+			sim.Add(e.To.Venue, string(e.To.Asset), out)
+		}
+		amount = out
+	}
+	return true
+}
+
 // cycleCreditProjection responde: ¿la línea de crédito volvería ejecutable este
 // ciclo? Re-planifica sobre una copia de saldos con el préstamo HIPOTÉTICO
-// aplicado (mismo reparto que activateCreditSession: el par clásico) y devuelve
+// aplicado (mismo reparto agnóstico que activateCreditSession) y devuelve
 // la ganancia proyectada si el plan resultante supera el margen del usuario.
 // Función pura: no activa nada — la decisión es de handleLiquidityShortfall.
 func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btcPrice float64) (float64, bool) {
@@ -194,14 +235,7 @@ func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btc
 	if hypo == nil {
 		hypo = make(Balances)
 	}
-	pair := classicVenues()
-	if len(pair) == 0 {
-		return 0, false
-	}
-	for _, v := range pair {
-		hypo.Add(v.Name, v.QuoteAsset, p.CreditLineUSD/float64(len(pair)))
-		hypo.Add(v.Name, v.BaseAsset, p.CreditLineBTC/float64(len(pair)))
-	}
+	applyHypotheticalCredit(hypo, p, creditAssetsForCycle(c))
 	plan, err := planCycle(c, hypo, p, btcPrice)
 	if err != nil {
 		return 0, false
@@ -209,12 +243,30 @@ func cycleCreditProjection(c *Cycle, balances Balances, p TradingParameters, btc
 	return plan.NetProfit, true
 }
 
-// notifyCycleUnfundable avisa (con throttle de 15 s para no spamear cada tick)
-// que el radar detectó un ciclo rentable cuyo nodo de inicio está FUERA del par
-// clásico: ni el crédito ni el reequilibrio pueden fondearlo (ambos operan solo
-// sobre Binance/Bitso). Sin este aviso el autopiloto parecía congelado —
-// dibujaba el ciclo verde y no ejecutaba nada. La acción del usuario es depositar
-// fondos en el exchange donde arranca el ciclo.
+// creditAssetsForCycle lista los activos no-cash del ciclo (BTC/ETH/SOL…) para
+// que el préstamo hipotético/real inyecte justo la liquidez que bloquea la ruta.
+func creditAssetsForCycle(c *Cycle) []string {
+	if c == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range c.Edges {
+		for _, a := range []Asset{e.From.Asset, e.To.Asset} {
+			s := string(a)
+			if isCashAsset(a) || seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// notifyCycleUnfundable avisa (con throttle de 15 s) que hay un ciclo rentable
+// pero sin fondos suficientes donde arranca — ni con la línea de crédito
+// hipotética. El usuario debe depositar o pedir crédito / reequilibrar.
 func (e *HFTEngine) notifyCycleUnfundable(session *ClientSession, cycle *Cycle) {
 	session.Mu.Lock()
 	if time.Since(session.LastUnfundableLogAt) < 15*time.Second {
@@ -234,22 +286,44 @@ func (e *HFTEngine) notifyCycleUnfundable(session *ClientSession, cycle *Cycle) 
 			}
 		}
 	}
-	sendLog(session, fmt.Sprintf("💤 [RADAR] Ciclo rentable en %s pero sin fondos donde arranca — el crédito y el reequilibrio solo cubren el par clásico (Binance/Bitso). Deposita fondos en ese exchange para ejecutarlo.", strings.Join(venues, " · ")))
+	sendLog(session, fmt.Sprintf("💤 [RADAR] Ciclo rentable en %s pero sin fondos donde arranca — deposita, pide crédito o reequilibra inventario global para ejecutarlo.", strings.Join(venues, " · ")))
 }
 
-// commitCycle aplica el plan sobre la sesión: re-verifica el saldo de inicio
-// bajo el lock (hard block — el mundo pudo cambiar desde la planificación) y
-// mueve todas las piernas de una vez. Devuelve false si ya no hay fondos.
+// commitCycle aplica el plan sobre la sesión: re-verifica saldos bajo el lock
+// (hard block) y mueve las piernas REALES de una vez.
+//
+// Mundo real (arbitraje espacial pre-fondeado):
+//   · Compra en el venue barato → −cash +crypto ahí
+//   · Venta en el venue caro    → −crypto +cash ahí
+//   · EdgeInventorySwap NO toca wallets: solo unía el grafo. El sesgo de
+//     inventario (más BTC donde compraste, menos donde vendiste) PERMANECE
+//     hasta que el usuario redistribuya o pida crédito.
+// Un triangular intra-venue no tiene swaps: crypto vuelve a cash y queda flat.
 func commitCycle(session *ClientSession, plan *cyclePlan) bool {
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
 
-	if session.Wallets == nil ||
-		session.Wallets.Get(plan.Start.Venue, string(plan.Start.Asset)) < plan.StartAmount*(1-1e-12) {
+	if session.Wallets == nil {
 		return false
 	}
 
+	// Dry-run: cada pierna que mueve wallet debe tener saldo en From.
+	sim := session.Wallets.Clone()
 	for _, leg := range plan.Legs {
+		if !legMovesWallet(leg.Kind, leg.From.Asset) {
+			continue
+		}
+		if sim.Get(leg.From.Venue, string(leg.From.Asset)) < leg.In*(1-1e-12) {
+			return false
+		}
+		sim.Add(leg.From.Venue, string(leg.From.Asset), -leg.In)
+		sim.Add(leg.To.Venue, string(leg.To.Asset), leg.Out)
+	}
+
+	for _, leg := range plan.Legs {
+		if !legMovesWallet(leg.Kind, leg.From.Asset) {
+			continue
+		}
 		session.Wallets.Add(leg.From.Venue, string(leg.From.Asset), -leg.In)
 		session.Wallets.Add(leg.To.Venue, string(leg.To.Asset), leg.Out)
 	}
@@ -257,6 +331,110 @@ func commitCycle(session *ClientSession, plan *cyclePlan) bool {
 	session.TotalNetProfit += plan.NetProfit
 	session.LastTradeTime = time.Now()
 	return true
+}
+
+// emitCycleExecuted envía el evento omni_executed con el camino REALMENTE
+// ejecutado, para que el radar anime la luz verde recorriendo las aristas del
+// ciclo secuencialmente (RadarView). Desde la FASE 2 del refactor de "Probar
+// Bot" el evento nace SIEMPRE del plan del ejecutor de ciclos —montos, fees y
+// ruta reales—, no de un plan fabricado. Sigue el patrón de sendArbExecuted:
+// payload crudo por el socket (no ServerEvent).
+//
+// Telemetría forense (HFT Flash): el payload incluye trade_route +
+// intermediate_volumes + flash_deltas con el DELTA NETO real (post-commit) de
+// cada nodo tras saltar los swaps de inventario — el frontend resalta las
+// celdas cuyo inventario SÍ cambió (compra/venta espacial).
+func emitCycleExecuted(session *ClientSession, plan *cyclePlan) {
+	if len(plan.Legs) == 0 {
+		return
+	}
+	path := make([]string, 0, len(plan.Legs)+1)
+	path = append(path, plan.Legs[0].From.ID())
+	legs := make([]map[string]interface{}, 0, len(plan.Legs))
+	intermediates := make([]map[string]interface{}, 0, len(plan.Legs)*2)
+	// net: delta wallet REAL por nodo (ignora inventory swaps).
+	net := map[string]float64{}
+	meta := map[string][2]string{}
+
+	record := func(n MarketNode, delta float64, step int, applied bool) {
+		id := n.ID()
+		meta[id] = [2]string{n.Venue, string(n.Asset)}
+		intermediates = append(intermediates, map[string]interface{}{
+			"node":    id,
+			"venue":   n.Venue,
+			"asset":   string(n.Asset),
+			"delta":   delta,
+			"step":    step,
+			"applied": applied,
+		})
+		if applied {
+			net[id] += delta
+		}
+	}
+
+	for i, l := range plan.Legs {
+		path = append(path, l.To.ID())
+		applied := legMovesWallet(l.Kind, l.From.Asset)
+		legs = append(legs, map[string]interface{}{
+			"from":    l.From.ID(),
+			"to":      l.To.ID(),
+			"in":      l.In,
+			"out":     l.Out,
+			"asset":   string(l.To.Asset),
+			"kind":    l.Kind.wireKind(),
+			"applied": applied,
+		})
+		record(l.From, -l.In, i, applied)
+		record(l.To, l.Out, i, applied)
+	}
+
+	flash := make([]map[string]interface{}, 0, len(net))
+	flashMap := make(map[string]float64, len(net))
+	for id, d := range net {
+		if mathAbs(d) < 1e-12 {
+			continue
+		}
+		va := meta[id]
+		flash = append(flash, map[string]interface{}{
+			"node":  id,
+			"venue": va[0],
+			"asset": va[1],
+			"delta": d,
+		})
+		flashMap[id] = d
+	}
+
+	session.Mu.Lock()
+	balances := session.Wallets.Clone()
+	session.Mu.Unlock()
+
+	payload := map[string]interface{}{
+		"event":                "omni_executed",
+		"route":                plan.Route(),
+		"path":                 path,
+		"trade_route":          path,
+		"legs":                 legs,
+		"intermediate_volumes": intermediates,
+		"flash_deltas":         flash,
+		"flash_delta_by_node":  flashMap,
+		"balances":             balances,
+		"net_profit_usd":       plan.NetProfit,
+		"start_venue":          plan.Start.Venue,
+		"start_asset":          string(plan.Start.Asset),
+		"start_amount":         plan.StartAmount,
+		"volume_btc":           plan.VolumeBTCEquiv,
+		"timestamp":            time.Now().Format("15:04:05.000"),
+	}
+	if b, err := json.Marshal(payload); err == nil {
+		session.WriteMessage(websocket.TextMessage, b)
+	}
+}
+
+func mathAbs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // executeCycleForSession es el gatillo del autopiloto: mismas compuertas que el
@@ -291,17 +469,13 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		// asistido con los números sobre la mesa si el préstamo automático está
 		// apagado. Si ni con crédito hay plan, se omite sin ruido (como antes).
 		if err == errNoFunds || err == errBelowMargin {
+			// Marca los activos del ciclo para inyección dinámica (ETH/SOL…).
+			session.Mu.Lock()
+			session.Credit.PendingCrypto = creditAssetsForCycle(cycle)
+			session.Mu.Unlock()
 			if projected, ok := cycleCreditProjection(cycle, balances, p, btcPrice); ok {
-				// El crédito (sobre el par clásico) SÍ volvería viable el ciclo:
-				// misma decisión que el modo clásico — auto-crédito, reequilibrio
-				// o diálogo asistido.
 				e.handleLiquidityShortfall(session, projected)
 			} else {
-				// El crédito y el reequilibrio operan solo sobre el par clásico, así
-				// que no pueden fondear un ciclo cuyo nodo de inicio está fuera (p. ej.
-				// un triangular interno de Kraken). Antes se omitía EN SILENCIO: el
-				// radar seguía pintando el ciclo verde mientras el bot no hacía nada y
-				// el usuario no tenía forma de enterarse. Ahora se avisa (throttled).
 				e.notifyCycleUnfundable(session, cycle)
 			}
 		}
@@ -325,6 +499,11 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 	sendLog(session, fmt.Sprintf("🔁 [CICLO EJECUTADO] %s | Entrada: $%.2f | Neto: +$%.2f | Vol: %.4f BTC-eq",
 		plan.Route(), plan.StartAmount, plan.NetProfit, plan.VolumeBTCEquiv))
 
+	// FASE 2 (refactor Probar Bot): la animación de la luz verde recorriendo el
+	// camino nace del plan REALMENTE ejecutado — vale igual para el autopiloto
+	// del radar y para el botón "Oportunidad normal" (omni.go).
+	emitCycleExecuted(session, plan)
+
 	// Feed de operaciones: compra en el venue de la primera pierna de libro,
 	// venta en el de la última (espacial: Binance→Bitso; triangular: Binance→Binance).
 	buyVenue, sellVenue := plan.Start.Venue, plan.Start.Venue
@@ -338,6 +517,9 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 	}
 	sendArbExecuted(session, buyVenue, sellVenue, plan.VolumeBTCEquiv, plan.NetProfit)
 
+	// Empuja el radar YA con los saldos sesgados (no esperar al barrido ~1/s).
+	e.pushSessionGraph(session)
+
 	recordTradeAsync(TradeRecord{
 		SessionID:    session.ID,
 		Timestamp:    time.Now(),
@@ -348,4 +530,21 @@ func (e *HFTEngine) executeCycleForSession(session *ClientSession, cycle *Cycle,
 		FeesUSD:      plan.FeesUSD,
 		NetProfitUSD: plan.NetProfit,
 	})
+}
+
+// pushSessionGraph envía un graph_update inmediato con los wallets actuales:
+// tras un ciclo/trade el radar no debe esperar al barrido de ~1 s (en demos de
+// "Probar bot" a veces ni llega un tick de mercado y los nodos se veían congelados).
+func (e *HFTEngine) pushSessionGraph(session *ClientSession) {
+	if e == nil || e.Graph == nil || session == nil || !session.IsInitialized() {
+		return
+	}
+	session.Mu.Lock()
+	wallets := session.Wallets.Clone()
+	session.Mu.Unlock()
+	p := session.Params()
+	now := time.Now()
+	userCycle := e.Graph.FindBestCycleFor(p, now)
+	snap := e.Graph.SnapshotFor(wallets, p, userCycle, now)
+	sendEvent(session, ServerEvent{Type: "graph_update", SessionID: session.ID, Graph: snap})
 }

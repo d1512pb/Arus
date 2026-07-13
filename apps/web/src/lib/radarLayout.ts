@@ -39,7 +39,17 @@ export const MIN_COL_W = 260;
 export const MAX_COL_W = 420;
 export const MIN_W = 860;
 export const TOP_Y = 140;
-export const BOTTOM_PAD = 104;
+// Caja SVG por venue (RadarView): mismos márgenes que el stack de nodos, para
+// que círculo + etiqueta "1 BTC = $…" no se salgan por debajo del rect.
+export const VENUE_BOX_TOP = 52;
+export const VENUE_BOX_BOTTOM = 20;
+export const VENUE_BOX_X_INSET = 18;
+/** Distancia bajo el centro del nodo hasta el baseline de la etiqueta de precio. */
+export const NODE_PRICE_BELOW = NODE_R + 16;
+/** Aire bajo la etiqueta hasta el borde interior de la caja. */
+export const NODE_LABEL_GAP = 14;
+// Centro del último nodo: deja sitio a radio + etiqueta + aire + margen del lienzo.
+export const BOTTOM_PAD = NODE_PRICE_BELOW + NODE_LABEL_GAP + VENUE_BOX_BOTTOM;
 export const MIN_H = 520;
 // Separación vertical máxima entre nodos de una columna (que una columna de 2
 // nodos no los mande a los polos del lienzo).
@@ -58,8 +68,24 @@ export function venueOrderOf(nodes: LayoutNode[]): string[] {
 export function canvasSize(venueCount: number, maxAssetsPerVenue: number): { w: number; h: number } {
   const n = Math.max(1, venueCount);
   const w = Math.max(MIN_W, n * 300);
-  const h = Math.max(MIN_H, TOP_Y + BOTTOM_PAD + Math.max(0, maxAssetsPerVenue - 1) * 128);
+  // 148px por activo extra: deja aire entre nodos y la etiqueta de precio
+  // sin forzar al stack a pegarse a yBot en columnas densas.
+  const h = Math.max(MIN_H, TOP_Y + BOTTOM_PAD + Math.max(0, maxAssetsPerVenue - 1) * 148);
   return { w, h };
+}
+
+/** Rect de la caja del venue i (coordenadas del viewBox del radar). */
+export function venueBoxRect(
+  i: number,
+  layout: Pick<RadarLayout, "colW" | "offsetX" | "h">,
+): { x: number; y: number; width: number; height: number } {
+  const { colW, offsetX, h } = layout;
+  return {
+    x: offsetX + colW * i + VENUE_BOX_X_INSET,
+    y: VENUE_BOX_TOP,
+    width: colW - VENUE_BOX_X_INSET * 2,
+    height: h - VENUE_BOX_TOP - VENUE_BOX_BOTTOM,
+  };
 }
 
 // layoutRadar: una columna por venue (centradas como grupo), efectivo arriba y
@@ -167,7 +193,7 @@ export function routeEdges(edges: LayoutEdge[], layout: RadarLayout): RoutedEdge
   for (const [, group] of intraByVenue) {
     // Orden determinista: saltos cortos primero (arcos pegados), luego clave.
     group.sort((p, q) => p.span - q.span || (p.k < q.k ? -1 : 1));
-    const maxOff = Math.max(40, colW / 2 - NODE_R - 14);
+    const maxOff = Math.max(40, colW / 2 - VENUE_BOX_X_INSET - 10);
     group.forEach(({ k, e }, i) => {
       const [cf, ct] = k.split("|");
       const a = pos.get(cf)!;

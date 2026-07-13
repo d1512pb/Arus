@@ -167,7 +167,7 @@ func TestStore_LoadMissing(t *testing.T) {
 // como capital del usuario — al reanudar tras un reinicio no hay crédito fantasma.
 func TestSnapshotSessionRecord_ExcludesBorrowed(t *testing.T) {
 	s := newClientSession("con-credito", nil)
-	initSession(s, 10_000, 0.5, nil, nil)
+	initSession(s, 10_000, 0.5, nil, nil, nil)
 
 	s.Mu.Lock()
 	s.Credit.Active = true
@@ -232,7 +232,7 @@ func TestStore_RoundtripViaSessionHelpers(t *testing.T) {
 	st := newTestStore(t)
 
 	orig := newClientSession("viaje-completo", nil)
-	initSession(orig, 20_000, 1.0, nil, nil)
+	initSession(orig, 20_000, 1.0, nil, nil, nil)
 	orig.Mu.Lock()
 	orig.Wallets.Set("Binance", "USDT", 8_123.45)
 	orig.Wallets.Set("Binance", "ETH", 2.5) // activo no-par: también debe viajar

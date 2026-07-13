@@ -105,6 +105,11 @@ type HFTEngine struct {
 	// Graph es el radar omnidireccional (Fase 2): el grafo de liquidez que se
 	// actualiza con cada tick y detecta ciclos de arbitraje automáticamente.
 	Graph *LiquidityGraph
+	// Ticks es el canal de INGESTA del motor — el mismo que alimentan los
+	// FeedAdapters reales. El simulador omnidireccional (omni.go) inyecta por
+	// aquí sus MarketTicks fabricados: no existe un camino de evaluación
+	// paralelo, todo entra por la misma tubería.
+	Ticks chan<- PriceTick
 }
 
 func getLevel(msg string) string {
@@ -192,8 +197,13 @@ func assetPriceUSD(asset string) float64 {
 			}
 		}
 	}
-	if asset == "BTC" {
+	switch asset {
+	case "BTC":
 		return DefaultBTCPriceFallback
+	case "ETH":
+		return DefaultETHPriceFallback
+	case "SOL":
+		return DefaultSOLPriceFallback
 	}
 	return 0
 }
@@ -208,10 +218,10 @@ func (e *HFTEngine) sessionHasFundsForTrade(session *ClientSession, buyEx, sellE
 		session.Wallets.Get(sellEx, baseOf(sellEx)) >= volume
 }
 
-// adjustFunds permite al usuario depositar (amount > 0) o retirar (amount < 0) USD o
-// BTC de un exchange concreto. Para que un depósito/retiro NO se contabilice como
-// ganancia o pérdida del bot, ajustamos por igual el patrimonio total y la base
-// inicial (initial), dejando el PnL ("Ganancia Neta") intacto en el momento del ajuste.
+// adjustFunds permite depositar (amount > 0) o retirar (amount < 0) CUALQUIER
+// activo que el venue publique (USD/USDT, BTC, ETH, SOL…). Para que el movimiento
+// NO se contabilice como PnL del bot, ajustamos por igual TotalWealth e
+// InitialWealth (valorados a precio de mercado en ≈USD).
 func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency string, amount float64) {
 	if amount == 0 {
 		return
@@ -223,31 +233,48 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 		return
 	}
 
-	btcPrice := getBTCPrice()
-	applied := amount
-
-	switch strings.ToUpper(currency) {
-	case "USD":
-		asset := quoteOf(exchange)
-		if cur := session.Wallets.Get(exchange, asset); amount < 0 && cur+amount < 0 {
-			applied = -cur // no permitir saldo negativo: retira como máximo lo disponible
-		}
-		session.Wallets.Add(exchange, asset, applied)
-		session.TotalWealth += applied
-		session.InitialWealth += applied // base sube/baja igual → no se contabiliza como PnL
-		session.InitialUSD += applied
-	case "BTC":
-		asset := baseOf(exchange)
-		if cur := session.Wallets.Get(exchange, asset); amount < 0 && cur+amount < 0 {
-			applied = -cur
-		}
-		session.Wallets.Add(exchange, asset, applied)
-		session.TotalWealth += applied * btcPrice
-		session.InitialWealth += applied * btcPrice
-		session.InitialBTC += applied
-	default:
+	asset := strings.ToUpper(strings.TrimSpace(currency))
+	if asset == "" {
 		session.Mu.Unlock()
 		return
+	}
+	// Atajo UI: "USD" / "CASH" → efectivo nativo del venue (USDT en Binance, USD en Bitso).
+	if asset == "USD" || asset == "CASH" {
+		asset = quoteOf(exchange)
+	}
+	if isCashAsset(Asset(asset)) && assetsParity(asset, quoteOf(exchange)) {
+		asset = quoteOf(exchange)
+	}
+	if !venueHasAsset(exchange, asset) {
+		session.Mu.Unlock()
+		sendLog(session, fmt.Sprintf("💤 [FONDOS] %s no opera %s — elige un activo que exista en esa casa.", exchange, asset))
+		return
+	}
+
+	px := assetPriceUSD(asset)
+	if px <= 0 {
+		session.Mu.Unlock()
+		sendLog(session, fmt.Sprintf("🧊 [FONDOS] Sin precio de mercado para %s — no se puede valorar el movimiento.", asset))
+		return
+	}
+
+	applied := amount
+	if cur := session.Wallets.Get(exchange, asset); amount < 0 && cur+amount < 0 {
+		applied = -cur
+	}
+	if applied == 0 {
+		session.Mu.Unlock()
+		return
+	}
+
+	session.Wallets.Add(exchange, asset, applied)
+	usdDelta := applied * px
+	session.TotalWealth += usdDelta
+	session.InitialWealth += usdDelta
+	if isCashAsset(Asset(asset)) {
+		session.InitialUSD += applied
+	} else if asset == "BTC" {
+		session.InitialBTC += applied
 	}
 	session.Mu.Unlock()
 
@@ -255,10 +282,10 @@ func (e *HFTEngine) adjustFunds(session *ClientSession, exchange, currency strin
 	if applied < 0 {
 		action = "Retiro"
 	}
-	if strings.ToUpper(currency) == "BTC" {
-		sendLog(session, fmt.Sprintf("🏦 [FONDOS] %s en %s: %.6f BTC", action, exchange, math.Abs(applied)))
+	if isCashAsset(Asset(asset)) {
+		sendLog(session, fmt.Sprintf("🏦 [FONDOS] %s en %s: $%.2f %s", action, exchange, math.Abs(applied), asset))
 	} else {
-		sendLog(session, fmt.Sprintf("🏦 [FONDOS] %s en %s: $%.2f USD", action, exchange, math.Abs(applied)))
+		sendLog(session, fmt.Sprintf("🏦 [FONDOS] %s en %s: %.6f %s (≈$%.2f)", action, exchange, math.Abs(applied), asset, math.Abs(usdDelta)))
 	}
 	sendWalletUpdate(session)
 }
@@ -282,11 +309,19 @@ func sendWalletUpdate(s *ClientSession) {
 		CreditActive:   s.Credit.Active,
 		AutoMode:       s.Credit.AutoMode,
 	}
-	if s.Credit.Active && s.Credit.BorrowedUSD != nil {
-		ev.BorrowedBinanceUSD = s.Credit.BorrowedUSD["Binance"]
-		ev.BorrowedBitsoUSD = s.Credit.BorrowedUSD["Bitso"]
-		ev.BorrowedBinanceBTC = s.Credit.BorrowedBTC["Binance"]
-		ev.BorrowedBitsoBTC = s.Credit.BorrowedBTC["Bitso"]
+	if s.Credit.Active {
+		if s.Credit.Borrowed != nil {
+			ev.BorrowedBalances = s.Credit.Borrowed.Clone()
+			ev.BorrowedBinanceUSD = s.Credit.Borrowed.Get("Binance", quoteOf("Binance"))
+			ev.BorrowedBitsoUSD = s.Credit.Borrowed.Get("Bitso", quoteOf("Bitso"))
+			ev.BorrowedBinanceBTC = s.Credit.Borrowed.Get("Binance", "BTC")
+			ev.BorrowedBitsoBTC = s.Credit.Borrowed.Get("Bitso", "BTC")
+		} else if s.Credit.BorrowedUSD != nil {
+			ev.BorrowedBinanceUSD = s.Credit.BorrowedUSD["Binance"]
+			ev.BorrowedBitsoUSD = s.Credit.BorrowedUSD["Bitso"]
+			ev.BorrowedBinanceBTC = s.Credit.BorrowedBTC["Binance"]
+			ev.BorrowedBitsoBTC = s.Credit.BorrowedBTC["Bitso"]
+		}
 	}
 	if s.Credit.Active && !s.Credit.ExpiresAt.IsZero() {
 		ev.ExpiresAt = s.Credit.ExpiresAt.Format(time.RFC3339)
@@ -324,6 +359,7 @@ func sendArbExecuted(session *ClientSession, buyEx, sellEx string, volume, netPr
 	payload["binance_btc"] = session.Wallets.Get("Binance", baseOf("Binance"))
 	payload["bitso_usd"] = session.Wallets.Get("Bitso", quoteOf("Bitso"))
 	payload["bitso_btc"] = session.Wallets.Get("Bitso", baseOf("Bitso"))
+	payload["balances"] = session.Wallets.Clone()
 	session.Mu.Unlock()
 
 	b, _ := json.Marshal(payload)
@@ -570,6 +606,7 @@ func (e *HFTEngine) executeForSession(session *ClientSession, mkt pairView) {
 	}
 
 	if mkt.BitAsk > mkt.BinAsk*p.MaxDivergenceRatio || mkt.BinAsk > mkt.BitAsk*p.MaxDivergenceRatio {
+		sendLog(session, fmt.Sprintf("🛑 [CIRCUIT BREAKER] Divergencia de precio entre venues supera TU límite de cordura (%.0f %%) — oportunidad rechazada.", (p.MaxDivergenceRatio-1)*100))
 		return
 	}
 
@@ -717,6 +754,8 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 	sendLog(session, fmt.Sprintf("⚡ [ARBITRAJE] Executed %.4f BTC | Net Profit: +$%.2f USD | Total: $%.2f | Credit: %s", volume, netProfit, totalWealth, creditStatus))
 	sendArbExecuted(session, buyEx, sellEx, volume, netProfit)
 
+	e.pushSessionGraph(session)
+
 	recordTradeAsync(TradeRecord{
 		SessionID:    session.ID,
 		Timestamp:    time.Now(),
@@ -726,97 +765,6 @@ func (e *HFTEngine) executeTradeForSession(session *ClientSession, buyEx, sellEx
 		SpreadUSD:    sellPrice - buyPrice,
 		FeesUSD:      feesUSD,
 		NetProfitUSD: netProfit,
-	})
-}
-
-func (e *HFTEngine) rebalanceWallets50_50(session *ClientSession) {
-	session.Mu.Lock()
-
-	// Guarda defensiva: una acción (wait_rebalance) que llegue antes de init_session
-	// no debe operar sobre wallets inexistentes.
-	if session.Wallets == nil {
-		session.Mu.Unlock()
-		return
-	}
-
-	if session.Credit.Active && session.Credit.BorrowedUSD != nil {
-		for ex, amt := range session.Credit.BorrowedUSD {
-			session.Wallets.Add(ex, quoteOf(ex), -amt)
-		}
-		for ex, amt := range session.Credit.BorrowedBTC {
-			session.Wallets.Add(ex, baseOf(ex), -amt)
-		}
-		session.Credit.Active = false
-		session.Credit.BorrowedUSD = nil
-		session.Credit.BorrowedBTC = nil
-	}
-
-	btcPrice := getBTCPrice()
-	// Solo se reequilibran los activos del PAR CLÁSICO (quote + BTC de
-	// Binance/Bitso); todo lo demás —otros activos (ETH de un triangular) y
-	// venues fuera del par (Kraken)— se queda donde está y se valora a mercado
-	// para el patrimonio total.
-	pair := classicVenues()
-	totalUSD, totalBTC, otherUSD := 0.0, 0.0, 0.0
-	for venueName, assets := range session.Wallets {
-		if isClassicVenue(venueName) {
-			v, _ := venueByName(venueName)
-			for asset, amt := range assets {
-				switch asset {
-				case v.QuoteAsset:
-					totalUSD += amt
-				case v.BaseAsset:
-					totalBTC += amt
-				default:
-					otherUSD += amt * assetPriceUSD(asset)
-				}
-			}
-		} else {
-			for asset, amt := range assets {
-				otherUSD += amt * assetPriceUSD(asset)
-			}
-		}
-	}
-	rebalancedUSD := totalUSD + (totalBTC * btcPrice)
-	totalWealthUSD := rebalancedUSD + otherUSD
-
-	// Reparto uniforme: mitad del patrimonio del par en USD y mitad en BTC,
-	// divididos por igual entre los dos venues del par clásico.
-	perVenueUSD := rebalancedUSD / (2.0 * float64(len(pair)))
-	perVenueBTC := perVenueUSD / btcPrice
-
-	for _, v := range pair {
-		session.Wallets.Set(v.Name, v.QuoteAsset, perVenueUSD)
-		session.Wallets.Set(v.Name, v.BaseAsset, perVenueBTC)
-	}
-	session.TotalWealth = totalWealthUSD
-	session.Mu.Unlock()
-
-	sendLog(session, fmt.Sprintf("🔄 [REEQUILIBRIO] Fondos repartidos 50/50. Riqueza total: $%.2f USD", totalWealthUSD))
-
-	payload := map[string]interface{}{
-		"event":            "market_rebalanced",
-		"total_wealth_usd": totalWealthUSD,
-		"target_usd":       perVenueUSD,
-		"target_btc":       perVenueBTC,
-		"binance_usd":      perVenueUSD,
-		"binance_btc":      perVenueBTC,
-		"bitso_usd":        perVenueUSD,
-		"bitso_btc":        perVenueBTC,
-	}
-	b, _ := json.Marshal(payload)
-	session.WriteMessage(websocket.TextMessage, b)
-	sendWalletUpdate(session)
-
-	recordTradeAsync(TradeRecord{
-		SessionID:         session.ID,
-		Timestamp:         time.Now(),
-		BuyExchange:       "Sistema",
-		SellExchange:      "Rebalanceo",
-		VolumeBTC:         totalBTC,
-		SpreadUSD:         0,
-		NetProfitUSD:      0,
-		IsCreditInjection: true,
 	})
 }
 
@@ -968,30 +916,40 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession, auto bool) {
 		s.Mu.Unlock()
 		return
 	}
-	cost := calculateCreditCost(p)
 
-	// La línea de crédito se reparte por igual entre los venues del PAR CLÁSICO:
-	// es liquidez para seguir operando el par (y los ciclos que arrancan en sus
-	// nodos cash), no capital para exchanges que el crédito nunca respaldó.
-	pair := classicVenues()
-	perVenueUSD := p.CreditLineUSD / float64(len(pair))
-	perVenueBTC := p.CreditLineBTC / float64(len(pair))
-	costPerVenue := cost / float64(len(pair))
+	cryptoExtra := append([]string(nil), s.Credit.PendingCrypto...)
+	plan := buildCreditInjection(p, cryptoExtra)
+	cost := plan.cost
+	venues := enabledVenuesForSession(p)
+	if len(venues) == 0 {
+		venues = append([]Venue(nil), Venues...)
+	}
+	n := float64(len(venues))
+	if n == 0 {
+		s.Mu.Unlock()
+		return
+	}
+	costPerVenue := cost / n
 
-	s.Credit.BorrowedUSD = make(map[string]float64, len(pair))
-	s.Credit.BorrowedBTC = make(map[string]float64, len(pair))
-	for _, v := range pair {
-		s.Wallets.Add(v.Name, v.QuoteAsset, perVenueUSD)
-		s.Wallets.Add(v.Name, v.BaseAsset, perVenueBTC)
-		// El costo del crédito (fee + interés) se cobra de una wallet REAL — no
-		// solo de los acumuladores escalares. Si únicamente restáramos de
-		// TotalWealth, el recálculo desde wallets en rebalanceWallets50_50 al
-		// vencer "devolvería" el costo (préstamo aparentemente gratis, rompiendo
-		// la premisa de que endeudarse cuesta). Se resta DESPUÉS de inyectar el
-		// principal, así el saldo nunca queda negativo.
+	s.Credit.Borrowed = plan.borrowed.Clone()
+	s.Credit.BorrowedUSD = make(map[string]float64, len(venues))
+	s.Credit.BorrowedBTC = make(map[string]float64, len(venues))
+
+	for venue, assets := range plan.borrowed {
+		for asset, amt := range assets {
+			s.Wallets.Add(venue, asset, amt)
+			if asset == quoteOf(venue) {
+				s.Credit.BorrowedUSD[venue] = amt
+			}
+			if asset == "BTC" {
+				s.Credit.BorrowedBTC[venue] = amt
+			}
+		}
+	}
+	// El costo del crédito (fee + interés) se cobra del cash de cada venue —
+	// no solo de TotalWealth (si no, el reequilibrio "devolvería" el costo).
+	for _, v := range venues {
 		s.Wallets.Add(v.Name, v.QuoteAsset, -costPerVenue)
-		s.Credit.BorrowedUSD[v.Name] = perVenueUSD
-		s.Credit.BorrowedBTC[v.Name] = perVenueBTC
 	}
 
 	s.TotalNetProfit -= cost
@@ -1004,20 +962,26 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession, auto bool) {
 	s.Credit.DepletedPending = false
 	s.Credit.NetProfitAtActivation = s.TotalNetProfit
 	s.Credit.LastCost = cost
+	s.Credit.PendingCrypto = nil
 	s.IsReplenishing = false
 	s.InsufficientFundsPending = false
 
 	expiresAt := s.Credit.ExpiresAt
+	borrowedSnap := s.Credit.Borrowed.Clone()
+	binUSD := s.Credit.BorrowedUSD["Binance"]
+	bitUSD := s.Credit.BorrowedUSD["Bitso"]
+	binBTC := s.Credit.BorrowedBTC["Binance"]
+	bitBTC := s.Credit.BorrowedBTC["Bitso"]
 	s.Mu.Unlock()
 
-	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO %s] +$%.0f USD +%.1f BTC prestados | Costo: $%.2f (APR %.1f %% · fee $%.2f) | Plazo: %.2g min",
+	extraNote := ""
+	if plan.cryptoNote != "" {
+		extraNote = " + " + plan.cryptoNote
+	}
+	sendLog(s, fmt.Sprintf("🏦 [CRÉDITO %s] +$%.0f USD +%.1f BTC%s prestados en %d venues | Costo: $%.2f (APR %.1f %% · fee $%.2f) | Plazo: %.2g min",
 		map[bool]string{true: "AUTO-ACTIVADO", false: "ACTIVADO"}[auto],
-		p.CreditLineUSD, p.CreditLineBTC, cost, p.CreditAPR*100, p.CreditOriginationFee, p.CreditDurationMin))
+		p.CreditLineUSD, p.CreditLineBTC, extraNote, len(venues), cost, p.CreditAPR*100, p.CreditOriginationFee, p.CreditDurationMin))
 
-	// El tipo distingue préstamo automático (el bot decidió por la inecuación
-	// ganancia > costo × riesgo) de manual (el usuario lo pidió en el diálogo):
-	// el frontend puede narrar/animar cada uno distinto. Ambos comparten la misma
-	// activación (una sola función), solo cambia el tipo emitido.
 	approvedType := "CREDIT_APPROVED"
 	if auto {
 		approvedType = "CREDIT_AUTO_APPROVED"
@@ -1028,10 +992,11 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession, auto bool) {
 		Message:            "Línea de crédito activa — operando con fondos prestados",
 		ExpiresAt:          expiresAt.Format(time.RFC3339),
 		CreditActive:       true,
-		BorrowedBinanceUSD: perVenueUSD,
-		BorrowedBitsoUSD:   perVenueUSD,
-		BorrowedBinanceBTC: perVenueBTC,
-		BorrowedBitsoBTC:   perVenueBTC,
+		BorrowedBinanceUSD: binUSD,
+		BorrowedBitsoUSD:   bitUSD,
+		BorrowedBinanceBTC: binBTC,
+		BorrowedBitsoBTC:   bitBTC,
+		BorrowedBalances:   borrowedSnap,
 	})
 	sendWalletUpdate(s)
 
@@ -1051,21 +1016,21 @@ func (e *HFTEngine) activateCreditSession(s *ClientSession, auto bool) {
 		s.Mu.Lock()
 		stillActive := s.Credit.Active
 		var earnings float64
-		var cost float64
+		var costPaid float64
 		if stillActive {
 			earnings = s.TotalNetProfit - s.Credit.NetProfitAtActivation
-			cost = s.Credit.LastCost
+			costPaid = s.Credit.LastCost
 		}
 		s.Mu.Unlock()
 		if stillActive {
-			sendLog(s, fmt.Sprintf("⏰ [CRÉDITO VENCIDO] Devolviendo préstamo. Ganancia con préstamo: +$%.2f USD. Intereses: $%.2f USD.", earnings, cost))
-			e.rebalanceWallets50_50(s)
+			sendLog(s, fmt.Sprintf("⏰ [CRÉDITO VENCIDO] Devolviendo préstamo. Ganancia con préstamo: +$%.2f USD. Intereses: $%.2f USD.", earnings, costPaid))
+			e.rebalanceGlobalInventory(s)
 			sendEvent(s, ServerEvent{
 				Type:         "CREDIT_EXPIRED",
 				SessionID:    s.ID,
 				Message:      "Préstamo devuelto. Inventario reequilibrado.",
 				LoanEarnings: earnings,
-				LoanCost:     cost,
+				LoanCost:     costPaid,
 			})
 			sendWalletUpdate(s)
 		}

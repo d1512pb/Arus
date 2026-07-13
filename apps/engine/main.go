@@ -30,6 +30,9 @@ func main() {
 		// registro de venues, actualizado por tick y con detección automática de
 		// ciclos de arbitraje (Bellman-Ford sobre pesos -log(tasa·(1-fee))).
 		Graph: NewLiquidityGraph(),
+		// El simulador omnidireccional inyecta por el MISMO canal de ingesta que
+		// los feeds reales (ver omni.go): sin caminos de evaluación paralelos.
+		Ticks: priceChan,
 	}
 
 	http.HandleFunc("/ws", wsHandler(hub, engine))
@@ -40,6 +43,10 @@ func main() {
 	// El motor declara TODO lo que controla: defaults, rangos de clamp, catálogo,
 	// términos del crédito, guardrails y env vars (ver config.go).
 	http.HandleFunc("/api/config", configHandler)
+	// FASE 1 (refactor Probar Bot): "Crear tu propia prueba" inyecta un escenario
+	// de dos libros como MarketTicks reales en el canal de ingesta — la misma
+	// tubería que los WebSockets de los exchanges (ver simulate.go).
+	http.HandleFunc("/api/simulate/custom", customSimHandler(hub, priceChan))
 
 	// El puerto se toma de la variable de entorno PORT (Railway, Render, Cloud Run
 	// la inyectan al desplegar); por defecto 8080 para desarrollo local.

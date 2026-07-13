@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, ChevronDown, ChevronRight, Check, Radar } from "lucide-react";
 import { TradingParams, GraphSnapshot } from "../hooks/useArusEngine";
+import { analyzeUniverseClient } from "../lib/universeCapability";
 
 // StrategyPanel — personalización de la estrategia EN VIVO (Fase 0).
 // El usuario define su apetito de riesgo: margen mínimo, tamaño máximo de orden,
@@ -102,6 +103,7 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
   const [form, setForm] = useState<FormState | null>(null);
   const [dirty, setDirty] = useState(false);
   const [justApplied, setJustApplied] = useState(false);
+  const [universeError, setUniverseError] = useState<string | null>(null);
 
   // Catálogo de venues/activos disponibles, derivado de los nodos del radar.
   const catalogVenues: string[] = [];
@@ -121,12 +123,21 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params, dirty, graph === null]);
 
+  // Antes del early return: el orden de hooks no puede depender de params/form.
+  const draftCap = useMemo(() => {
+    if (!form) return null;
+    const allV = catalogVenues.length > 0 && form.venues.length === catalogVenues.length;
+    const allA = catalogAssets.length > 0 && form.assets.length === catalogAssets.length;
+    return analyzeUniverseClient(allV ? [] : form.venues, allA ? [] : form.assets, catalogVenues);
+  }, [form, catalogVenues, catalogAssets]);
+
   if (!params || !form) return null;
 
   const edit = (patch: Partial<FormState>) => {
     setForm(prev => (prev ? { ...prev, ...patch } : prev));
     setDirty(true);
     setJustApplied(false);
+    setUniverseError(null);
   };
 
   const toggleIn = (list: string[], item: string) =>
@@ -137,16 +148,22 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
     for (const [venue, pct] of Object.entries(form.fees)) {
       fees[venue] = num(pct) / 100; // % → fracción
     }
-    // Universo: si TODO está seleccionado se envía vacío (= "todos"), para que
-    // futuros exchanges/monedas entren solos al universo de este usuario.
     const allV = catalogVenues.length > 0 && form.venues.length === catalogVenues.length;
     const allA = catalogAssets.length > 0 && form.assets.length === catalogAssets.length;
+    const enabledVenues = allV ? [] : form.venues;
+    const enabledAssets = allA ? [] : form.assets;
+    const cap = analyzeUniverseClient(enabledVenues, enabledAssets, catalogVenues);
+    if (!cap.ok) {
+      setUniverseError(cap.reason);
+      return;
+    }
+    setUniverseError(null);
     onApply({
       ...params,
       taker_fees: fees,
       min_net_profit_usd: num(form.minNet),
       max_order_size_btc: num(form.maxOrder),
-      slippage_rate: num(form.slippageBps) / 10000, // bps → fracción
+      slippage_rate: num(form.slippageBps) / 10000,
       risk_multiplier: num(form.risk),
       spike_tick_deviation: num(form.spikePct) / 100,
       max_divergence_ratio: 1 + num(form.divergencePct) / 100,
@@ -156,8 +173,8 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
       credit_origination_fee: num(form.creditFee),
       credit_duration_min: num(form.creditDurationMin),
       order_failure_prob: num(form.failureProbPct) / 100,
-      enabled_venues: allV ? [] : form.venues,
-      enabled_assets: allA ? [] : form.assets,
+      enabled_venues: enabledVenues,
+      enabled_assets: enabledAssets,
       radar_autopilot: form.autopilot,
     });
     setDirty(false);
@@ -340,7 +357,12 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
                   </div>
                 </div>
               </div>
-              <p className={hintCls}>El radar solo busca ciclos dentro de tu universo. Deseleccionar todo equivale a permitir todo.</p>
+              <p className={hintCls}>El radar solo busca ciclos dentro de tu universo. Deseleccionar todo equivale a permitir todo. Hace falta al menos un ciclo espacial (2 casas + BTC) o triangular (1 casa + BTC + ETH/SOL).</p>
+              {(universeError || (draftCap && !draftCap.ok)) && (
+                <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg px-3 py-2 leading-relaxed">
+                  {universeError ?? draftCap?.reason}
+                </p>
+              )}
             </div>
           )}
 
@@ -373,8 +395,9 @@ export function StrategyPanel({ params, graph, onApply, embedded = false }: Prop
             </p>
             <button
               onClick={handleApply}
-              disabled={!dirty}
+              disabled={!dirty || (draftCap !== null && !draftCap.ok)}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-widest text-white transition-all duration-300 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 ${justApplied ? "bg-emerald-500" : "bg-violet-600 hover:bg-violet-500"}`}
+              title={draftCap && !draftCap.ok ? draftCap.reason : undefined}
             >
               {justApplied ? (<><Check className="w-4 h-4" /> Aplicado</>) : "Aplicar estrategia"}
             </button>

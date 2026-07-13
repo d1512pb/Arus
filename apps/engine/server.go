@@ -21,7 +21,9 @@ var upgrader = websocket.Upgrader{
 // initSession inicializa (o resetea) los fondos de una sesión. usdAlloc/btcAlloc
 // son la distribución por venue elegida por el usuario (porcentajes ya validados
 // por validAllocation, o nil = reparto clásico 50/50 entre el par).
-func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[string]float64) {
+// assetInv son cantidades TOTALES de cripto mid (ETH/SOL…) a fondear además del
+// BTC — se reparte con btcAlloc (o usdAlloc) solo en venues que cotizan ese activo.
+func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc, assetInv map[string]float64) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 
@@ -32,18 +34,24 @@ func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[stri
 		s.Wallets.Set(v.Name, v.BaseAsset, 0)
 	}
 
+	cryptoAlloc := btcAlloc
+	if cryptoAlloc == nil {
+		cryptoAlloc = usdAlloc
+	}
+
 	if usdAlloc != nil {
-		// Distribución del usuario (modo experto): cada venue recibe su
-		// porcentaje del capital — cash al quote del venue, BTC a su base.
-		// Kraken (o cualquier venue fuera del par) puede nacer fondeado.
+		// Distribución del usuario (modo experto / guiado con checklist): cada
+		// venue recibe su porcentaje del capital — cash al quote, BTC a su base.
 		for venue, pct := range usdAlloc {
 			if v, ok := venueByName(venue); ok {
 				s.Wallets.Add(v.Name, v.QuoteAsset, usd*pct/100)
 			}
 		}
-		for venue, pct := range btcAlloc {
-			if v, ok := venueByName(venue); ok {
-				s.Wallets.Add(v.Name, v.BaseAsset, btc*pct/100)
+		if cryptoAlloc != nil {
+			for venue, pct := range cryptoAlloc {
+				if v, ok := venueByName(venue); ok {
+					s.Wallets.Add(v.Name, v.BaseAsset, btc*pct/100)
+				}
 			}
 		}
 	} else {
@@ -55,15 +63,26 @@ func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[stri
 			s.Wallets.Set(v.Name, v.BaseAsset, btc/2.0)
 		}
 	}
-	s.UsdAlloc = usdAlloc
-	s.BtcAlloc = btcAlloc
 
-	btcPrice := DefaultBTCPriceFallback
-	if book, ok := currentMarket.Get("Binance:BTC/USDT"); ok && book.Ask > 0 {
-		btcPrice = book.Ask
+	// Cripto mid (ETH/SOL…): el checklist del universo las pide fondeadas, no
+	// solo visibles. Se reparte el inventario total entre venues que cotizan
+	// ese base (Bitso no tiene ETH → no recibe ETH; el % se renormaliza).
+	cleanedInv := sanitizeAssetInventory(assetInv)
+	for asset, qty := range cleanedInv {
+		distributeCryptoAsset(s.Wallets, asset, qty, cryptoAlloc)
 	}
 
-	s.TotalWealth = usd + (btc * btcPrice)
+	s.UsdAlloc = usdAlloc
+	s.BtcAlloc = btcAlloc
+	s.AssetInventory = cleanedInv
+
+	btcPrice := assetPriceUSD("BTC")
+	wealth := usd + (btc * btcPrice)
+	for asset, qty := range cleanedInv {
+		wealth += qty * assetPriceUSD(asset)
+	}
+
+	s.TotalWealth = wealth
 	s.InitialWealth = s.TotalWealth // base del PnL = patrimonio al iniciar
 	s.TotalNetProfit = 0
 	s.Credit = CreditState{}
@@ -79,6 +98,81 @@ func initSession(s *ClientSession, usd, btc float64, usdAlloc, btcAlloc map[stri
 	s.PendingInjection = nil
 }
 
+// venuesHoldingAsset: casas que cotizan `asset` como base (tienen libro).
+func venuesHoldingAsset(asset string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, in := range Instruments {
+		if in.Base != asset || seen[in.Venue] {
+			continue
+		}
+		seen[in.Venue] = true
+		out = append(out, in.Venue)
+	}
+	for _, v := range Venues {
+		if v.BaseAsset == asset && !seen[v.Name] {
+			out = append(out, v.Name)
+		}
+	}
+	return out
+}
+
+// distributeCryptoAsset reparte `qty` de un activo entre los venues del alloc
+// que realmente lo cotizan. Si el alloc es nil, partes iguales entre holders.
+func distributeCryptoAsset(w Balances, asset string, qty float64, alloc map[string]float64) {
+	if w == nil || qty <= 0 || asset == "" || isCashAsset(Asset(asset)) {
+		return
+	}
+	holders := venuesHoldingAsset(asset)
+	if len(holders) == 0 {
+		return
+	}
+	weights := make(map[string]float64, len(holders))
+	sum := 0.0
+	if alloc != nil {
+		for _, v := range holders {
+			if pct := alloc[v]; pct > 0 {
+				weights[v] = pct
+				sum += pct
+			}
+		}
+	}
+	if sum <= 0 {
+		// Sin peso usable (alloc nil, o ninguna casa del alloc cotiza el activo):
+		// partes iguales entre holders.
+		eq := 100.0 / float64(len(holders))
+		for _, v := range holders {
+			weights[v] = eq
+		}
+		sum = 100
+	}
+	for v, pct := range weights {
+		w.Add(v, asset, qty*(pct/sum))
+	}
+}
+
+// sanitizeAssetInventory acepta solo criptos mid conocidos con cantidad finita > 0.
+// BTC y cash se ignoran (van por initial_btc / initial_usd).
+func sanitizeAssetInventory(inv map[string]float64) map[string]float64 {
+	if len(inv) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(inv))
+	for asset, qty := range inv {
+		if asset == "BTC" || isCashAsset(Asset(asset)) || !isKnownAsset(asset) {
+			continue
+		}
+		if math.IsNaN(qty) || math.IsInf(qty, 0) || qty <= 0 || qty > MaxInitialBTC {
+			continue
+		}
+		out[asset] = qty
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // --- Validación de entradas del cliente (Hallazgo #5) -----------------------------
 // El frontend ya valida, pero el backend NUNCA debe confiar en el cliente: un mensaje
 // malicioso o corrupto (negativos, NaN/Inf, liquidez gigante) no debe corromper el
@@ -88,9 +182,11 @@ func isFinitePositive(x float64) bool {
 	return !math.IsNaN(x) && !math.IsInf(x, 0) && x > 0
 }
 
-// validInitFunds acepta solo capital inicial finito, positivo y por debajo de topes sanos.
+// validInitFunds acepta capital inicial finito: cash > 0 y cripto >= 0 (el BTC
+// puede ser 0 si el inventario mid trae ETH/SOL; se valida en el handler).
 func validInitFunds(usd, btc float64) bool {
-	return isFinitePositive(usd) && isFinitePositive(btc) && usd <= MaxInitialUSD && btc <= MaxInitialBTC
+	return isFinitePositive(usd) && usd <= MaxInitialUSD &&
+		!math.IsNaN(btc) && !math.IsInf(btc, 0) && btc >= 0 && btc <= MaxInitialBTC
 }
 
 // validAllocation valida una distribución de capital por venue (modo experto del
@@ -302,6 +398,11 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 					sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Capital inicial inválido: usa montos positivos y razonables."})
 					continue
 				}
+				mids := sanitizeAssetInventory(msg.AssetInventory)
+				if msg.InitialBTC <= 0 && len(mids) == 0 {
+					sendEvent(session, ServerEvent{Type: "INIT_REJECTED", SessionID: session.ID, Message: "Capital inicial inválido: incluye BTC u otra cripto (ETH/SOL) con cantidad > 0."})
+					continue
+				}
 				// Distribución por venue (modo experto): opcional; si viene, se valida
 				// estricta. BTC sin distribución propia sigue a la de USD.
 				usdAlloc, btcAlloc := msg.UsdAllocation, msg.BtcAllocation
@@ -318,7 +419,7 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 						continue
 					}
 				}
-				initSession(session, msg.InitialUSD, msg.InitialBTC, usdAlloc, btcAlloc)
+				initSession(session, msg.InitialUSD, msg.InitialBTC, usdAlloc, btcAlloc, msg.AssetInventory)
 				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión inicializada", Params: &p})
@@ -361,7 +462,7 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 			case "reset_session":
 				// El reset conserva la DISTRIBUCIÓN elegida en el onboarding: el
 				// 40/40/20 de un experto no se degrada al 50/50 clásico.
-				initSession(session, session.InitialUSD, session.InitialBTC, session.UsdAlloc, session.BtcAlloc)
+				initSession(session, session.InitialUSD, session.InitialBTC, session.UsdAlloc, session.BtcAlloc, session.AssetInventory)
 				persistSessionAsync(session)
 				p := session.Params()
 				sendEvent(session, ServerEvent{Type: "state_update", SessionID: session.ID, Message: "Sesión reseteada", Params: &p})
@@ -375,8 +476,18 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 					continue
 				}
 				applied := sanitizeTradingParams(*msg.Params)
+				prev := session.Params()
+				cap := analyzeUniverse(applied)
+				if !cap.OK {
+					// No dejar al usuario sin mercado operable: se aplican fees/márgenes
+					// pero el universo inválido se rechaza (se conserva el anterior).
+					applied.EnabledVenues = prev.EnabledVenues
+					applied.EnabledAssets = prev.EnabledAssets
+					sendLog(session, "🛑 [UNIVERSO] "+cap.Reason+" Se conservó tu universo anterior; el resto de la estrategia sí se aplicó.")
+					sendEvent(session, ServerEvent{Type: "UNIVERSE_REJECTED", Message: cap.Reason})
+				}
 				session.SetParams(applied)
-				persistSessionAsync(session) // la estrategia del usuario sobrevive reinicios
+				persistSessionAsync(session)
 				log.Printf("🎛️ [PARAMS] Sesión %s: minNet=$%.2f maxOrden=%.4f BTC slip=%.1f bps riesgo=%.1fx",
 					session.ID, applied.MinNetProfitUSD, applied.MaxOrderSizeBTC, applied.SlippageRate*10000, applied.RiskMultiplier)
 				sendLog(session, fmt.Sprintf("🎛️ [ESTRATEGIA] Parámetros actualizados: margen mín. $%.2f | orden máx. %.4f BTC | slippage %.1f bps | riesgo crédito %.1fx",
@@ -394,23 +505,22 @@ func wsHandler(hub *Hub, engine *HFTEngine) http.HandlerFunc {
 				go engine.runDemoInjection(session, ex, spread, liq)
 
 			case "inject_omni":
-				// FASE 1: "Oportunidad normal" → arbitraje OMNIDIRECCIONAL. Inyecta
-				// y ejecuta un ciclo que atraviesa varios nodos del grafo del usuario
-				// (triangular intra-venue o espacial entre exchanges); el frontend
-				// anima la luz verde recorriendo el camino (ver omni.go).
+				// FASE 2: "Oportunidad normal" → arbitraje OMNIDIRECCIONAL DINÁMICO.
+				// Lee el universo activo, fabrica una ineficiencia como MarketTicks
+				// reales, el radar descubre el ciclo y lo ejecuta con fees/slippage
+				// del usuario; el frontend anima omni_executed (ver omni.go).
 				go engine.runOmniInjection(session)
 
 			case "inject_storm":
-				// FASE 2: "Evento poco común" → RÁFAGA DE VOLATILIDAD. Lanza varias
-				// goroutines que ejecutan mini-arbitrajes concurrentemente durante
-				// ~4 s; el frontend lo pinta como una tormenta de luces (ver storm.go).
+				// FASE 3: "Evento poco común" → RÁFAGA HFT. Micro-ineficiencias
+				// inyectadas como MarketTicks; workers concurrentes + planCycle
+				// real (fees/margen); frontend: storm_started/trade/ended.
 				go engine.runStormInjection(session)
 
 			case "inject_fake":
-				// FASE 3: "Precio falso / error" → ESCUDO DE ROBUSTEZ. Inyecta una
-				// oportunidad envenenada (spread irreal, timeout o divergencia), la
-				// RECHAZA sin tocar saldos y emite una alerta CIRCUIT_BREAKER que el
-				// frontend muestra como anuncio efímero — no luces verdes (ver circuit.go).
+				// "Precio falso / error" → ESCUDO DE ROBUSTEZ. Inyecta anomalía
+				// real (tick spike / FoK timeout / divergencia); el motor la
+				// RECHAZA sin tocar saldos y emite CIRCUIT_BREAKER (ver circuit.go).
 				go engine.runFakeInjection(session)
 
 			case "adjust_funds":

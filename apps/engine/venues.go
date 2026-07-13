@@ -47,11 +47,9 @@ var Venues = []Venue{
 }
 
 // classicPair son los DOS venues del modo clásico: el ejecutor del par BTC
-// (executeForSession), el reparto inicial 50/50, la línea de crédito y el
-// reequilibrio operan SOLO sobre ellos. Los demás venues del registro (Kraken…)
-// participan en el radar y en el autopiloto, pero no reciben capital automático:
-// sin esta distinción, agregar un venue inflaría el capital inicial (usd/2 por
-// venue) y diluiría el crédito entre exchanges que el par clásico nunca opera.
+// (executeForSession) y el reparto inicial 50/50 por defecto operan sobre ellos.
+// El reequilibrio global y el crédito agnóstico cubren TODOS los venues del
+// universo del usuario (ver rebalance.go).
 var classicPair = [2]string{"Binance", "Bitso"}
 
 // isClassicVenue informa si un venue pertenece al par clásico.

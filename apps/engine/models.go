@@ -92,6 +92,8 @@ const (
 	DefaultMaxDivergenceRatio = 1.20    // compuerta de cordura: rechaza si un precio supera al otro en >20 %
 	DefaultRiskMultiplier     = 1.0     // crédito: exigir ganancia > costo × multiplicador (1 = punto de equilibrio)
 	DefaultBTCPriceFallback   = 60000.0 // precio BTC de respaldo cuando aún no hay feed de Binance
+	DefaultETHPriceFallback   = 3000.0  // ETH de respaldo (onboarding / wealth si el feed aún no llegó)
+	DefaultSOLPriceFallback   = 150.0   // SOL de respaldo
 )
 
 // Límites de validación de entradas del cliente (defensa del backend: el frontend ya
@@ -297,11 +299,19 @@ type CreditState struct {
 	ExpiresAt             time.Time
 	TotalCostPaid         float64
 	ActivationCount       int
-	BorrowedUSD           map[string]float64 // por exchange: liquidez prestada temporal
+	// Borrowed es el préstamo agnóstico (venue → asset → qty): cash, BTC, ETH…
+	Borrowed Balances
+	// BorrowedUSD / BorrowedBTC: vistas de compatibilidad (wire plano + tests
+	// legacy). Se sincronizan desde Borrowed al activar; el repago usa Borrowed
+	// si existe y cae a estos mapas si no.
+	BorrowedUSD           map[string]float64
 	BorrowedBTC           map[string]float64
 	DepletedPending       bool
 	NetProfitAtActivation float64
 	LastCost              float64
+	// PendingCrypto: activos no-cash que bloquearon la última oportunidad
+	// (inyección dinámica de crédito). Vacío = solo cash + BTC de la línea.
+	PendingCrypto []string
 }
 
 // PendingInjection guarda una inyección del simulador ("Probar el bot") que se
@@ -346,6 +356,11 @@ type ClientSession struct {
 	UsdAlloc map[string]float64
 	BtcAlloc map[string]float64
 
+	// AssetInventory: cantidades TOTALES de cripto mid (ETH/SOL…) pedidas en el
+	// onboarding, antes del reparto por venue. BTC sigue en InitialBTC. Se
+	// reusa en reset_session para no perder el fondeo multi-activo.
+	AssetInventory map[string]float64
+
 	IsReplenishing           bool
 	ReplenishExpiresAt       time.Time
 	InsufficientFundsPending bool
@@ -373,7 +388,7 @@ type ClientSession struct {
 	// PausedUntil bloquea la operativa de la sesión hasta este instante; lo fija el circuit
 	// breaker cuando una orden Fill-or-Kill falla, para no reintentar contra un libro roto.
 	PausedUntil time.Time
-	// StormActive marca que una ráfaga de volatilidad (FASE 2, inject_storm) está en
+	// StormActive marca que una ráfaga HFT (FASE 3, inject_storm) está en
 	// curso: impide lanzar dos tormentas solapadas sobre la misma sesión. Bajo Mu.
 	StormActive bool
 }
@@ -509,6 +524,10 @@ type ClientMessage struct {
 	// a un experto jamás se le corrigen los números en silencio.
 	UsdAllocation map[string]float64 `json:"usd_allocation,omitempty"`
 	BtcAllocation map[string]float64 `json:"btc_allocation,omitempty"`
+	// AssetInventory acompaña a init_session: cantidades totales de cripto mid
+	// (ETH, SOL, …) a fondear además del BTC. Se reparte con btc_allocation
+	// (o usd_allocation) solo en venues que cotizan ese activo.
+	AssetInventory map[string]float64 `json:"asset_inventory,omitempty"`
 
 	// SessionID acompaña a resume_session: el token (UUID no enumerable) que el
 	// navegador guarda en localStorage para recuperar SU sesión persistida.
@@ -517,7 +536,7 @@ type ClientMessage struct {
 	Spread    float64 `json:"spread,omitempty"`
 	Liquidity float64 `json:"liquidity,omitempty"`
 	UseCredit bool    `json:"use_credit,omitempty"`
-	Currency  string  `json:"currency,omitempty"` // "USD" | "BTC" para depósito/retiro
+	Currency  string  `json:"currency,omitempty"` // activo: USD/USDT/BTC/ETH/SOL…
 	Amount    float64 `json:"amount,omitempty"`   // >0 deposita, <0 retira
 
 	// Params acompaña a la acción set_params: la UI envía el struct COMPLETO
@@ -557,8 +576,10 @@ type ServerEvent struct {
 	BorrowedBitsoUSD   float64 `json:"borrowed_bitso_usd,omitempty"`
 	BorrowedBinanceBTC float64 `json:"borrowed_binance_btc,omitempty"`
 	BorrowedBitsoBTC   float64 `json:"borrowed_bitso_btc,omitempty"`
-	LoanEarnings       float64 `json:"loan_earnings,omitempty"`
-	LoanCost           float64 `json:"loan_cost,omitempty"`
+	// BorrowedBalances: préstamo multi-asset completo (wallet_update / crédito).
+	BorrowedBalances Balances `json:"borrowed_balances,omitempty"`
+	LoanEarnings     float64  `json:"loan_earnings,omitempty"`
+	LoanCost         float64  `json:"loan_cost,omitempty"`
 
 	// Params viaja en state_update y PARAMS_UPDATED para que la UI siempre refleje
 	// los parámetros APLICADOS (tras clamps del backend), no los que pidió.
